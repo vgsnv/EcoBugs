@@ -10,7 +10,7 @@
 import { World } from '../src/world.ts';
 import { snapshot, restore } from '../src/serialize.ts';
 import { defaultGenesis, defaultConfig } from '../src/config.ts';
-import { RuleBrain } from '../src/brain.ts';
+import { NUM_INPUTS, NUM_OUTPUTS } from '../src/neat.ts';
 
 let failed = 0;
 const ok = (name: string, cond: boolean, detail = '') => {
@@ -54,13 +54,13 @@ console.log('\nСнимок сохраняет всё, что влияет на 
   ok('популяция восстановлена', r.creatures.length === w.creatures.length);
   ok('еда восстановлена', r.foodCount === w.foodCount);
   ok(
-    'состояние блуждания RuleBrain (wander) восстановлено',
-    (r.creatures[0].brain as RuleBrain).wanderX === (w.creatures[0].brain as RuleBrain).wanderX &&
-      (r.creatures[0].brain as RuleBrain).wanderY === (w.creatures[0].brain as RuleBrain).wanderY,
+    'NEAT-геном мозга сериализуется (узлы ≥ входы+выходы)',
+    snap.creatures[0].brain.nodes.length >= NUM_INPUTS + NUM_OUTPUTS &&
+      snap.creatures[0].brain.connections.length >= 1,
   );
   ok(
-    'заглушка brainGenome сериализуется (готовность к NEAT без миграции)',
-    snap.creatures[0].brain.nodes === 0 && snap.creatures[0].brain.connections === 0,
+    'счётчики NeatContext восстановлены',
+    r.neat.nextInnovation === w.neat.nextInnovation && r.neat.nextNodeId === w.neat.nextNodeId,
   );
 
   // Один следующий тик должен совпасть — доказывает, что PRNG-состояние тоже в снимке.

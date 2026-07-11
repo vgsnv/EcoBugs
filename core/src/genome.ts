@@ -7,6 +7,7 @@
  * ввести NEAT и половое размножение без переписывания ядра и сериализации.
  */
 import { PRNG } from './prng.ts';
+import { seedGenome, mutateBrain, type NeatGenome, type NeatContext } from './neat.ts';
 
 /**
  * Индексы генов тела. Фиксированная длина, плоский Float32Array.
@@ -36,31 +37,22 @@ export const GENE_BOUNDS: ReadonlyArray<readonly [number, number]> = [
   [0, 1],       // Hue
 ];
 
-/** Заглушка мозга-генома под будущий NEAT. Пустая в Фазе 0. */
-export interface BrainGenome {
-  // В NEAT-версии здесь появятся nodes[] и connections[] переменной длины.
-  // Сейчас — пусто, но поле существует, чтобы сериализация уже умела его писать.
-  readonly nodes: number;       // число узлов (0 в Ф0)
-  readonly connections: number; // число связей (0 в Ф0)
-}
+/** Геном мозга — NEAT-сеть переменной топологии (см. neat.ts). */
+export type BrainGenome = NeatGenome;
 
 export interface Genome {
   body: Float32Array;      // длина GENE_COUNT
-  brain: BrainGenome;
+  brain: BrainGenome;      // растущая NEAT-сеть
 }
 
-export function emptyBrainGenome(): BrainGenome {
-  return { nodes: 0, connections: 0 };
-}
-
-/** Случайный геном в пределах границ — для стартовой популяции. */
+/** Случайный геном: случайное тело + сид-мозг под поведение «плыви к еде». */
 export function randomGenome(rng: PRNG): Genome {
   const body = new Float32Array(GENE_COUNT);
   for (let i = 0; i < GENE_COUNT; i++) {
     const [lo, hi] = GENE_BOUNDS[i];
     body[i] = rng.range(lo, hi);
   }
-  return { body, brain: emptyBrainGenome() };
+  return { body, brain: seedGenome(rng) };
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -73,7 +65,7 @@ function clamp(v: number, lo: number, hi: number): number {
  * mutationRate — мета-ген: мутирует сам себя, поэтому скорость мутации
  * тоже под отбором.
  */
-export function mutate(parent: Genome, rng: PRNG): Genome {
+export function mutate(parent: Genome, rng: PRNG, ctx: NeatContext): Genome {
   const rate = parent.body[Gene.MutationRate];
   const body = new Float32Array(GENE_COUNT);
   for (let i = 0; i < GENE_COUNT; i++) {
@@ -86,5 +78,7 @@ export function mutate(parent: Genome, rng: PRNG): Genome {
     }
     body[i] = clamp(v, lo, hi);
   }
-  return { body, brain: emptyBrainGenome() };
+  // Мозг мутирует отдельно: возмущение весов + структурные мутации (связь/узел).
+  const brain = mutateBrain(parent.brain, rate, rng, ctx);
+  return { body, brain };
 }

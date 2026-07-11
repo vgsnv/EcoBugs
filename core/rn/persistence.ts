@@ -35,7 +35,13 @@ export function loadWorld(): SavedWorld | null {
   const savedAt = storage.getNumber(KEY_SAVED_AT);
   if (!raw || !savedAt) return null;
   try {
-    const world = restore(JSON.parse(raw));
+    const parsed = JSON.parse(raw);
+    // Несовместимая версия формата (напр. дониетовский снимок) — начинаем заново.
+    if (parsed?.version !== 2) {
+      clearWorld();
+      return null;
+    }
+    const world = restore(parsed);
     return { world, savedAt };
   } catch {
     // Повреждённый или несовместимый снимок — начинаем мир заново.
