@@ -212,6 +212,35 @@ function tryAddNode(g: NeatGenome, rng: PRNG, ctx: NeatContext): void {
   g.connections.sort((x, y) => x.innovation - y.innovation);
 }
 
+/**
+ * Кроссовер мозгов (§4б). Здесь innovation-номера наконец нужны: гены с общей
+ * инновацией — «те же самые», выравниваются и вес берётся случайно от одного из
+ * родителей. Расходящиеся/избыточные гены (есть только у одного) берём от инициатора
+ * `a` — эмерджентный отбор без функции приспособленности не даёт критерия «от кого
+ * брать лишнее», поэтому топология наследуется от инициатора (валидна и ацикличка),
+ * а половое перемешивание живёт в весах общих генов.
+ */
+export function crossoverBrain(a: NeatGenome, b: NeatGenome, rng: PRNG): NeatGenome {
+  const bByInnov = new Map<number, ConnGene>();
+  for (const c of b.connections) bByInnov.set(c.innovation, c);
+
+  const nodes = a.nodes.map((n): NodeGene => ({ id: n.id, type: n.type }));
+  const connections = a.connections.map((c): ConnGene => {
+    const match = bByInnov.get(c.innovation);
+    const from = match && rng.next() < 0.5 ? match : c;
+    // Отключённый ген у любого родителя иногда остаётся отключённым.
+    const enabled = c.enabled && (match ? match.enabled : true) ? true : rng.next() < 0.5;
+    return {
+      inNode: c.inNode,
+      outNode: c.outNode,
+      weight: from.weight,
+      enabled,
+      innovation: c.innovation,
+    };
+  });
+  return { nodes, connections };
+}
+
 function tanh(x: number): number {
   // Math.tanh есть в среде, но оставляем явную устойчивую форму на всякий случай.
   if (x > 20) return 1;

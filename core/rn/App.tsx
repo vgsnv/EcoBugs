@@ -188,6 +188,14 @@ function Inspector({ data, onClose }: { data: Inspected; onClose: () => void }) 
       <Row k="Метаболизм" v={data.metabolism.toFixed(2)} />
       <Row k="Порог деления" v={data.reproThreshold.toFixed(0)} />
       <Row k="Скорость мутаций" v={data.mutationRate.toFixed(3)} />
+      <Row
+        k="Стратегия"
+        v={
+          data.sexualTendency > 0.5
+            ? `половое ${Math.round(data.sexualTendency * 100)}%`
+            : `деление ${Math.round((1 - data.sexualTendency) * 100)}%`
+        }
+      />
       <Row k="Энергия" v={data.energy.toFixed(1)} />
       <Row k="Возраст" v={String(data.age)} />
     </Pressable>

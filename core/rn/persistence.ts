@@ -37,7 +37,7 @@ export function loadWorld(): SavedWorld | null {
   try {
     const parsed = JSON.parse(raw);
     // Несовместимая версия формата (напр. дониетовский снимок) — начинаем заново.
-    if (parsed?.version !== 2) {
+    if (parsed?.version !== 3) {
       clearWorld();
       return null;
     }

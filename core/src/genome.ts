@@ -7,7 +7,7 @@
  * ввести NEAT и половое размножение без переписывания ядра и сериализации.
  */
 import { PRNG } from './prng.ts';
-import { seedGenome, mutateBrain, type NeatGenome, type NeatContext } from './neat.ts';
+import { seedGenome, mutateBrain, crossoverBrain, type NeatGenome, type NeatContext } from './neat.ts';
 
 /**
  * Индексы генов тела. Фиксированная длина, плоский Float32Array.
@@ -22,9 +22,10 @@ export const Gene = {
   ReproThreshold: 4,// порог энергии для деления
   MutationRate: 5,  // мета-ген: собственная вероятность мутации гена
   Hue: 6,           // окраска [0,1) — для визуализации, на экономику не влияет
+  SexualTendency: 7,// 0 = всегда деление, 1 = всегда партнёр, между — факультативно
 } as const;
 
-export const GENE_COUNT = 7;
+export const GENE_COUNT = 8;
 
 /** Границы генов. Мутация всегда клампится сюда — иначе экономика улетает. */
 export const GENE_BOUNDS: ReadonlyArray<readonly [number, number]> = [
@@ -35,6 +36,7 @@ export const GENE_BOUNDS: ReadonlyArray<readonly [number, number]> = [
   [60, 200],    // ReproThreshold
   [0.02, 0.5],  // MutationRate
   [0, 1],       // Hue
+  [0, 1],       // SexualTendency
 ];
 
 /** Геном мозга — NEAT-сеть переменной топологии (см. neat.ts). */
@@ -81,4 +83,18 @@ export function mutate(parent: Genome, rng: PRNG, ctx: NeatContext): Genome {
   // Мозг мутирует отдельно: возмущение весов + структурные мутации (связь/узел).
   const brain = mutateBrain(parent.brain, rate, rng, ctx);
   return { body, brain };
+}
+
+/**
+ * Кроссовер двух геномов (половое размножение, §4б). Возвращает НОВЫЙ геном:
+ *   - тело: каждый ген наследуется случайно от одного из родителей;
+ *   - мозг: выравнивание по innovation-номерам (см. neat.crossoverBrain).
+ * Мутация применяется ОТДЕЛЬНО после кроссовера (см. world.ts).
+ */
+export function crossover(a: Genome, b: Genome, rng: PRNG): Genome {
+  const body = new Float32Array(GENE_COUNT);
+  for (let i = 0; i < GENE_COUNT; i++) {
+    body[i] = rng.next() < 0.5 ? a.body[i] : b.body[i];
+  }
+  return { body, brain: crossoverBrain(a.brain, b.brain, rng) };
 }

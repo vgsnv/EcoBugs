@@ -7,13 +7,13 @@
 export { World } from './world.ts';
 export type { Creature, Stats } from './world.ts';
 
-export { Gene, GENE_COUNT, GENE_BOUNDS, randomGenome, mutate } from './genome.ts';
+export { Gene, GENE_COUNT, GENE_BOUNDS, randomGenome, mutate, crossover } from './genome.ts';
 export type { Genome, BrainGenome } from './genome.ts';
 
 export { RuleBrain, NeatBrain } from './brain.ts';
 export type { Brain, Sensors, Decision } from './brain.ts';
 
-export { NeatContext, Network, seedGenome, mutateBrain, brainComplexity, NUM_INPUTS, NUM_OUTPUTS } from './neat.ts';
+export { NeatContext, Network, seedGenome, mutateBrain, crossoverBrain, brainComplexity, NUM_INPUTS, NUM_OUTPUTS } from './neat.ts';
 export type { NeatGenome, NodeGene, ConnGene, NodeType } from './neat.ts';
 
 export { PRNG } from './prng.ts';

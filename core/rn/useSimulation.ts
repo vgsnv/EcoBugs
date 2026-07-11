@@ -39,6 +39,7 @@ export interface Inspected {
   reproThreshold: number;
   mutationRate: number;
   hue: number;
+  sexualTendency: number;
   energy: number;
   age: number;
 }
@@ -283,6 +284,7 @@ export function useSimulation(): SimHandle {
       reproThreshold: g[Gene.ReproThreshold],
       mutationRate: g[Gene.MutationRate],
       hue: g[Gene.Hue],
+      sexualTendency: g[Gene.SexualTendency],
       energy: c.energy,
       age: c.age,
     };

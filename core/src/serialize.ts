@@ -27,7 +27,7 @@ export interface CreatureSnapshot {
 }
 
 export interface WorldSnapshot {
-  version: 2;
+  version: 3;
   genesis: WorldGenesis;
   config: WorldConfig;
   tick: number;
@@ -67,7 +67,7 @@ export function snapshot(w: World): WorldSnapshot {
   for (let i = 0; i < w.foodCount; i++) food.push({ x: w.foodX[i], y: w.foodY[i] });
 
   return {
-    version: 2,
+    version: 3,
     genesis: w.genesis,
     config: { ...w.config },
     tick: w.tick,
