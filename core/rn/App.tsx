@@ -65,6 +65,7 @@ function Aquarium() {
           foodX={sim.foodX}
           foodY={sim.foodY}
           foodCount={sim.foodCount}
+          trail={sim.trail}
           clock={sim.clock}
           sunlight={sun}
           dayPhase={(Math.sin((sim.stats.tick * 2 * Math.PI) / DAY_TICKS) + 1) / 2}

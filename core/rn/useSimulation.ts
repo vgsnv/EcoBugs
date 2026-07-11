@@ -20,6 +20,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { AppState } from 'react-native';
 import { useSharedValue, type SharedValue } from 'react-native-reanimated';
+import { Skia } from '@shopify/react-native-skia';
+import type { SkImage, SkSurface, SkPaint, SkColor } from '@shopify/react-native-skia';
 import { World, SimClock, defaultGenesis, defaultConfig, Gene } from '../src/index.ts';
 import type { WorldConfig } from '../src/index.ts';
 import { saveWorld, loadWorld, clearWorld } from './persistence.ts';
@@ -31,6 +33,27 @@ const TICKS_PER_SEC = 30; // «мировое время»: 1 реальная �
 const CATCHUP_CAP_TICKS = 9000; // предел досчитываемого простоя (~5 мин мира) — рычаг баланса
 const CATCHUP_CHUNK = 100; // тиков за кадр во время догона (плавность time-lapse)
 const EVENT_COOLDOWN = 10; // не чаще 1 события на ~2.5 с (обновления статы идут ~4/с)
+const TRAIL_RES = 512; // разрешение offscreen-буфера следов (масштабируется на экран)
+const TRAIL_UPDATE_MS = 33; // обновляем следы ~30 раз/с
+const HUE_LUT = 64; // размер таблицы цветов по гену hue (без аллокаций в цикле)
+
+/** Таблица цветов hue→SkColor (HSV S≈0.85, V=1) — строится один раз. */
+function buildHueLUT(): SkColor[] {
+  const out: SkColor[] = [];
+  for (let i = 0; i < HUE_LUT; i++) {
+    const h = (i / HUE_LUT) * 6;
+    const c = 0.85;
+    const x = c * (1 - Math.abs((h % 2) - 1));
+    const m = 0.15;
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    if (h < 1) { r = c; g = x; } else if (h < 2) { r = x; g = c; } else if (h < 3) { g = c; b = x; }
+    else if (h < 4) { g = x; b = c; } else if (h < 5) { r = x; b = c; } else { r = c; b = x; }
+    out.push(Skia.Color(`rgb(${((r + m) * 255) | 0}, ${((g + m) * 255) | 0}, ${((b + m) * 255) | 0})`));
+  }
+  return out;
+}
 
 /** Нарративное событие-«эпоха» — драма мира словами (группа 2: вовлечённость). */
 export interface NarrativeEvent {
@@ -92,6 +115,7 @@ export interface SimHandle {
   foodX: SharedValue<Float32Array>;
   foodY: SharedValue<Float32Array>;
   foodCount: SharedValue<number>;
+  trail: SharedValue<SkImage | null>;
   clock: SharedValue<number>;
   worldSize: number;
   setSunlight: (v: number) => void;
@@ -161,7 +185,15 @@ export function useSimulation(): SimHandle {
   const foodX = useSharedValue<Float32Array>(new Float32Array(FOOD_CAP));
   const foodY = useSharedValue<Float32Array>(new Float32Array(FOOD_CAP));
   const foodCount = useSharedValue(0);
+  const trail = useSharedValue<SkImage | null>(null);
   const clock = useSharedValue(0);
+
+  // Offscreen-буфер следов движения + переиспользуемые кисти (рисуем на JS-потоке,
+  // читая worldRef.creatures напрямую — SharedValue-буферы для этого не нужны).
+  const surfaceRef = useRef<SkSurface | null | undefined>(undefined);
+  const paintsRef = useRef<{ fade: SkPaint; dot: SkPaint; birth: SkPaint; death: SkPaint } | null>(null);
+  const hueLUTRef = useRef<SkColor[] | null>(null);
+  const trailAccum = useRef(0);
 
   const [stats, setStats] = useState<SimStats>({
     population: 0,
@@ -213,6 +245,67 @@ export function useSimulation(): SimHandle {
 
     clock.value = frameRef.current++;
   }, [posX, posY, radius, hue, count, foodX, foodY, foodCount, clock]);
+
+  /**
+   * Следы движения + вспышки рождения/смерти в offscreen-буфер (группа 1, 2-я волна).
+   * Каждый кадр: затемняем весь буфер (следы гаснут) → рисуем существ точками (шлейф) →
+   * яркие вспышки на рождениях и красные на смертях (гаснут вместе со следом).
+   * Всё на JS-потоке из worldRef напрямую. Готовый кадр отдаём в trail (SkImage).
+   */
+  const renderTrails = useCallback(() => {
+    // Ленивая инициализация буфера/кистей/таблицы.
+    if (surfaceRef.current === undefined) {
+      // CPU-растровая поверхность (Make), а не GPU (MakeOffscreen): создаётся и
+      // снимается с JS-потока без GPU-контекста, который тут недоступен.
+      surfaceRef.current = Skia.Surface.Make(TRAIL_RES, TRAIL_RES) ?? null;
+      const mk = (color: string) => {
+        const p = Skia.Paint();
+        p.setColor(Skia.Color(color));
+        p.setAntiAlias(true);
+        return p;
+      };
+      paintsRef.current = {
+        fade: mk('rgba(4,12,18,0.12)'), // затемнение → скорость угасания следа (меньше = длиннее хвост)
+        dot: mk('rgb(255,255,255)'),
+        birth: mk('rgba(220,255,240,0.95)'),
+        death: mk('rgba(255,90,90,0.9)'),
+      };
+      hueLUTRef.current = buildHueLUT();
+    }
+    const surface = surfaceRef.current;
+    const paints = paintsRef.current;
+    const lut = hueLUTRef.current;
+    if (!surface || !paints || !lut) return;
+
+    const w = worldRef.current!;
+    const cv = surface.getCanvas();
+    const ts = TRAIL_RES / w.genesis.width;
+
+    // 1. Угасание прошлого кадра.
+    cv.drawRect(Skia.XYWHRect(0, 0, TRAIL_RES, TRAIL_RES), paints.fade);
+
+    // 2. Существа — точки цвета гена (шлейф накапливается за счёт неполного угасания).
+    const cs = w.creatures;
+    const dot = paints.dot;
+    for (let i = 0; i < cs.length; i++) {
+      const c = cs[i];
+      dot.setColor(lut[Math.min(HUE_LUT - 1, (c.genome.body[Gene.Hue] * HUE_LUT) | 0)]);
+      cv.drawCircle(c.x * ts, c.y * ts, 1.7, dot);
+    }
+
+    // 3. Вспышки рождений (ярче/крупнее) и смертей (красные).
+    const bm = w.birthMarks;
+    for (let k = 0; k + 2 < bm.length; k += 3) {
+      cv.drawCircle(bm[k] * ts, bm[k + 1] * ts, 3.2, paints.birth);
+    }
+    const dm = w.deathMarks;
+    for (let k = 0; k + 1 < dm.length; k += 2) {
+      cv.drawCircle(dm[k] * ts, dm[k + 1] * ts, 2.6, paints.death);
+    }
+
+    surface.flush();
+    trail.value = surface.makeImageSnapshot();
+  }, [trail]);
 
   const publishStats = useCallback(() => {
     const w = worldRef.current!;
@@ -273,6 +366,12 @@ export function useSimulation(): SimHandle {
       if (playingRef.current) clockRef.current.advance(w, dt);
       pushToBuffers();
 
+      trailAccum.current += dt;
+      if (trailAccum.current >= TRAIL_UPDATE_MS) {
+        trailAccum.current = 0;
+        renderTrails();
+      }
+
       statAccum.current += dt;
       if (statAccum.current > 250) {
         statAccum.current = 0;
@@ -284,7 +383,7 @@ export function useSimulation(): SimHandle {
     return () => {
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
-  }, [pushToBuffers, publishStats]);
+  }, [pushToBuffers, publishStats, renderTrails]);
 
   // Сохранение при уходе в фон: снимок + метка реального времени.
   useEffect(() => {
@@ -350,6 +449,7 @@ export function useSimulation(): SimHandle {
     foodX,
     foodY,
     foodCount,
+    trail,
     clock,
     worldSize: worldRef.current.genesis.width,
     setSunlight: (v) => setParam('sunlight', v),
@@ -368,6 +468,12 @@ export function useSimulation(): SimHandle {
       setResumeSummary(null);
       setEvent(null);
       narr.current.started = false; // сброс рекордов нарратива для нового мира
+      // Стереть следы прошлого мира.
+      if (surfaceRef.current) {
+        surfaceRef.current.getCanvas().clear(Skia.Color('rgba(0,0,0,0)'));
+        surfaceRef.current.flush();
+        trail.value = surfaceRef.current.makeImageSnapshot();
+      }
       worldRef.current = new World(defaultGenesis(newSeed()), defaultConfig());
       historyRef.current = [];
     },

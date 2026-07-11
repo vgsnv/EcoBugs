@@ -58,6 +58,12 @@ export class World {
   foodY: Float32Array;
   foodCount = 0;
 
+  // Метки рождений/смертей ЭТОГО тика — только для визуальных вспышек в рендере.
+  // Чистое наблюдение: не влияют на симуляцию, не сериализуются, не в хэше.
+  // Плоские массивы: birthMarks = [x,y,hue, ...], deathMarks = [x,y, ...].
+  birthMarks: number[] = [];
+  deathMarks: number[] = [];
+
   tick = 0;
   private timeline: TimelineEvent[] = [];
 
@@ -156,6 +162,11 @@ export class World {
     const cfg = this.config;
     const { width, height } = this.genesis;
 
+    // Метки этого тика (только для рендер-вспышек). Очищаются в начале каждого тика,
+    // поэтому массивы ограничены одним тиком — headless-прогоны их не раздувают.
+    this.birthMarks.length = 0;
+    this.deathMarks.length = 0;
+
     // 1. Спавн еды по «солнцу». Дробную часть добираем вероятностно.
     let spawn = cfg.sunlight;
     while (spawn >= 1) {
@@ -230,6 +241,7 @@ export class World {
 
       // Смерть.
       if (c.energy <= 0) {
+        this.deathMarks.push(c.x, c.y);
         continue; // не переносим в живые
       }
 
@@ -245,9 +257,12 @@ export class World {
           const childEnergy = c.energy * 0.5;
           c.energy -= childEnergy;
           const childGenome = mutate(c.genome, this.rng, this.neat);
+          const nx = this.wrap(c.x + this.rng.range(-2, 2), width);
+          const ny = this.wrap(c.y + this.rng.range(-2, 2), height);
+          this.birthMarks.push(nx, ny, childGenome.body[Gene.Hue]);
           newborns.push({
-            x: this.wrap(c.x + this.rng.range(-2, 2), width),
-            y: this.wrap(c.y + this.rng.range(-2, 2), height),
+            x: nx,
+            y: ny,
             energy: childEnergy,
             age: 0,
             genome: childGenome,
@@ -308,9 +323,12 @@ export class World {
       const bGive = b.energy * 0.5;
       a.energy -= aGive;
       b.energy -= bGive;
+      const nx = this.wrap(a.x + this.rng.range(-2, 2), width);
+      const ny = this.wrap(a.y + this.rng.range(-2, 2), height);
+      this.birthMarks.push(nx, ny, childGenome.body[Gene.Hue]);
       newborns.push({
-        x: this.wrap(a.x + this.rng.range(-2, 2), width),
-        y: this.wrap(a.y + this.rng.range(-2, 2), height),
+        x: nx,
+        y: ny,
         energy: aGive + bGive,
         age: 0,
         genome: childGenome,

@@ -24,11 +24,13 @@ import {
   Circle,
   Rect,
   Path,
+  Image,
   LinearGradient,
   RadialGradient,
   Skia,
   vec,
 } from '@shopify/react-native-skia';
+import type { SkImage } from '@shopify/react-native-skia';
 import { type SharedValue } from 'react-native-reanimated';
 
 interface Props {
@@ -42,6 +44,7 @@ interface Props {
   foodX: SharedValue<Float32Array>;
   foodY: SharedValue<Float32Array>;
   foodCount: SharedValue<number>;
+  trail: SharedValue<SkImage | null>;
   clock: SharedValue<number>;
   sunlight: number; // 0..18 — яркость освещения
   dayPhase: number; // 0..1 — фаза суток (0/1 ночь, 0.5 день)
@@ -77,6 +80,7 @@ export function AquariumCanvas({
   foodX,
   foodY,
   foodCount,
+  trail,
   clock,
   sunlight,
   dayPhase,
@@ -223,7 +227,10 @@ export function AquariumCanvas({
         </Group>
       )}
 
-      {/* 3. Планктон */}
+      {/* 3. Следы движения + вспышки рождения/смерти (offscreen-буфер, аддитивно). */}
+      <Image image={trail} x={0} y={0} width={viewSize} height={viewSize} fit="fill" blendMode="plus" />
+
+      {/* 4. Планктон */}
       {plankton && <Atlas image={plankton} sprites={foodSprites} transforms={foodTransforms} />}
 
       {/* 4. Рой существ */}
