@@ -37,6 +37,7 @@ export interface Stats {
   meanEnergy: number;
   meanSexualTendency: number; // средняя склонность к половому размножению (0..1)
   sexualShare: number;        // доля особей с tendency > 0.5
+  maxBrainNodes: number;      // размер самой сложной сети (для нарратива «новый вид»)
 }
 
 function smoothstep(t: number): number {
@@ -321,7 +322,7 @@ export class World {
   /** Снимок статистики (для тестов и графиков). */
   stats(): Stats {
     const n = this.creatures.length;
-    let sSize = 0, sSpeed = 0, sVision = 0, sRepro = 0, sMut = 0, sEnergy = 0, sSex = 0, sexCount = 0;
+    let sSize = 0, sSpeed = 0, sVision = 0, sRepro = 0, sMut = 0, sEnergy = 0, sSex = 0, sexCount = 0, maxNodes = 0;
     for (const c of this.creatures) {
       sSize += c.genome.body[Gene.Size];
       sSpeed += c.genome.body[Gene.Speed];
@@ -332,6 +333,8 @@ export class World {
       const sex = c.genome.body[Gene.SexualTendency];
       sSex += sex;
       if (sex > 0.5) sexCount++;
+      const nodes = c.genome.brain.nodes.length;
+      if (nodes > maxNodes) maxNodes = nodes;
     }
     const d = n || 1;
     return {
@@ -346,6 +349,7 @@ export class World {
       meanEnergy: sEnergy / d,
       meanSexualTendency: sSex / d,
       sexualShare: sexCount / d,
+      maxBrainNodes: maxNodes,
     };
   }
 

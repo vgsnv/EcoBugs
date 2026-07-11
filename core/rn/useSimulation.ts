@@ -25,10 +25,19 @@ import type { WorldConfig } from '../src/index.ts';
 import { saveWorld, loadWorld, clearWorld } from './persistence.ts';
 
 const CAP = 3000; // потолок существ в буфере рендера
+const FOOD_CAP = 1200; // потолок планктона в буфере (= genesis.maxFood)
 const HISTORY = 120; // длина истории популяции для спарклайна
 const TICKS_PER_SEC = 30; // «мировое время»: 1 реальная секунда паузы = 30 тиков
 const CATCHUP_CAP_TICKS = 9000; // предел досчитываемого простоя (~5 мин мира) — рычаг баланса
 const CATCHUP_CHUNK = 100; // тиков за кадр во время догона (плавность time-lapse)
+const EVENT_COOLDOWN = 10; // не чаще 1 события на ~2.5 с (обновления статы идут ~4/с)
+
+/** Нарративное событие-«эпоха» — драма мира словами (группа 2: вовлечённость). */
+export interface NarrativeEvent {
+  id: number;
+  text: string;
+  tone: 'good' | 'bad' | 'neutral';
+}
 
 /** Снимок особи для инспектора (по тапу). */
 export interface Inspected {
@@ -50,6 +59,8 @@ export interface SimStats {
   meanSize: number;
   meanSpeed: number;
   food: number;
+  sexualShare: number;
+  maxBrainNodes: number;
   history: number[];
 }
 
@@ -78,6 +89,9 @@ export interface SimHandle {
   radius: SharedValue<Float32Array>;
   hue: SharedValue<Float32Array>;
   count: SharedValue<number>;
+  foodX: SharedValue<Float32Array>;
+  foodY: SharedValue<Float32Array>;
+  foodCount: SharedValue<number>;
   clock: SharedValue<number>;
   worldSize: number;
   setSunlight: (v: number) => void;
@@ -87,6 +101,7 @@ export interface SimHandle {
   togglePlay: () => void;
   inspectAt: (wx: number, wy: number) => Inspected | null;
   stats: SimStats;
+  event: NarrativeEvent | null;
   catchingUp: boolean;
   catchupPct: number;
   resumeSummary: ResumeSummary | null;
@@ -103,6 +118,17 @@ export function useSimulation(): SimHandle {
   const frameRef = useRef(0);
   const historyRef = useRef<number[]>([]);
   const statAccum = useRef(0);
+  // Состояние детектора нарративных событий (рекорды и предыдущие значения).
+  const narr = useRef({
+    prevPop: 0,
+    refPop: 0, // популяция на момент последнего объявленного демо-события
+    recordSize: 0,
+    recordNodes: 0,
+    sexualMajority: false,
+    cooldown: 0,
+    nextId: 1,
+    started: false,
+  });
 
   // Ленивая инициализация мира: сначала пробуем восстановить сохранённый.
   if (worldRef.current === null) {
@@ -132,6 +158,9 @@ export function useSimulation(): SimHandle {
   const radius = useSharedValue<Float32Array>(new Float32Array(CAP));
   const hue = useSharedValue<Float32Array>(new Float32Array(CAP));
   const count = useSharedValue(0);
+  const foodX = useSharedValue<Float32Array>(new Float32Array(FOOD_CAP));
+  const foodY = useSharedValue<Float32Array>(new Float32Array(FOOD_CAP));
+  const foodCount = useSharedValue(0);
   const clock = useSharedValue(0);
 
   const [stats, setStats] = useState<SimStats>({
@@ -140,8 +169,11 @@ export function useSimulation(): SimHandle {
     meanSize: 0,
     meanSpeed: 0,
     food: 0,
+    sexualShare: 0,
+    maxBrainNodes: 0,
     history: [],
   });
+  const [event, setEvent] = useState<NarrativeEvent | null>(null);
   const [catchingUp, setCatchingUp] = useState<boolean>(() => catchupRef.current !== null);
   const [catchupPct, setCatchupPct] = useState(0);
   const [resumeSummary, setResumeSummary] = useState<ResumeSummary | null>(null);
@@ -166,30 +198,42 @@ export function useSimulation(): SimHandle {
     radius.value = br;
     hue.value = bh;
     count.value = n;
+
+    // Планктон (еда) — дрейфующие частицы фона.
+    const fn = Math.min(w.foodCount, FOOD_CAP);
+    const fx = foodX.value,
+      fy = foodY.value;
+    for (let i = 0; i < fn; i++) {
+      fx[i] = w.foodX[i];
+      fy[i] = w.foodY[i];
+    }
+    foodX.value = fx;
+    foodY.value = fy;
+    foodCount.value = fn;
+
     clock.value = frameRef.current++;
-  }, [posX, posY, radius, hue, count, clock]);
+  }, [posX, posY, radius, hue, count, foodX, foodY, foodCount, clock]);
 
   const publishStats = useCallback(() => {
     const w = worldRef.current!;
-    const cs = w.creatures;
-    const n = cs.length || 1;
-    let s = 0;
-    let sp = 0;
-    for (const c of cs) {
-      s += c.genome.body[Gene.Size];
-      sp += c.genome.body[Gene.Speed];
-    }
+    const st = w.stats();
     const hist = historyRef.current;
-    hist.push(cs.length);
+    hist.push(st.population);
     if (hist.length > HISTORY) hist.shift();
     setStats({
-      population: cs.length,
-      tick: w.tick,
-      meanSize: s / n,
-      meanSpeed: sp / n,
-      food: w.foodCount,
+      population: st.population,
+      tick: st.tick,
+      meanSize: st.meanSize,
+      meanSpeed: st.meanSpeed,
+      food: st.foodCount,
+      sexualShare: st.sexualShare,
+      maxBrainNodes: st.maxBrainNodes,
       history: hist.slice(),
     });
+
+    // Нарратив: детект заметных изменений → всплывающая «эпоха».
+    const ev = detectEvent(st, narr.current);
+    if (ev) setEvent(ev);
   }, []);
 
   useEffect(() => {
@@ -290,12 +334,22 @@ export function useSimulation(): SimHandle {
     };
   }, []);
 
+  // Нарративное событие живёт ~3.5 с, затем гаснет.
+  useEffect(() => {
+    if (!event) return;
+    const id = setTimeout(() => setEvent(null), 3500);
+    return () => clearTimeout(id);
+  }, [event]);
+
   return {
     posX,
     posY,
     radius,
     hue,
     count,
+    foodX,
+    foodY,
+    foodCount,
     clock,
     worldSize: worldRef.current.genesis.width,
     setSunlight: (v) => setParam('sunlight', v),
@@ -312,6 +366,8 @@ export function useSimulation(): SimHandle {
       catchupRef.current = null;
       setCatchingUp(false);
       setResumeSummary(null);
+      setEvent(null);
+      narr.current.started = false; // сброс рекордов нарратива для нового мира
       worldRef.current = new World(defaultGenesis(newSeed()), defaultConfig());
       historyRef.current = [];
     },
@@ -320,11 +376,80 @@ export function useSimulation(): SimHandle {
     },
     inspectAt,
     stats,
+    event,
     catchingUp,
     catchupPct,
     resumeSummary,
     dismissSummary: () => setResumeSummary(null),
   };
+}
+
+type NarrState = {
+  prevPop: number;
+  refPop: number;
+  recordSize: number;
+  recordNodes: number;
+  sexualMajority: boolean;
+  cooldown: number;
+  nextId: number;
+  started: boolean;
+};
+
+/**
+ * Детектор нарративных событий. Смотрит на статистику мира и объявляет драму:
+ * бумы, крахи, край вымирания, рекорды размера, рост сложности мозга, смену
+ * доминирующей стратегии. Приоритет от «плохого-срочного» к «интересному».
+ * Не эмитит чаще EVENT_COOLDOWN обновлений (кроме мгновенного вымирания).
+ */
+function detectEvent(
+  st: {
+    population: number;
+    meanSize: number;
+    maxBrainNodes: number;
+    sexualShare: number;
+  },
+  n: NarrState,
+): NarrativeEvent | null {
+  const pop = st.population;
+  if (!n.started) {
+    n.started = true;
+    n.prevPop = pop;
+    n.refPop = pop;
+    n.recordSize = st.meanSize;
+    n.recordNodes = st.maxBrainNodes;
+    n.sexualMajority = st.sexualShare > 0.5;
+    return null;
+  }
+  if (n.cooldown > 0) n.cooldown--;
+
+  const mk = (text: string, tone: NarrativeEvent['tone']): NarrativeEvent => {
+    n.cooldown = EVENT_COOLDOWN;
+    n.refPop = pop;
+    return { id: n.nextId++, text, tone };
+  };
+
+  let ev: NarrativeEvent | null = null;
+  if (pop === 0 && n.prevPop > 0) {
+    ev = mk('Вымирание', 'bad');
+  } else if (n.cooldown === 0) {
+    if (pop > 0 && pop <= 20 && pop < n.prevPop) ev = mk(`На грани вымирания: ${pop}`, 'bad');
+    else if (n.refPop >= 30 && pop <= n.refPop * 0.5) ev = mk('Популяция обрушилась', 'bad');
+    else if (n.refPop >= 30 && pop >= n.refPop * 1.7) ev = mk('Демографический взрыв', 'good');
+    else if (st.maxBrainNodes > n.recordNodes) ev = mk(`Новый вид: мозг из ${st.maxBrainNodes} узлов`, 'good');
+    else if (st.meanSize > n.recordSize + 0.25) ev = mk(`Эра гигантов: Ø размер ${st.meanSize.toFixed(1)}`, 'neutral');
+    else {
+      const maj = st.sexualShare > 0.5;
+      if (maj !== n.sexualMajority && pop > 30) {
+        ev = mk(maj ? 'Верх взяло половое размножение' : 'Верх взяло деление', 'neutral');
+      }
+    }
+  }
+
+  if (st.maxBrainNodes > n.recordNodes) n.recordNodes = st.maxBrainNodes;
+  if (st.meanSize > n.recordSize) n.recordSize = st.meanSize;
+  n.sexualMajority = st.sexualShare > 0.5;
+  n.prevPop = pop;
+  return ev;
 }
 
 /** Сид для нового мира. Math.random() допустим ЗДЕСЬ (rn-слой, не ядро). */
