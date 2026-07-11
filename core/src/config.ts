@@ -4,10 +4,11 @@
  * Не крути наугад: экономика энергии хрупкая, балансировка — самая дорогая
  * часть проекта (см. PLAN.md §7, Фаза 0).
  */
-import type { WorldGenesis, WorldConfig } from './types.ts';
+import type { WorldGenesis, WorldConfig, GenePool } from './types.ts';
+import { DEFAULT_GENE_POOL } from './genome.ts';
 
-/** Параметры творения по умолчанию для заданного сида. */
-export function defaultGenesis(seed: number): WorldGenesis {
+/** Параметры творения по умолчанию для заданного сида (и опционально генофонда). */
+export function defaultGenesis(seed: number, genePool: GenePool = DEFAULT_GENE_POOL): WorldGenesis {
   return {
     seed,
     width: 600,
@@ -15,6 +16,7 @@ export function defaultGenesis(seed: number): WorldGenesis {
     cellSize: 30,
     maxFood: 1200,
     startPopulation: 120,
+    genePool: { ...genePool },
   };
 }
 

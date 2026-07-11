@@ -30,6 +30,7 @@ import {
   type NarrativeEvent,
   type ClimateKind,
   type ClimateView,
+  type GenePool,
 } from './useSimulation.ts';
 
 const DAY_TICKS = 3000; // длительность суточного цикла света (~100 с при 30 tps)
@@ -51,6 +52,7 @@ function Aquarium() {
   const [playing, setPlaying] = useState(true);
   const [inspected, setInspected] = useState<Inspected | null>(null);
   const [plannerOpen, setPlannerOpen] = useState(false);
+  const [newWorldOpen, setNewWorldOpen] = useState(false);
 
   const scale = view / sim.worldSize;
   const onTapWater = (e: GestureResponderEvent) => {
@@ -140,16 +142,7 @@ function Aquarium() {
             }}
           />
           <Btn label="🗓 Планировщик" onPress={() => setPlannerOpen(true)} />
-          <Btn
-            label="↻ Новый мир"
-            onPress={() => {
-              sim.reset();
-              setInspected(null);
-              setSun(6);
-              setTemp(1);
-              setPlaying(true);
-            }}
-          />
+          <Btn label="↻ Новый мир" onPress={() => setNewWorldOpen(true)} />
         </View>
       </View>
 
@@ -160,6 +153,20 @@ function Aquarium() {
           onSchedule={sim.scheduleClimate}
           onCancel={sim.cancelEvent}
           onClose={() => setPlannerOpen(false)}
+        />
+      )}
+
+      {newWorldOpen && (
+        <NewWorld
+          onCreate={(pool) => {
+            sim.reset(pool);
+            setInspected(null);
+            setSun(6);
+            setTemp(1);
+            setPlaying(true);
+            setNewWorldOpen(false);
+          }}
+          onClose={() => setNewWorldOpen(false)}
         />
       )}
     </SafeAreaView>
@@ -243,6 +250,101 @@ function EventToast({ event }: { event: NarrativeEvent }) {
     <View style={styles.epoch} pointerEvents="none">
       <Text style={[styles.epochText, { color, textShadowColor: color }]}>{event.text.toUpperCase()}</Text>
     </View>
+  );
+}
+
+/** Экран «Новый мир»: игрок задаёт стартовый генофонд рождающегося мира. */
+function NewWorld({ onCreate, onClose }: { onCreate: (pool: GenePool) => void; onClose: () => void }) {
+  const [diversity, setDiversity] = useState(1); // 0 клоны .. 1 хаос
+  const [strategy, setStrategy] = useState(0.5); // sexualCenter: 0 деление, 0.5 смешанное, 1 партнёры
+  const [mutT, setMutT] = useState(0.55); // 0 стабильный .. 1 бурный (→ mutationCenter)
+
+  const mutationCenter = 0.03 + (0.45 - 0.03) * mutT;
+  const diversityWord = diversity < 0.2 ? 'клоны' : diversity < 0.55 ? 'сдержанный' : diversity < 0.85 ? 'разнообразный' : 'хаос';
+  const mutWord = mutT < 0.25 ? 'стабильный' : mutT < 0.6 ? 'умеренный' : 'бурный';
+
+  const strategies: { c: number; label: string }[] = [
+    { c: 0, label: 'Деление' },
+    { c: 0.5, label: 'Смешанное' },
+    { c: 1, label: 'Партнёры' },
+  ];
+
+  return (
+    <Modal transparent visible animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+      <View style={styles.plannerOverlay}>
+        <View style={styles.plannerCard}>
+          <View style={styles.plannerHead}>
+            <Text style={styles.plannerTitle}>🌱 Новый мир</Text>
+            <Pressable onPress={onClose} hitSlop={12}>
+              <Text style={styles.inspectClose}>✕</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.plannerHint}>Задай, каким родится мир. Дальше эволюция пойдёт сама.</Text>
+
+          {/* Разброс генов */}
+          <View style={styles.sliderHead}>
+            <Text style={styles.lab}>Разброс генов</Text>
+            <Text style={styles.num}>{diversityWord}</Text>
+          </View>
+          <Slider
+            minimumValue={0}
+            maximumValue={1}
+            value={diversity}
+            minimumTrackTintColor="#64f0d0"
+            maximumTrackTintColor="rgba(255,255,255,0.15)"
+            thumbTintColor="#64f0d0"
+            onValueChange={setDiversity}
+          />
+          <View style={styles.nwEnds}>
+            <Text style={styles.nwEnd}>Клоны</Text>
+            <Text style={styles.nwEnd}>Хаос</Text>
+          </View>
+
+          {/* Стратегия размножения */}
+          <Text style={[styles.lab, { marginTop: 14, marginBottom: 6 }]}>Стартовая стратегия</Text>
+          <View style={styles.segment}>
+            {strategies.map((s) => {
+              const active = Math.abs(strategy - s.c) < 0.01;
+              return (
+                <Pressable
+                  key={s.label}
+                  style={[styles.segmentBtn, active && styles.segmentBtnActive]}
+                  onPress={() => setStrategy(s.c)}
+                >
+                  <Text style={[styles.segmentText, active && styles.segmentTextActive]}>{s.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          {/* Скорость мутаций */}
+          <View style={[styles.sliderHead, { marginTop: 16 }]}>
+            <Text style={styles.lab}>Скорость мутаций</Text>
+            <Text style={styles.num}>{mutWord}</Text>
+          </View>
+          <Slider
+            minimumValue={0}
+            maximumValue={1}
+            value={mutT}
+            minimumTrackTintColor="#64f0d0"
+            maximumTrackTintColor="rgba(255,255,255,0.15)"
+            thumbTintColor="#64f0d0"
+            onValueChange={setMutT}
+          />
+          <View style={styles.nwEnds}>
+            <Text style={styles.nwEnd}>Стабильный</Text>
+            <Text style={styles.nwEnd}>Бурный</Text>
+          </View>
+
+          <Pressable
+            style={styles.nwCreate}
+            onPress={() => onCreate({ diversity, sexualCenter: strategy, mutationCenter })}
+          >
+            <Text style={styles.nwCreateText}>✨ Создать мир</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -492,6 +594,15 @@ const styles = StyleSheet.create({
   plannerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
   plannerRowText: { color: '#d3ece8', fontSize: 12, flexShrink: 1 },
   plannerRemove: { color: '#ff6b6b', fontSize: 14, paddingLeft: 12 },
+  nwEnds: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 2 },
+  nwEnd: { color: '#7f9aa0', fontSize: 10 },
+  segment: { flexDirection: 'row', backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 10, padding: 3, gap: 3 },
+  segmentBtn: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center' },
+  segmentBtnActive: { backgroundColor: 'rgba(100,240,208,0.16)', borderWidth: 1, borderColor: 'rgba(100,240,208,0.5)' },
+  segmentText: { color: '#7f9aa0', fontSize: 12 },
+  segmentTextActive: { color: '#64f0d0' },
+  nwCreate: { marginTop: 20, backgroundColor: 'rgba(100,240,208,0.16)', borderWidth: 1, borderColor: 'rgba(100,240,208,0.5)', borderRadius: 10, paddingVertical: 14, alignItems: 'center' },
+  nwCreateText: { color: '#64f0d0', fontSize: 14, letterSpacing: 0.5 },
   panel: { flex: 1, backgroundColor: '#06181e', padding: 16, borderTopWidth: 1, borderTopColor: 'rgba(100,240,208,0.16)' },
   sliderBlock: { marginBottom: 10 },
   sliderHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 },

@@ -77,9 +77,9 @@ export class World {
     this.foodX = new Float32Array(genesis.maxFood);
     this.foodY = new Float32Array(genesis.maxFood);
 
-    // Стартовая популяция.
+    // Стартовая популяция из заданного генофонда (экран «Новый мир»).
     for (let i = 0; i < genesis.startPopulation; i++) {
-      const g = randomGenome(this.rng);
+      const g = randomGenome(this.rng, genesis.genePool);
       this.creatures.push({
         x: this.rng.range(0, genesis.width),
         y: this.rng.range(0, genesis.height),
