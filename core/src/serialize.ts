@@ -87,6 +87,11 @@ export function restore(snap: WorldSnapshot): World {
   w.neat = new NeatContext(snap.neat.nextNodeId, snap.neat.nextInnovation);
   w.tick = snap.tick;
   (w as any).timeline = snap.timeline.map((e) => ({ ...e }));
+  // Продолжаем счётчик id катаклизмов с максимума в таймлайне — чтобы новые
+  // события планировщика не столкнулись по id с восстановленными.
+  let maxId = 0;
+  for (const e of snap.timeline) if (e.id && e.id > maxId) maxId = e.id;
+  w.nextEventId = maxId + 1;
 
   w.creatures = snap.creatures.map((cs): Creature => {
     const brain = cloneBrain(cs.brain);

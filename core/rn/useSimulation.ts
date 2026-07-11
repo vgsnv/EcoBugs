@@ -62,6 +62,31 @@ export interface NarrativeEvent {
   tone: 'good' | 'bad' | 'neutral';
 }
 
+/** Типы климатических катаклизмов для планировщика (задача 5-2). */
+export type ClimateKind = 'iceage' | 'coldsnap' | 'heatwave' | 'sunflare';
+export interface ClimateDef {
+  icon: string;
+  label: string;
+  param: 'sunlight' | 'temperature';
+  factor: number; // множитель к текущему значению параметра на пике
+  ramp: number;   // тиков на спад/подъём огибающей
+  hold: number;   // тиков удержания на пике
+}
+export const CLIMATE: Record<ClimateKind, ClimateDef> = {
+  iceage: { icon: '❄', label: 'Ледниковый период', param: 'sunlight', factor: 0.12, ramp: 400, hold: 500 },
+  coldsnap: { icon: '🧊', label: 'Похолодание', param: 'temperature', factor: 0.5, ramp: 300, hold: 400 },
+  heatwave: { icon: '🔥', label: 'Потепление', param: 'temperature', factor: 1.6, ramp: 300, hold: 400 },
+  sunflare: { icon: '☀', label: 'Вспышка света', param: 'sunlight', factor: 1.9, ramp: 300, hold: 400 },
+};
+/** Запланированный катаклизм (сгруппированный по id) — для отображения в планировщике. */
+export interface ClimateView {
+  id: number;
+  kind: ClimateKind;
+  startTick: number;
+  endTick: number;
+}
+export const PLAN_HORIZON = 3000; // горизонт планирования (тиков вперёд)
+
 /** Снимок особи для инспектора (по тапу). */
 export interface Inspected {
   size: number;
@@ -120,7 +145,9 @@ export interface SimHandle {
   worldSize: number;
   setSunlight: (v: number) => void;
   setTemperature: (v: number) => void;
-  scheduleIceAge: () => void;
+  scheduleClimate: (kind: ClimateKind, delayTicks: number) => void;
+  cancelEvent: (id: number) => void;
+  getUpcoming: () => ClimateView[];
   reset: () => void;
   togglePlay: () => void;
   inspectAt: (wx: number, wy: number) => Inspected | null;
@@ -454,12 +481,48 @@ export function useSimulation(): SimHandle {
     worldSize: worldRef.current.genesis.width,
     setSunlight: (v) => setParam('sunlight', v),
     setTemperature: (v) => setParam('temperature', v),
-    scheduleIceAge: () => {
+    scheduleClimate: (kind, delayTicks) => {
       const w = worldRef.current!;
-      const base = w.config.sunlight;
-      const t = w.tick;
-      w.schedule({ startTick: t, endTick: t + 400, param: 'sunlight', fromValue: base, toValue: base * 0.12, easing: 'smooth' });
-      w.schedule({ startTick: t + 900, endTick: t + 1400, param: 'sunlight', fromValue: base * 0.12, toValue: base, easing: 'smooth' });
+      const def = CLIMATE[kind];
+      const base = w.config[def.param];
+      const peak = base * def.factor;
+      const id = w.newEventId();
+      const t0 = w.tick + Math.max(0, delayTicks);
+      // Огибающая: спад/подъём к пику → удержание → возврат к базе.
+      w.schedule({ startTick: t0, endTick: t0 + def.ramp, param: def.param, fromValue: base, toValue: peak, easing: 'smooth', id, kind });
+      const back = t0 + def.ramp + def.hold;
+      w.schedule({ startTick: back, endTick: back + def.ramp, param: def.param, fromValue: peak, toValue: base, easing: 'smooth', id, kind });
+    },
+    cancelEvent: (id) => {
+      const w = worldRef.current!;
+      // Если катаклизм уже начал применяться — вернуть параметр к базе (иначе мир
+      // застрянет в оборванной середине огибающей, напр. в вечной зиме).
+      const subs = w.upcomingEvents().filter((e) => e.id === id);
+      // Берём самое раннее УЖЕ начавшееся под-событие: его fromValue = базовое значение.
+      let base: { param: (typeof subs)[number]['param']; value: number } | null = null;
+      let minStart = Infinity;
+      for (const e of subs) {
+        if (e.startTick <= w.tick && e.startTick < minStart) {
+          minStart = e.startTick;
+          base = { param: e.param, value: e.fromValue };
+        }
+      }
+      if (base) w.config[base.param] = base.value;
+      w.removeEvent(id);
+    },
+    getUpcoming: () => {
+      const w = worldRef.current!;
+      const byId = new Map<number, ClimateView>();
+      for (const e of w.upcomingEvents()) {
+        if (e.id == null) continue;
+        const v = byId.get(e.id);
+        if (!v) byId.set(e.id, { id: e.id, kind: (e.kind as ClimateKind) ?? 'iceage', startTick: e.startTick, endTick: e.endTick });
+        else {
+          v.startTick = Math.min(v.startTick, e.startTick);
+          v.endTick = Math.max(v.endTick, e.endTick);
+        }
+      }
+      return Array.from(byId.values()).sort((a, b) => a.startTick - b.startTick);
     },
     reset: () => {
       clearWorld();

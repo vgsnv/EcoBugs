@@ -15,12 +15,22 @@ import {
   StyleSheet,
   useWindowDimensions,
   Pressable,
+  Modal,
   type GestureResponderEvent,
 } from 'react-native';
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import Slider from '@react-native-community/slider';
 import { AquariumCanvas } from './AquariumCanvas.tsx';
-import { useSimulation, type Inspected, type ResumeSummary, type NarrativeEvent } from './useSimulation.ts';
+import {
+  useSimulation,
+  CLIMATE,
+  PLAN_HORIZON,
+  type Inspected,
+  type ResumeSummary,
+  type NarrativeEvent,
+  type ClimateKind,
+  type ClimateView,
+} from './useSimulation.ts';
 
 const DAY_TICKS = 3000; // длительность суточного цикла света (~100 с при 30 tps)
 
@@ -40,6 +50,7 @@ function Aquarium() {
   const [temp, setTemp] = useState(1);
   const [playing, setPlaying] = useState(true);
   const [inspected, setInspected] = useState<Inspected | null>(null);
+  const [plannerOpen, setPlannerOpen] = useState(false);
 
   const scale = view / sim.worldSize;
   const onTapWater = (e: GestureResponderEvent) => {
@@ -128,7 +139,7 @@ function Aquarium() {
               sim.togglePlay();
             }}
           />
-          <Btn label="❄ Ледниковый" onPress={sim.scheduleIceAge} />
+          <Btn label="🗓 Планировщик" onPress={() => setPlannerOpen(true)} />
           <Btn
             label="↻ Новый мир"
             onPress={() => {
@@ -141,6 +152,16 @@ function Aquarium() {
           />
         </View>
       </View>
+
+      {plannerOpen && (
+        <ClimatePlanner
+          nowTick={sim.stats.tick}
+          getUpcoming={sim.getUpcoming}
+          onSchedule={sim.scheduleClimate}
+          onCancel={sim.cancelEvent}
+          onClose={() => setPlannerOpen(false)}
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -222,6 +243,121 @@ function EventToast({ event }: { event: NarrativeEvent }) {
     <View style={styles.epoch} pointerEvents="none">
       <Text style={[styles.epochText, { color, textShadowColor: color }]}>{event.text.toUpperCase()}</Text>
     </View>
+  );
+}
+
+/** Климатический планировщик (задача 5-2): игрок выкладывает будущие катаклизмы. */
+function ClimatePlanner({
+  nowTick,
+  getUpcoming,
+  onSchedule,
+  onCancel,
+  onClose,
+}: {
+  nowTick: number;
+  getUpcoming: () => ClimateView[];
+  onSchedule: (kind: ClimateKind, delayTicks: number) => void;
+  onCancel: (id: number) => void;
+  onClose: () => void;
+}) {
+  const [delay, setDelay] = useState(500);
+  const [, force] = useState(0);
+  const bump = () => force((n) => n + 1);
+  const upcoming = getUpcoming(); // перечитывается каждый рендер (nowTick тикает 4/с)
+  const kinds = Object.keys(CLIMATE) as ClimateKind[];
+
+  return (
+    <Modal transparent visible animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+    <View style={styles.plannerOverlay}>
+      <View style={styles.plannerCard}>
+        <View style={styles.plannerHead}>
+          <Text style={styles.plannerTitle}>🗓 Климатический планировщик</Text>
+          <Pressable onPress={onClose} hitSlop={12}>
+            <Text style={styles.inspectClose}>✕</Text>
+          </Pressable>
+        </View>
+        <Text style={styles.plannerHint}>Выложи будущие катаклизмы — и смотри, как эволюция их переживёт.</Text>
+
+        {/* Таймлайн: сейчас → +горизонт, метки запланированных катаклизмов */}
+        <View style={styles.timeline}>
+          <View style={styles.timelineNow} />
+          {upcoming.map((ev) => {
+            const rel = Math.max(0, Math.min(1, (ev.startTick - nowTick) / PLAN_HORIZON));
+            return (
+              <Pressable
+                key={ev.id}
+                style={[styles.timelineMark, { left: `${rel * 100}%` }]}
+                onPress={() => {
+                  onCancel(ev.id);
+                  bump();
+                }}
+              >
+                <Text style={styles.timelineMarkIcon}>{CLIMATE[ev.kind].icon}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+        <View style={styles.timelineAxis}>
+          <Text style={styles.timelineAxisLabel}>сейчас</Text>
+          <Text style={styles.timelineAxisLabel}>+{PLAN_HORIZON.toLocaleString('ru')} эпох</Text>
+        </View>
+
+        {/* Когда начать */}
+        <View style={styles.sliderHead}>
+          <Text style={styles.lab}>Начать через</Text>
+          <Text style={styles.num}>+{Math.round(delay).toLocaleString('ru')} эпох</Text>
+        </View>
+        <Slider
+          minimumValue={0}
+          maximumValue={PLAN_HORIZON}
+          value={delay}
+          minimumTrackTintColor="#64f0d0"
+          maximumTrackTintColor="rgba(255,255,255,0.15)"
+          thumbTintColor="#64f0d0"
+          onValueChange={setDelay}
+        />
+
+        {/* Палитра катаклизмов */}
+        <View style={styles.palette}>
+          {kinds.map((k) => (
+            <Pressable
+              key={k}
+              style={styles.paletteBtn}
+              onPress={() => {
+                onSchedule(k, delay);
+                bump();
+              }}
+            >
+              <Text style={styles.paletteIcon}>{CLIMATE[k].icon}</Text>
+              <Text style={styles.paletteLabel}>{CLIMATE[k].label}</Text>
+            </Pressable>
+          ))}
+        </View>
+
+        {/* Список запланированного */}
+        {upcoming.length > 0 && (
+          <View style={styles.plannerList}>
+            {upcoming.map((ev) => (
+              <View key={ev.id} style={styles.plannerRow}>
+                <Text style={styles.plannerRowText}>
+                  {CLIMATE[ev.kind].icon} {CLIMATE[ev.kind].label} · через {Math.max(0, ev.startTick - nowTick).toLocaleString('ru')} эпох
+                </Text>
+                <Pressable
+                  onPress={() => {
+                    onCancel(ev.id);
+                    bump();
+                  }}
+                  hitSlop={8}
+                >
+                  <Text style={styles.plannerRemove}>✕</Text>
+                </Pressable>
+              </View>
+            ))}
+          </View>
+        )}
+      </View>
+    </View>
+    </Modal>
   );
 }
 
@@ -337,6 +473,25 @@ const styles = StyleSheet.create({
   resumeLead: { color: '#d3ece8', fontSize: 13, lineHeight: 19, marginBottom: 14 },
   resumeBtn: { marginTop: 16, backgroundColor: 'rgba(100,240,208,0.14)', borderWidth: 1, borderColor: 'rgba(100,240,208,0.4)', borderRadius: 8, paddingVertical: 12, alignItems: 'center' },
   resumeBtnText: { color: '#64f0d0', fontSize: 13 },
+  plannerOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(4,18,26,0.82)', alignItems: 'center', justifyContent: 'center', padding: 20 },
+  plannerCard: { width: '100%', backgroundColor: '#06181e', borderWidth: 1, borderColor: 'rgba(100,240,208,0.3)', borderRadius: 16, padding: 18 },
+  plannerHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  plannerTitle: { color: '#64f0d0', fontSize: 15, letterSpacing: 0.5 },
+  plannerHint: { color: '#7f9aa0', fontSize: 12, lineHeight: 17, marginBottom: 16 },
+  timeline: { height: 44, backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 8, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', justifyContent: 'center' },
+  timelineNow: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 2, backgroundColor: '#64f0d0' },
+  timelineMark: { position: 'absolute', width: 26, height: 26, marginLeft: -13, borderRadius: 13, backgroundColor: 'rgba(100,240,208,0.16)', borderWidth: 1, borderColor: 'rgba(100,240,208,0.5)', alignItems: 'center', justifyContent: 'center' },
+  timelineMarkIcon: { fontSize: 13 },
+  timelineAxis: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 4, marginBottom: 14 },
+  timelineAxisLabel: { color: '#7f9aa0', fontSize: 10 },
+  palette: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12 },
+  paletteBtn: { flexGrow: 1, flexBasis: '46%', flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(255,255,255,0.05)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)', borderRadius: 10, paddingVertical: 12, paddingHorizontal: 12 },
+  paletteIcon: { fontSize: 18 },
+  paletteLabel: { color: '#d3ece8', fontSize: 12, flexShrink: 1 },
+  plannerList: { marginTop: 16, gap: 6 },
+  plannerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
+  plannerRowText: { color: '#d3ece8', fontSize: 12, flexShrink: 1 },
+  plannerRemove: { color: '#ff6b6b', fontSize: 14, paddingLeft: 12 },
   panel: { flex: 1, backgroundColor: '#06181e', padding: 16, borderTopWidth: 1, borderTopColor: 'rgba(100,240,208,0.16)' },
   sliderBlock: { marginBottom: 10 },
   sliderHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 },

@@ -42,4 +42,6 @@ export interface TimelineEvent {
   toValue: number;
   easing: Easing;
   applied?: boolean; // служебный флаг для мгновенных событий (startTick === endTick)
+  id?: number;       // группировка под-событий одного катаклизма (для планировщика/отмены)
+  kind?: string;     // ярлык типа катаклизма для UI (на симуляцию не влияет)
 }
