@@ -1,22 +1,34 @@
 /**
- * Мост «движок → React Native». Фазы 1–2.
+ * Мост «движок → React Native». Фазы 1–3.
  *
  * Архитектура (CLAUDE.md, инварианты 3–4):
  *  - World живёт в useRef, НЕ в React-стейте: setState на каждый тик убил бы перф.
  *  - Симуляция идёт фиксированным timestep через SimClock, отвязанно от FPS.
  *  - Позиции/цвет пишутся в Reanimated SharedValue-буферы → читаются на UI-потоке Skia.
- *  - `clock` инкрементируется каждый кадр: гарантированный триггер перерисовки Skia,
- *    даже когда ссылка на Float32Array-буфер не меняется.
+ *  - `clock` инкрементируется каждый кадр: гарантированный триггер перерисовки Skia.
+ *
+ * Фаза 3 — фоновая жизнь мира:
+ *  - при уходе в фон снимаем состояние в MMKV (persistence.ts);
+ *  - при старте восстанавливаем и ДЕТЕРМИНИРОВАННО догоняем пропущенное «мировое
+ *    время» (реальная пауза × 30 тиков/сек), но не больше капа.
+ *  - Догон идёт ЧАНКАМИ по кадрам (видимый time-lapse с прогрессом), а не одним
+ *    блоком: на устройстве тик недёшев, синхронный догон длинного простоя подвесил бы
+ *    запуск (PLAN.md §6). Кап — честная механика и тюнингуемый рычаг (PLAN.md §8).
  *
  * Ядро (core/src) отсюда НЕ меняется — импортируем только публичный API.
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { AppState } from 'react-native';
 import { useSharedValue, type SharedValue } from 'react-native-reanimated';
 import { World, SimClock, defaultGenesis, defaultConfig, Gene } from '../src/index.ts';
 import type { WorldConfig } from '../src/index.ts';
+import { saveWorld, loadWorld, clearWorld } from './persistence.ts';
 
-const CAP = 3000; // потолок существ в буфере рендера (миры устаканиваются < 2000)
+const CAP = 3000; // потолок существ в буфере рендера
 const HISTORY = 120; // длина истории популяции для спарклайна
+const TICKS_PER_SEC = 30; // «мировое время»: 1 реальная секунда паузы = 30 тиков
+const CATCHUP_CAP_TICKS = 9000; // предел досчитываемого простоя (~5 мин мира) — рычаг баланса
+const CATCHUP_CHUNK = 100; // тиков за кадр во время догона (плавность time-lapse)
 
 /** Снимок особи для инспектора (по тапу). */
 export interface Inspected {
@@ -40,6 +52,25 @@ export interface SimStats {
   history: number[];
 }
 
+/** Сводка «пока тебя не было» (Фаза 3). */
+export interface ResumeSummary {
+  ticks: number; // сколько тиков досчитано
+  awayMinutes: number; // реальная длительность отсутствия
+  capped: boolean; // упёрлись ли в кап (мир «замерзал»)
+  popBefore: number;
+  popAfter: number;
+  sizeBefore: number;
+  sizeAfter: number;
+}
+
+interface CatchupPlan {
+  remaining: number;
+  total: number;
+  awayMs: number;
+  capped: boolean;
+  before: { pop: number; size: number };
+}
+
 export interface SimHandle {
   posX: SharedValue<Float32Array>;
   posY: SharedValue<Float32Array>;
@@ -55,17 +86,45 @@ export interface SimHandle {
   togglePlay: () => void;
   inspectAt: (wx: number, wy: number) => Inspected | null;
   stats: SimStats;
+  catchingUp: boolean;
+  catchupPct: number;
+  resumeSummary: ResumeSummary | null;
+  dismissSummary: () => void;
 }
 
 export function useSimulation(): SimHandle {
   const worldRef = useRef<World | null>(null);
-  const clockRef = useRef(new SimClock(30));
+  const catchupRef = useRef<CatchupPlan | null>(null);
+  const clockRef = useRef(new SimClock(TICKS_PER_SEC));
   const playingRef = useRef(true);
   const rafRef = useRef<number | null>(null);
   const lastRef = useRef(0);
   const frameRef = useRef(0);
   const historyRef = useRef<number[]>([]);
   const statAccum = useRef(0);
+
+  // Ленивая инициализация мира: сначала пробуем восстановить сохранённый.
+  if (worldRef.current === null) {
+    const saved = loadWorld();
+    if (saved) {
+      worldRef.current = saved.world;
+      const awayMs = Math.max(0, Date.now() - saved.savedAt);
+      const rawTicks = Math.floor((awayMs / 1000) * TICKS_PER_SEC);
+      const ticks = Math.min(rawTicks, CATCHUP_CAP_TICKS);
+      if (ticks > 0) {
+        const st = saved.world.stats();
+        catchupRef.current = {
+          remaining: ticks,
+          total: ticks,
+          awayMs,
+          capped: rawTicks > CATCHUP_CAP_TICKS,
+          before: { pop: st.population, size: st.meanSize },
+        };
+      }
+    } else {
+      worldRef.current = new World(defaultGenesis(newSeed()), defaultConfig());
+    }
+  }
 
   const posX = useSharedValue<Float32Array>(new Float32Array(CAP));
   const posY = useSharedValue<Float32Array>(new Float32Array(CAP));
@@ -82,10 +141,9 @@ export function useSimulation(): SimHandle {
     food: 0,
     history: [],
   });
-
-  if (worldRef.current === null) {
-    worldRef.current = new World(defaultGenesis(newSeed()), defaultConfig());
-  }
+  const [catchingUp, setCatchingUp] = useState<boolean>(() => catchupRef.current !== null);
+  const [catchupPct, setCatchupPct] = useState(0);
+  const [resumeSummary, setResumeSummary] = useState<ResumeSummary | null>(null);
 
   const pushToBuffers = useCallback(() => {
     const w = worldRef.current!;
@@ -107,39 +165,73 @@ export function useSimulation(): SimHandle {
     radius.value = br;
     hue.value = bh;
     count.value = n;
-    clock.value = frameRef.current++; // форсируем перерисовку Skia
+    clock.value = frameRef.current++;
   }, [posX, posY, radius, hue, count, clock]);
+
+  const publishStats = useCallback(() => {
+    const w = worldRef.current!;
+    const cs = w.creatures;
+    const n = cs.length || 1;
+    let s = 0;
+    let sp = 0;
+    for (const c of cs) {
+      s += c.genome.body[Gene.Size];
+      sp += c.genome.body[Gene.Speed];
+    }
+    const hist = historyRef.current;
+    hist.push(cs.length);
+    if (hist.length > HISTORY) hist.shift();
+    setStats({
+      population: cs.length,
+      tick: w.tick,
+      meanSize: s / n,
+      meanSpeed: sp / n,
+      food: w.foodCount,
+      history: hist.slice(),
+    });
+  }, []);
 
   useEffect(() => {
     const loop = (now: number) => {
+      const w = worldRef.current!;
+      const plan = catchupRef.current;
+
+      if (plan) {
+        // Догон: гоним чанк тиков без привязки к реальному dt.
+        const chunk = Math.min(CATCHUP_CHUNK, plan.remaining);
+        for (let i = 0; i < chunk; i++) w.step();
+        plan.remaining -= chunk;
+        pushToBuffers();
+        setCatchupPct(Math.round((1 - plan.remaining / plan.total) * 100));
+        if (plan.remaining <= 0) {
+          const st = w.stats();
+          setResumeSummary({
+            ticks: plan.total,
+            awayMinutes: plan.awayMs / 60000,
+            capped: plan.capped,
+            popBefore: plan.before.pop,
+            popAfter: st.population,
+            sizeBefore: plan.before.size,
+            sizeAfter: st.meanSize,
+          });
+          catchupRef.current = null;
+          setCatchingUp(false);
+          lastRef.current = 0; // сброс dt, чтобы SimClock не выстрелил лавиной после догона
+          publishStats();
+        }
+        rafRef.current = requestAnimationFrame(loop);
+        return;
+      }
+
       const dt = lastRef.current ? Math.min(now - lastRef.current, 250) : 16;
       lastRef.current = now;
-      const w = worldRef.current!;
       if (playingRef.current) clockRef.current.advance(w, dt);
       pushToBuffers();
 
       statAccum.current += dt;
       if (statAccum.current > 250) {
         statAccum.current = 0;
-        const cs = w.creatures;
-        const n = cs.length || 1;
-        let s = 0,
-          sp = 0;
-        for (const c of cs) {
-          s += c.genome.body[Gene.Size];
-          sp += c.genome.body[Gene.Speed];
-        }
-        const hist = historyRef.current;
-        hist.push(cs.length);
-        if (hist.length > HISTORY) hist.shift();
-        setStats({
-          population: cs.length,
-          tick: w.tick,
-          meanSize: s / n,
-          meanSpeed: sp / n,
-          food: w.foodCount,
-          history: hist.slice(),
-        });
+        publishStats();
       }
       rafRef.current = requestAnimationFrame(loop);
     };
@@ -147,7 +239,17 @@ export function useSimulation(): SimHandle {
     return () => {
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
-  }, [pushToBuffers]);
+  }, [pushToBuffers, publishStats]);
+
+  // Сохранение при уходе в фон: снимок + метка реального времени.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (s) => {
+      if ((s === 'background' || s === 'inactive') && worldRef.current) {
+        saveWorld(worldRef.current, Date.now());
+      }
+    });
+    return () => sub.remove();
+  }, []);
 
   const setParam = (k: keyof WorldConfig, v: number) => {
     worldRef.current!.config[k] = v;
@@ -157,7 +259,7 @@ export function useSimulation(): SimHandle {
     const w = worldRef.current!;
     const { width, height } = w.genesis;
     let best = -1;
-    let bd2 = 30 * 30; // радиус попадания в мировых единицах
+    let bd2 = 30 * 30;
     for (let i = 0; i < w.creatures.length; i++) {
       const c = w.creatures[i];
       let dx = Math.abs(c.x - wx);
@@ -204,6 +306,10 @@ export function useSimulation(): SimHandle {
       w.schedule({ startTick: t + 900, endTick: t + 1400, param: 'sunlight', fromValue: base * 0.12, toValue: base, easing: 'smooth' });
     },
     reset: () => {
+      clearWorld();
+      catchupRef.current = null;
+      setCatchingUp(false);
+      setResumeSummary(null);
       worldRef.current = new World(defaultGenesis(newSeed()), defaultConfig());
       historyRef.current = [];
     },
@@ -212,6 +318,10 @@ export function useSimulation(): SimHandle {
     },
     inspectAt,
     stats,
+    catchingUp,
+    catchupPct,
+    resumeSummary,
+    dismissSummary: () => setResumeSummary(null),
   };
 }
 

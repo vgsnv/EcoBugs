@@ -20,7 +20,7 @@ import {
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import Slider from '@react-native-community/slider';
 import { AquariumCanvas } from './AquariumCanvas.tsx';
-import { useSimulation, type Inspected } from './useSimulation.ts';
+import { useSimulation, type Inspected, type ResumeSummary } from './useSimulation.ts';
 
 export default function App() {
   return (
@@ -74,10 +74,22 @@ function Aquarium() {
         </View>
 
         {inspected && <Inspector data={inspected} onClose={() => setInspected(null)} />}
-        {sim.stats.population === 0 && (
+        {sim.stats.population === 0 && !sim.catchingUp && (
           <View style={styles.epoch} pointerEvents="none">
             <Text style={styles.epochText}>ВЫМИРАНИЕ</Text>
           </View>
+        )}
+        {sim.catchingUp && (
+          <View style={styles.catchup} pointerEvents="none">
+            <Text style={styles.catchupText}>⏩ Догоняю мир</Text>
+            <Text style={styles.catchupPct}>{sim.catchupPct}%</Text>
+            <View style={styles.catchupBar}>
+              <View style={[styles.catchupFill, { width: `${sim.catchupPct}%` }]} />
+            </View>
+          </View>
+        )}
+        {sim.resumeSummary && (
+          <ResumeCard data={sim.resumeSummary} onClose={sim.dismissSummary} />
         )}
       </View>
 
@@ -191,6 +203,35 @@ function Row({ k, v }: { k: string; v: string }) {
   );
 }
 
+/** Экран «пока тебя не было» (Фаза 3). */
+function ResumeCard({ data, onClose }: { data: ResumeSummary; onClose: () => void }) {
+  const away =
+    data.awayMinutes >= 60
+      ? `${(data.awayMinutes / 60).toFixed(1)} ч`
+      : `${Math.max(1, Math.round(data.awayMinutes))} мин`;
+  const popDelta = data.popAfter - data.popBefore;
+  const sizeDelta = data.sizeAfter - data.sizeBefore;
+  return (
+    <View style={styles.resumeOverlay}>
+      <View style={styles.resumeCard}>
+        <Text style={styles.resumeTitle}>Пока тебя не было</Text>
+        <Text style={styles.resumeLead}>
+          Прошло {data.ticks.toLocaleString('ru')} эпох ≈ {away} реального времени
+          {data.capped ? ' (мир достиг предела и замер)' : ''}.
+        </Text>
+        <Row k="Популяция" v={`${data.popBefore} → ${data.popAfter}  (${popDelta >= 0 ? '+' : ''}${popDelta})`} />
+        <Row
+          k="Ø размер"
+          v={`${data.sizeBefore.toFixed(2)} → ${data.sizeAfter.toFixed(2)}  (${sizeDelta >= 0 ? '+' : ''}${sizeDelta.toFixed(2)})`}
+        />
+        <Pressable style={styles.resumeBtn} onPress={onClose}>
+          <Text style={styles.resumeBtnText}>Продолжить наблюдение</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
 function SliderRow({
   label,
   value,
@@ -263,6 +304,17 @@ const styles = StyleSheet.create({
   inspectRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 2 },
   inspectK: { color: '#7f9aa0', fontSize: 12 },
   inspectV: { color: '#d3ece8', fontSize: 12, fontVariant: ['tabular-nums'] },
+  catchup: { position: 'absolute', top: '42%', left: 40, right: 40, alignItems: 'center' },
+  catchupText: { color: '#64f0d0', fontSize: 14, letterSpacing: 2, textTransform: 'uppercase' },
+  catchupPct: { color: '#d3ece8', fontSize: 26, fontVariant: ['tabular-nums'], marginTop: 4 },
+  catchupBar: { marginTop: 10, height: 4, width: '100%', backgroundColor: 'rgba(255,255,255,0.12)', borderRadius: 2, overflow: 'hidden' },
+  catchupFill: { height: 4, backgroundColor: '#64f0d0' },
+  resumeOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(4,18,26,0.7)', padding: 24 },
+  resumeCard: { width: '100%', backgroundColor: '#06181e', borderWidth: 1, borderColor: 'rgba(100,240,208,0.3)', borderRadius: 14, padding: 20 },
+  resumeTitle: { color: '#64f0d0', fontSize: 16, letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 10 },
+  resumeLead: { color: '#d3ece8', fontSize: 13, lineHeight: 19, marginBottom: 14 },
+  resumeBtn: { marginTop: 16, backgroundColor: 'rgba(100,240,208,0.14)', borderWidth: 1, borderColor: 'rgba(100,240,208,0.4)', borderRadius: 8, paddingVertical: 12, alignItems: 'center' },
+  resumeBtnText: { color: '#64f0d0', fontSize: 13 },
   panel: { flex: 1, backgroundColor: '#06181e', padding: 16, borderTopWidth: 1, borderTopColor: 'rgba(100,240,208,0.16)' },
   sliderBlock: { marginBottom: 10 },
   sliderHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 },
