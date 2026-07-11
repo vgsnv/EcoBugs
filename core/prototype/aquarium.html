@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Эволюционный аквариум — прототип</title>
+<style>
+  :root {
+    --abyss-top: #0b2a33;
+    --abyss-bot: #04121a;
+    --panel: #06181e;
+    --hair: rgba(100, 240, 208, 0.16);
+    --phosphor: #64f0d0;
+    --label: #7f9aa0;
+    --value: #d3ece8;
+    --danger: #ff6b6b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--abyss-bot); overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  /* ── Аквариум (герой) ── */
+  #tankWrap { position: relative; flex: 1 1 auto; min-height: 0; }
+  #tank { display: block; width: 100%; height: 100%;
+    background: linear-gradient(to bottom, var(--abyss-top), var(--abyss-bot)); }
+  /* тонкая «глубинная» виньетка поверх воды */
+  #tankWrap::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(120% 80% at 50% 0%, transparent 40%, rgba(0,0,0,0.45) 100%); }
+
+  /* верхний readout поверх воды */
+  #readout { position: absolute; top: 0; left: 0; right: 0; z-index: 2;
+    display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap;
+    padding: 12px 16px; pointer-events: none;
+    font-variant-numeric: tabular-nums; }
+  .stat { display: flex; flex-direction: column; gap: 2px; }
+  .stat .k { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--label); }
+  .stat .v { font-size: 15px; color: var(--value);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .stat .v.big { font-size: 20px; color: var(--phosphor); }
+  #spark { margin-left: auto; opacity: 0.9; }
+
+  #epoch { position: absolute; z-index: 2; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    pointer-events: none; text-align: center; color: var(--phosphor);
+    font-size: 13px; letter-spacing: 0.3em; text-transform: uppercase;
+    opacity: 0; transition: opacity 0.6s; text-shadow: 0 0 18px rgba(100,240,208,0.6); }
+  #epoch.show { opacity: 0.92; }
+
+  /* ── Приборная панель ── */
+  #panel { flex: 0 0 auto; background: var(--panel); border-top: 1px solid var(--hair);
+    padding: 14px 16px calc(14px + env(safe-area-inset-bottom)); }
+  .row { display: flex; align-items: center; gap: 14px; }
+  .row + .row { margin-top: 12px; }
+  .sliderBlock { flex: 1 1 auto; }
+  .sliderHead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+  .sliderHead .lab { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--label); }
+  .sliderHead .num { font-size: 12px; color: var(--value);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 3px;
+    border-radius: 3px; background: rgba(255,255,255,0.12); outline: none; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none;
+    width: 18px; height: 18px; border-radius: 50%; background: var(--phosphor); cursor: pointer;
+    box-shadow: 0 0 12px rgba(100,240,208,0.7); }
+  input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border: none; border-radius: 50%;
+    background: var(--phosphor); cursor: pointer; box-shadow: 0 0 12px rgba(100,240,208,0.7); }
+
+  .btns { display: flex; gap: 8px; margin-top: 12px; }
+  button { flex: 1 1 auto; background: rgba(255,255,255,0.05); color: var(--value);
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 10px 8px;
+    font-size: 12px; letter-spacing: 0.04em; cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+  button:hover { background: rgba(255,255,255,0.09); }
+  button:active { transform: translateY(1px); }
+  button.on { border-color: var(--phosphor); color: var(--phosphor); }
+  button.ice.active { border-color: #7fbfff; color: #7fbfff; box-shadow: 0 0 14px rgba(127,191,255,0.3); }
+  .speedGroup { display: flex; gap: 0; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; overflow: hidden; }
+  .speedGroup button { border: none; border-radius: 0; flex: 0 0 auto; padding: 10px 12px; }
+  .speedGroup button.on { background: rgba(100,240,208,0.14); }
+  .hint { text-align: center; font-size: 10px; color: var(--label); margin-top: 10px; letter-spacing: 0.03em; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="tankWrap">
+    <canvas id="tank"></canvas>
+    <div id="readout">
+      <div class="stat"><span class="k">Популяция</span><span class="v big" id="pop">—</span></div>
+      <div class="stat"><span class="k">Эпоха</span><span class="v" id="ticks">0</span></div>
+      <div class="stat"><span class="k">Ø размер</span><span class="v" id="size">—</span></div>
+      <div class="stat"><span class="k">Ø скорость</span><span class="v" id="speed">—</span></div>
+      <div class="stat"><span class="k">Еда</span><span class="v" id="food">—</span></div>
+      <canvas id="spark" width="140" height="34"></canvas>
+    </div>
+    <div id="epoch"></div>
+  </div>
+
+  <div id="panel">
+    <div class="row">
+      <div class="sliderBlock">
+        <div class="sliderHead"><span class="lab">☀ Солнечный свет — приток энергии</span><span class="num" id="sunNum"></span></div>
+        <input type="range" id="sun" min="0" max="18" step="0.1" />
+      </div>
+    </div>
+    <div class="row">
+      <div class="sliderBlock">
+        <div class="sliderHead"><span class="lab">🌡 Температура — метаболизм</span><span class="num" id="tempNum"></span></div>
+        <input type="range" id="temp" min="0.4" max="1.8" step="0.02" />
+      </div>
+    </div>
+    <div class="btns">
+      <button id="playBtn" class="on">⏸ Пауза</button>
+      <button id="iceBtn" class="ice">❄ Ледниковый период</button>
+      <button id="resetBtn">↻ Новый мир</button>
+      <div class="speedGroup">
+        <button data-sp="30" class="on">1×</button>
+        <button data-sp="90">3×</button>
+        <button data-sp="180">6×</button>
+      </div>
+    </div>
+    <div class="hint">Коснись воды, чтобы подбросить корм · это тот же движок, что в ядре Фазы 0</div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+//  Порт ядра Фазы 0 на JS (тот же алгоритм, что в engine/src). Валидатор:
+//  доказать, что на эволюцию интересно СМОТРЕТЬ, до вложений в RN+Skia.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── PRNG mulberry32 ──
+function makePRNG(seed) {
+  let s = seed >>> 0;
+  const next = () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  return {
+    next,
+    range: (a, b) => a + (b - a) * next(),
+    gaussian: () => { let u = next(); if (u < 1e-12) u = 1e-12; return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*next()); },
+  };
+}
+
+// ── Гены ──
+const G = { Size:0, Speed:1, Metabolism:2, Vision:3, Repro:4, Mut:5, Hue:6 };
+const BOUNDS = [[0.4,2.5],[0.3,2.0],[0.5,1.5],[8,60],[60,200],[0.02,0.5],[0,1]];
+const NGENE = 7;
+const clamp = (v,l,h) => v<l?l:v>h?h:v;
+
+function randomGenome(rng) {
+  const b = new Float32Array(NGENE);
+  for (let i=0;i<NGENE;i++) b[i] = rng.range(BOUNDS[i][0], BOUNDS[i][1]);
+  return b;
+}
+function mutate(parent, rng) {
+  const rate = parent[G.Mut];
+  const b = new Float32Array(NGENE);
+  for (let i=0;i<NGENE;i++) {
+    let v = parent[i];
+    if (rng.next() < rate) v += rng.gaussian() * (BOUNDS[i][1]-BOUNDS[i][0]) * 0.1;
+    b[i] = clamp(v, BOUNDS[i][0], BOUNDS[i][1]);
+  }
+  return b;
+}
+
+// ── Компактная пространственная сетка (тороидальная) ──
+function makeGrid(w, h, cell) {
+  const cols = Math.max(1, Math.ceil(w/cell)), rows = Math.max(1, Math.ceil(h/cell));
+  const cells = Array.from({length: cols*rows}, () => []);
+  const idx = (x,y) => { let cx=Math.floor(x/cell)%cols, cy=Math.floor(y/cell)%rows;
+    if(cx<0)cx+=cols; if(cy<0)cy+=rows; return cy*cols+cx; };
+  return {
+    clear(){ for(const c of cells) c.length=0; },
+    insert(i,x,y){ cells[idx(x,y)].push(i); },
+    nearest(x,y,radius,xs,ys){
+      const reach=Math.ceil(radius/cell); let cx=Math.floor(x/cell)%cols, cy=Math.floor(y/cell)%rows;
+      if(cx<0)cx+=cols; if(cy<0)cy+=rows;
+      let best=-1, bd2=radius*radius;
+      for(let dy=-reach;dy<=reach;dy++) for(let dx=-reach;dx<=reach;dx++){
+        let gx=(cx+dx)%cols, gy=(cy+dy)%rows; if(gx<0)gx+=cols; if(gy<0)gy+=rows;
+        const bucket=cells[gy*cols+gx];
+        for(const j of bucket){
+          let ex=Math.abs(x-xs[j]), ey=Math.abs(y-ys[j]);
+          if(ex>w*0.5)ex=w-ex; if(ey>h*0.5)ey=h-ey;
+          const d2=ex*ex+ey*ey; if(d2<bd2){bd2=d2;best=j;}
+        }
+      }
+      return best;
+    }
+  };
+}
+
+// ── Мир ──
+const WORLD_W = 600, WORLD_H = 600, MAX_FOOD = 1200;
+function defaultConfig(){ return { sunlight:6, foodEnergy:32, nutrition:1, baseCost:0.18, moveCost:0.30, temperature:1 }; }
+
+function makeWorld(seed) {
+  const rng = makePRNG(seed);
+  const grid = makeGrid(WORLD_W, WORLD_H, 30);
+  const cfg = defaultConfig();
+  const creatures = [];
+  const foodX = new Float32Array(MAX_FOOD), foodY = new Float32Array(MAX_FOOD);
+  let foodCount = 0, tick = 0;
+  const timeline = [];
+
+  function spawnFood(){ if(foodCount>=MAX_FOOD)return; foodX[foodCount]=rng.range(0,WORLD_W); foodY[foodCount]=rng.range(0,WORLD_H); foodCount++; }
+  function removeFood(i){ foodCount--; foodX[i]=foodX[foodCount]; foodY[i]=foodY[foodCount]; }
+  const wrap=(v,m)=> v<0?v+m : v>=m?v-m : v;
+  const smooth=(t)=>t*t*(3-2*t);
+
+  for(let i=0;i<120;i++){
+    const g=randomGenome(rng);
+    creatures.push({ x:rng.range(0,WORLD_W), y:rng.range(0,WORLD_H), energy:g[G.Repro]*0.5, genome:g, wx:0, wy:0 });
+  }
+  for(let i=0;i<MAX_FOOD*0.5;i++) spawnFood();
+
+  function applyTimeline(){
+    for(const ev of timeline){
+      if(tick<ev.startTick) continue;
+      if(tick>ev.endTick){ cfg[ev.param]=ev.toValue; continue; }
+      const t=(tick-ev.startTick)/Math.max(1,(ev.endTick-ev.startTick));
+      cfg[ev.param]=ev.fromValue+(ev.toValue-ev.fromValue)*smooth(t);
+    }
+  }
+
+  function step(){
+    applyTimeline();
+    let spawn=cfg.sunlight;
+    while(spawn>=1){ spawnFood(); spawn-=1; }
+    if(rng.next()<spawn) spawnFood();
+
+    grid.clear();
+    for(let i=0;i<foodCount;i++) grid.insert(i, foodX[i], foodY[i]);
+
+    const newborns=[]; let alive=0;
+    for(let ci=0;ci<creatures.length;ci++){
+      const c=creatures[ci], g=c.genome;
+      const size=g[G.Size], speed=g[G.Speed], vision=g[G.Vision], metab=g[G.Metabolism], reproT=g[G.Repro];
+      const nf=grid.nearest(c.x,c.y,vision,foodX,foodY);
+      let dirX,dirY;
+      if(nf>=0){
+        let dx=foodX[nf]-c.x, dy=foodY[nf]-c.y;
+        if(dx>WORLD_W*0.5)dx-=WORLD_W; else if(dx<-WORLD_W*0.5)dx+=WORLD_W;
+        if(dy>WORLD_H*0.5)dy-=WORLD_H; else if(dy<-WORLD_H*0.5)dy+=WORLD_H;
+        const len=Math.hypot(dx,dy)||1; dirX=dx/len; dirY=dy/len;
+      } else {
+        const a=(rng.next()-0.5)*0.6, cs=Math.cos(a), sn=Math.sin(a);
+        let nx=c.wx*cs-c.wy*sn, ny=c.wx*sn+c.wy*cs; const l=Math.hypot(nx,ny);
+        if(l<1e-6){ const aa=rng.next()*Math.PI*2; nx=Math.cos(aa); ny=Math.sin(aa); } else { nx/=l; ny/=l; }
+        c.wx=nx; c.wy=ny; dirX=nx; dirY=ny;
+      }
+      c.x=wrap(c.x+dirX*speed, WORLD_W); c.y=wrap(c.y+dirY*speed, WORLD_H);
+      c.energy -= cfg.baseCost*size*metab*cfg.temperature + cfg.moveCost*speed*speed*size;
+
+      if(nf>=0){
+        const eat=size*3+2; let dx=foodX[nf]-c.x, dy=foodY[nf]-c.y;
+        if(dx>WORLD_W*0.5)dx-=WORLD_W; else if(dx<-WORLD_W*0.5)dx+=WORLD_W;
+        if(dy>WORLD_H*0.5)dy-=WORLD_H; else if(dy<-WORLD_H*0.5)dy+=WORLD_H;
+        if(dx*dx+dy*dy<=eat*eat){ c.energy+=cfg.foodEnergy*cfg.nutrition; removeFood(nf); }
+      }
+      if(c.energy<=0) continue;
+      if(c.energy>=reproT){
+        const ce=c.energy*0.5; c.energy-=ce;
+        newborns.push({ x:wrap(c.x+rng.range(-2,2),WORLD_W), y:wrap(c.y+rng.range(-2,2),WORLD_H), energy:ce, genome:mutate(g,rng), wx:0, wy:0 });
+      }
+      creatures[alive++]=c;
+    }
+    creatures.length=alive;
+    for(const nb of newborns) creatures.push(nb);
+    tick++;
+  }
+
+  return {
+    step, creatures, get foodX(){return foodX;}, get foodY(){return foodY;},
+    get foodCount(){return foodCount;}, get tick(){return tick;}, cfg,
+    schedule:(ev)=>timeline.push(ev),
+    dropFood(wx,wy,n){ for(let i=0;i<n;i++){ if(foodCount>=MAX_FOOD)break; foodX[foodCount]=wrap(wx+rng.range(-25,25),WORLD_W); foodY[foodCount]=wrap(wy+rng.range(-25,25),WORLD_H); foodCount++; } },
+    stats(){
+      const n=creatures.length||1; let s=0,sp=0;
+      for(const c of creatures){ s+=c.genome[G.Size]; sp+=c.genome[G.Speed]; }
+      return { pop:creatures.length, size:s/n, speed:sp/n, food:foodCount, tick };
+    }
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Рендер + цикл (отвязка тика от FPS — как SimClock в ядре)
+// ═══════════════════════════════════════════════════════════════════════════
+const tank = document.getElementById('tank');
+const ctx = tank.getContext('2d');
+const spark = document.getElementById('spark');
+const sctx = spark.getContext('2d');
+
+let world = makeWorld((Math.random()*1e9)|0);
+let playing = true;
+let tps = 30;
+let stepMs = 1000/tps;
+let acc = 0;
+let last = performance.now();
+const popHistory = [];
+
+// координатное преобразование world(600×600) → viewport (fit, centered)
+let view = { scale:1, ox:0, oy:0, w:0, h:0 };
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio||1, 2);
+  const rect = tank.getBoundingClientRect();
+  view.w = rect.width; view.h = rect.height;
+  tank.width = Math.floor(rect.width*dpr); tank.height = Math.floor(rect.height*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  const s = Math.max(rect.width/WORLD_W, rect.height/WORLD_H); // fill
+  view.scale = s;
+  view.ox = (rect.width - WORLD_W*s)/2;
+  view.oy = (rect.height - WORLD_H*s)/2;
+}
+window.addEventListener('resize', resize);
+
+function draw(){
+  const { scale:s, ox, oy } = view;
+  ctx.clearRect(0,0,view.w,view.h);
+
+  // еда — планктонные точки
+  ctx.fillStyle = 'rgba(150, 220, 165, 0.30)';
+  const fx=world.foodX, fy=world.foodY, fc=world.foodCount;
+  for(let i=0;i<fc;i++){ ctx.fillRect(ox+fx[i]*s-0.8, oy+fy[i]*s-0.8, 1.6, 1.6); }
+
+  // существа — биолюминесцентный рой (доп. слой свечения через 'lighter')
+  const cs = world.creatures;
+  ctx.globalCompositeOperation = 'lighter';
+  for(let i=0;i<cs.length;i++){
+    const c=cs[i], hue=c.genome[G.Hue]*360, r=(2+c.genome[G.Size]*3)*s;
+    const x=ox+c.x*s, y=oy+c.y*s;
+    ctx.fillStyle = `hsla(${hue}, 80%, 60%, 0.16)`;
+    ctx.beginPath(); ctx.arc(x,y,r*2.4,0,6.283); ctx.fill();       // ореол
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  for(let i=0;i<cs.length;i++){
+    const c=cs[i], hue=c.genome[G.Hue]*360, r=(2+c.genome[G.Size]*3)*s;
+    const x=ox+c.x*s, y=oy+c.y*s;
+    ctx.fillStyle = `hsl(${hue}, 75%, 62%)`;
+    ctx.beginPath(); ctx.arc(x,y,r,0,6.283); ctx.fill();          // тело
+  }
+}
+
+function drawSpark(){
+  const w=spark.width, h=spark.height;
+  sctx.clearRect(0,0,w,h);
+  if(popHistory.length<2) return;
+  const max=Math.max(...popHistory, 10);
+  sctx.strokeStyle='rgba(100,240,208,0.85)'; sctx.lineWidth=1.5; sctx.beginPath();
+  const n=popHistory.length;
+  for(let i=0;i<n;i++){
+    const x=(i/(n-1))*w, y=h-(popHistory[i]/max)*(h-3)-1.5;
+    i?sctx.lineTo(x,y):sctx.moveTo(x,y);
+  }
+  sctx.stroke();
+}
+
+let statTimer=0;
+function updateStats(){
+  const st=world.stats();
+  document.getElementById('pop').textContent=st.pop;
+  document.getElementById('ticks').textContent=st.tick.toLocaleString('ru');
+  document.getElementById('size').textContent=st.size.toFixed(2);
+  document.getElementById('speed').textContent=st.speed.toFixed(2);
+  document.getElementById('food').textContent=st.food;
+  popHistory.push(st.pop); if(popHistory.length>140) popHistory.shift();
+  drawSpark();
+  if(st.pop===0) showEpoch('Вымирание', true);
+}
+
+let epochTimer=null;
+function showEpoch(text, danger){
+  const el=document.getElementById('epoch');
+  el.textContent=text; el.style.color = danger ? 'var(--danger)' : 'var(--phosphor)';
+  el.classList.add('show');
+  clearTimeout(epochTimer); epochTimer=setTimeout(()=>el.classList.remove('show'), 2600);
+}
+
+function frame(now){
+  const dt=Math.min(now-last, 250); last=now;
+  if(playing){
+    acc+=dt; let steps=0;
+    while(acc>=stepMs && steps<12){ world.step(); acc-=stepMs; steps++; }
+    if(acc>stepMs*12) acc=0;
+  }
+  draw();
+  statTimer+=dt; if(statTimer>250){ statTimer=0; updateStats(); }
+  requestAnimationFrame(frame);
+}
+
+// ── Управление ──
+const sun=document.getElementById('sun'), sunNum=document.getElementById('sunNum');
+const temp=document.getElementById('temp'), tempNum=document.getElementById('tempNum');
+sun.value=world.cfg.sunlight; sunNum.textContent=(+sun.value).toFixed(1);
+temp.value=world.cfg.temperature; tempNum.textContent=(+temp.value).toFixed(2)+'×';
+sun.addEventListener('input', ()=>{ world.cfg.sunlight=+sun.value; sunNum.textContent=(+sun.value).toFixed(1); });
+temp.addEventListener('input', ()=>{ world.cfg.temperature=+temp.value; tempNum.textContent=(+temp.value).toFixed(2)+'×'; });
+
+const playBtn=document.getElementById('playBtn');
+playBtn.addEventListener('click', ()=>{ playing=!playing; playBtn.textContent=playing?'⏸ Пауза':'▶ Играть'; playBtn.classList.toggle('on',playing); });
+
+document.getElementById('resetBtn').addEventListener('click', ()=>{
+  world=makeWorld((Math.random()*1e9)|0); popHistory.length=0;
+  sun.value=world.cfg.sunlight; sunNum.textContent=(+sun.value).toFixed(1);
+  temp.value=world.cfg.temperature; tempNum.textContent=(+temp.value).toFixed(2)+'×';
+  document.getElementById('iceBtn').classList.remove('active');
+  showEpoch('Новый мир');
+});
+
+const iceBtn=document.getElementById('iceBtn');
+iceBtn.addEventListener('click', ()=>{
+  const base=world.cfg.sunlight, t=world.tick;
+  world.schedule({ startTick:t, endTick:t+400, param:'sunlight', fromValue:base, toValue:base*0.12 });
+  world.schedule({ startTick:t+900, endTick:t+1400, param:'sunlight', fromValue:base*0.12, toValue:base });
+  iceBtn.classList.add('active'); showEpoch('❄ Ледниковый период');
+  setTimeout(()=>iceBtn.classList.remove('active'), 6000);
+});
+
+document.querySelectorAll('.speedGroup button').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    document.querySelectorAll('.speedGroup button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on'); tps=+b.dataset.sp; stepMs=1000/tps;
+  });
+});
+
+// коснуться воды → подбросить корм
+function feedAt(clientX, clientY){
+  const rect=tank.getBoundingClientRect();
+  const wx=(clientX-rect.left-view.ox)/view.scale, wy=(clientY-rect.top-view.oy)/view.scale;
+  if(wx>=0&&wx<WORLD_W&&wy>=0&&wy<WORLD_H) world.dropFood(wx,wy,40);
+}
+tank.addEventListener('pointerdown', e=>feedAt(e.clientX,e.clientY));
+
+resize();
+updateStats();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
