@@ -20,7 +20,9 @@ import {
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import Slider from '@react-native-community/slider';
 import { AquariumCanvas } from './AquariumCanvas.tsx';
-import { useSimulation, type Inspected, type ResumeSummary } from './useSimulation.ts';
+import { useSimulation, type Inspected, type ResumeSummary, type NarrativeEvent } from './useSimulation.ts';
+
+const DAY_TICKS = 3000; // длительность суточного цикла света (~100 с при 30 tps)
 
 export default function App() {
   return (
@@ -60,7 +62,12 @@ function Aquarium() {
           radius={sim.radius}
           hue={sim.hue}
           count={sim.count}
+          foodX={sim.foodX}
+          foodY={sim.foodY}
+          foodCount={sim.foodCount}
           clock={sim.clock}
+          sunlight={sun}
+          dayPhase={(Math.sin((sim.stats.tick * 2 * Math.PI) / DAY_TICKS) + 1) / 2}
         />
 
         <View style={styles.readout} pointerEvents="none">
@@ -74,11 +81,7 @@ function Aquarium() {
         </View>
 
         {inspected && <Inspector data={inspected} onClose={() => setInspected(null)} />}
-        {sim.stats.population === 0 && !sim.catchingUp && (
-          <View style={styles.epoch} pointerEvents="none">
-            <Text style={styles.epochText}>ВЫМИРАНИЕ</Text>
-          </View>
-        )}
+        {sim.event && !sim.catchingUp && <EventToast event={sim.event} />}
         {sim.catchingUp && (
           <View style={styles.catchup} pointerEvents="none">
             <Text style={styles.catchupText}>⏩ Догоняю мир</Text>
@@ -207,6 +210,16 @@ function Row({ k, v }: { k: string; v: string }) {
     <View style={styles.inspectRow}>
       <Text style={styles.inspectK}>{k}</Text>
       <Text style={styles.inspectV}>{v}</Text>
+    </View>
+  );
+}
+
+/** Всплывающая «эпоха» — нарративное событие мира (группа 2: вовлечённость). */
+function EventToast({ event }: { event: NarrativeEvent }) {
+  const color = event.tone === 'bad' ? '#ff6b6b' : event.tone === 'good' ? '#64f0d0' : '#d3ece8';
+  return (
+    <View style={styles.epoch} pointerEvents="none">
+      <Text style={[styles.epochText, { color, textShadowColor: color }]}>{event.text.toUpperCase()}</Text>
     </View>
   );
 }
