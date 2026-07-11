@@ -6,7 +6,7 @@
  * движок про NEAT ничего не знает, дёргает brain.decide за интерфейсом Brain.
  */
 import { PRNG } from './prng.ts';
-import { Gene, randomGenome, mutate } from './genome.ts';
+import { Gene, randomGenome, mutate, crossover } from './genome.ts';
 import type { Genome } from './genome.ts';
 import { NeatBrain } from './brain.ts';
 import type { Brain, Sensors } from './brain.ts';
@@ -35,6 +35,8 @@ export interface Stats {
   meanReproThreshold: number;
   meanMutationRate: number;
   meanEnergy: number;
+  meanSexualTendency: number; // средняя склонность к половому размножению (0..1)
+  sexualShare: number;        // доля особей с tendency > 0.5
 }
 
 function smoothstep(t: number): number {
@@ -170,6 +172,7 @@ export class World {
     // 3. Обработка существ. Новорождённые копятся отдельно и добавляются в конце
     //    — стабильный детерминированный порядок.
     const newborns: Creature[] = [];
+    const sexualReady: Creature[] = []; // готовые к половому размножению этого тика
     let alive = 0;
 
     for (let ci = 0; ci < this.creatures.length; ci++) {
@@ -229,19 +232,27 @@ export class World {
         continue; // не переносим в живые
       }
 
-      // Размножение (бесполое): накопил порог → делится пополам с мутацией.
+      // Размножение: накопил порог. Способ — наследуемый ген SexualTendency (§4б):
+      // с вероятностью = tendency пытается половое, иначе делится сам (бесполое).
       if (c.energy >= reproT) {
-        const childEnergy = c.energy * 0.5;
-        c.energy -= childEnergy;
-        const childGenome = mutate(c.genome, this.rng, this.neat);
-        newborns.push({
-          x: this.wrap(c.x + this.rng.range(-2, 2), width),
-          y: this.wrap(c.y + this.rng.range(-2, 2), height),
-          energy: childEnergy,
-          age: 0,
-          genome: childGenome,
-          brain: new NeatBrain(childGenome.brain),
-        });
+        const goSexual = this.rng.next() < c.genome.body[Gene.SexualTendency];
+        if (goSexual) {
+          // Откладываем до пост-прохода: нужен партнёр рядом. Не нашёл — не размножился
+          // (это и есть цена секса: бесполый делится всегда, половой ждёт партнёра).
+          sexualReady.push(c);
+        } else {
+          const childEnergy = c.energy * 0.5;
+          c.energy -= childEnergy;
+          const childGenome = mutate(c.genome, this.rng, this.neat);
+          newborns.push({
+            x: this.wrap(c.x + this.rng.range(-2, 2), width),
+            y: this.wrap(c.y + this.rng.range(-2, 2), height),
+            energy: childEnergy,
+            age: 0,
+            genome: childGenome,
+            brain: new NeatBrain(childGenome.brain),
+          });
+        }
       }
 
       // Компакция живых на месте.
@@ -249,15 +260,68 @@ export class World {
     }
 
     this.creatures.length = alive;
+    // Половое размножение: спариваем готовых, кто нашёл партнёра в радиусе.
+    this.mate(sexualReady, newborns, width, height);
     for (let i = 0; i < newborns.length; i++) this.creatures.push(newborns[i]);
 
     this.tick++;
   }
 
+  // Радиус поиска партнёра (мировые единицы). Тесно связан с ценой секса: меньше
+  // радиус → труднее найти партнёра → сильнее давление против половых.
+  private static readonly MATING_RADIUS = 40;
+
+  /**
+   * Пост-проход полового размножения. Готовых спариваем: для каждого ищем ближайшего
+   * ещё не спаренного партнёра в радиусе. Двое родителей дают ОДНОГО ребёнка (кроссовер
+   * + мутация) — это двойная цена секса по темпу (§4б). Оба платят половиной энергии.
+   * Не нашёл партнёра → не размножился (энергия остаётся, попробует в следующий тик).
+   */
+  private mate(ready: Creature[], newborns: Creature[], width: number, height: number): void {
+    const R2 = World.MATING_RADIUS * World.MATING_RADIUS;
+    const paired = new Set<number>();
+    for (let i = 0; i < ready.length; i++) {
+      if (paired.has(i)) continue;
+      const a = ready[i];
+      let bestJ = -1;
+      let bd2 = R2;
+      for (let j = i + 1; j < ready.length; j++) {
+        if (paired.has(j)) continue;
+        const b = ready[j];
+        let dx = Math.abs(a.x - b.x);
+        let dy = Math.abs(a.y - b.y);
+        if (dx > width * 0.5) dx = width - dx;
+        if (dy > height * 0.5) dy = height - dy;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bd2) {
+          bd2 = d2;
+          bestJ = j;
+        }
+      }
+      if (bestJ < 0) continue; // партнёра рядом нет — цена секса
+      paired.add(i);
+      paired.add(bestJ);
+      const b = ready[bestJ];
+      const childGenome = mutate(crossover(a.genome, b.genome, this.rng), this.rng, this.neat);
+      const aGive = a.energy * 0.5;
+      const bGive = b.energy * 0.5;
+      a.energy -= aGive;
+      b.energy -= bGive;
+      newborns.push({
+        x: this.wrap(a.x + this.rng.range(-2, 2), width),
+        y: this.wrap(a.y + this.rng.range(-2, 2), height),
+        energy: aGive + bGive,
+        age: 0,
+        genome: childGenome,
+        brain: new NeatBrain(childGenome.brain),
+      });
+    }
+  }
+
   /** Снимок статистики (для тестов и графиков). */
   stats(): Stats {
     const n = this.creatures.length;
-    let sSize = 0, sSpeed = 0, sVision = 0, sRepro = 0, sMut = 0, sEnergy = 0;
+    let sSize = 0, sSpeed = 0, sVision = 0, sRepro = 0, sMut = 0, sEnergy = 0, sSex = 0, sexCount = 0;
     for (const c of this.creatures) {
       sSize += c.genome.body[Gene.Size];
       sSpeed += c.genome.body[Gene.Speed];
@@ -265,6 +329,9 @@ export class World {
       sRepro += c.genome.body[Gene.ReproThreshold];
       sMut += c.genome.body[Gene.MutationRate];
       sEnergy += c.energy;
+      const sex = c.genome.body[Gene.SexualTendency];
+      sSex += sex;
+      if (sex > 0.5) sexCount++;
     }
     const d = n || 1;
     return {
@@ -277,6 +344,8 @@ export class World {
       meanReproThreshold: sRepro / d,
       meanMutationRate: sMut / d,
       meanEnergy: sEnergy / d,
+      meanSexualTendency: sSex / d,
+      sexualShare: sexCount / d,
     };
   }
 

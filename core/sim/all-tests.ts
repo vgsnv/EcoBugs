@@ -4,7 +4,7 @@
  *
  *   node sim/all-tests.ts
  */
-const suites = ['./check-invariants.ts', './tests.ts', './render-test.ts', './serialize-test.ts', './neat-test.ts'];
+const suites = ['./check-invariants.ts', './tests.ts', './render-test.ts', './serialize-test.ts', './neat-test.ts', './sexual-test.ts'];
 let failed = 0;
 
 for (const s of suites) {
