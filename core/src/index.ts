@@ -7,7 +7,7 @@
 export { World } from './world.ts';
 export type { Creature, Stats } from './world.ts';
 
-export { Gene, GENE_COUNT, GENE_BOUNDS, randomGenome, mutate, crossover } from './genome.ts';
+export { Gene, GENE_COUNT, GENE_BOUNDS, randomGenome, mutate, crossover, DEFAULT_GENE_POOL } from './genome.ts';
 export type { Genome, BrainGenome } from './genome.ts';
 
 export { RuleBrain, NeatBrain } from './brain.ts';
@@ -24,4 +24,4 @@ export { snapshot, restore } from './serialize.ts';
 export type { WorldSnapshot, CreatureSnapshot } from './serialize.ts';
 
 export { defaultGenesis, defaultConfig } from './config.ts';
-export type { WorldGenesis, WorldConfig, TimelineEvent, Easing } from './types.ts';
+export type { WorldGenesis, WorldConfig, TimelineEvent, Easing, GenePool } from './types.ts';

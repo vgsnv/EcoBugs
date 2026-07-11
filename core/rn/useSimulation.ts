@@ -22,8 +22,11 @@ import { AppState } from 'react-native';
 import { useSharedValue, type SharedValue } from 'react-native-reanimated';
 import { Skia } from '@shopify/react-native-skia';
 import type { SkImage, SkSurface, SkPaint, SkColor } from '@shopify/react-native-skia';
-import { World, SimClock, defaultGenesis, defaultConfig, Gene } from '../src/index.ts';
-import type { WorldConfig } from '../src/index.ts';
+import { World, SimClock, defaultGenesis, defaultConfig, Gene, DEFAULT_GENE_POOL } from '../src/index.ts';
+import type { WorldConfig, GenePool } from '../src/index.ts';
+
+export type { GenePool };
+export { DEFAULT_GENE_POOL };
 import { saveWorld, loadWorld, clearWorld } from './persistence.ts';
 
 const CAP = 3000; // потолок существ в буфере рендера
@@ -148,7 +151,7 @@ export interface SimHandle {
   scheduleClimate: (kind: ClimateKind, delayTicks: number) => void;
   cancelEvent: (id: number) => void;
   getUpcoming: () => ClimateView[];
-  reset: () => void;
+  reset: (pool?: GenePool) => void;
   togglePlay: () => void;
   inspectAt: (wx: number, wy: number) => Inspected | null;
   stats: SimStats;
@@ -524,7 +527,7 @@ export function useSimulation(): SimHandle {
       }
       return Array.from(byId.values()).sort((a, b) => a.startTick - b.startTick);
     },
-    reset: () => {
+    reset: (pool?: GenePool) => {
       clearWorld();
       catchupRef.current = null;
       setCatchingUp(false);
@@ -537,7 +540,7 @@ export function useSimulation(): SimHandle {
         surfaceRef.current.flush();
         trail.value = surfaceRef.current.makeImageSnapshot();
       }
-      worldRef.current = new World(defaultGenesis(newSeed()), defaultConfig());
+      worldRef.current = new World(defaultGenesis(newSeed(), pool ?? DEFAULT_GENE_POOL), defaultConfig());
       historyRef.current = [];
     },
     togglePlay: () => {

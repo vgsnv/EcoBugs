@@ -8,6 +8,7 @@
  */
 import { PRNG } from './prng.ts';
 import { seedGenome, mutateBrain, crossoverBrain, type NeatGenome, type NeatContext } from './neat.ts';
+import type { GenePool } from './types.ts';
 
 /**
  * Индексы генов тела. Фиксированная длина, плоский Float32Array.
@@ -47,18 +48,42 @@ export interface Genome {
   brain: BrainGenome;      // растущая NEAT-сеть
 }
 
-/** Случайный геном: случайное тело + сид-мозг под поведение «плыви к еде». */
-export function randomGenome(rng: PRNG): Genome {
-  const body = new Float32Array(GENE_COUNT);
-  for (let i = 0; i < GENE_COUNT; i++) {
-    const [lo, hi] = GENE_BOUNDS[i];
-    body[i] = rng.range(lo, hi);
-  }
-  return { body, brain: seedGenome(rng) };
-}
+/**
+ * Дефолтный генофонд: полный разброс, смешанная стратегия, естественный центр мутаций.
+ * ВАЖНО: при этих значениях randomGenome даёт РОВНО те же rng-вызовы, что и раньше
+ * (center = середина диапазона, diversity = 1) → детерминизм и тесты не меняются.
+ */
+export const DEFAULT_GENE_POOL: GenePool = {
+  diversity: 1,
+  sexualCenter: 0.5,
+  mutationCenter: 0.26, // = середина [0.02, 0.5]
+};
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/**
+ * Случайный геном стартовой особи: тело по генофонду + сид-мозг «плыви к еде».
+ * Формула сохраняет число/порядок rng-вызовов (по одному range на ген), поэтому при
+ * DEFAULT_GENE_POOL история побайтно совпадает с прежней.
+ *
+ *   значение = центр + (разброс − серединаДиапазона) · diversity, клампится в границы.
+ * diversity=0 → все особи у центра (клоны); diversity=1 → полный разброс.
+ * Для SexualTendency центр = sexualCenter, для MutationRate = mutationCenter.
+ */
+export function randomGenome(rng: PRNG, pool: GenePool = DEFAULT_GENE_POOL): Genome {
+  const body = new Float32Array(GENE_COUNT);
+  for (let i = 0; i < GENE_COUNT; i++) {
+    const [lo, hi] = GENE_BOUNDS[i];
+    const r = rng.range(lo, hi);
+    const mid = (lo + hi) / 2;
+    let center = mid;
+    if (i === Gene.SexualTendency) center = pool.sexualCenter * (hi - lo) + lo;
+    else if (i === Gene.MutationRate) center = pool.mutationCenter;
+    body[i] = clamp(center + (r - mid) * pool.diversity, lo, hi);
+  }
+  return { body, brain: seedGenome(rng) };
 }
 
 /**
