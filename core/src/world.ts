@@ -66,6 +66,7 @@ export class World {
 
   tick = 0;
   private timeline: TimelineEvent[] = [];
+  nextEventId = 1; // счётчик id катаклизмов (для группировки/отмены в планировщике)
 
   constructor(genesis: WorldGenesis, config: WorldConfig) {
     this.genesis = genesis;
@@ -96,6 +97,21 @@ export class World {
   /** Планирование события/катаклизма (см. план §5). */
   schedule(ev: TimelineEvent): void {
     this.timeline.push(ev);
+  }
+
+  /** Новый id катаклизма (детерминированный счётчик, восстанавливается при resume). */
+  newEventId(): number {
+    return this.nextEventId++;
+  }
+
+  /** Отменить катаклизм по id (все его под-события). Правка таймлайна игроком. */
+  removeEvent(id: number): void {
+    this.timeline = this.timeline.filter((e) => e.id !== id);
+  }
+
+  /** Актуальные (идущие/будущие) события таймлайна — для планировщика. Копия. */
+  upcomingEvents(): TimelineEvent[] {
+    return this.timeline.filter((e) => e.endTick >= this.tick).map((e) => ({ ...e }));
   }
 
   /** Мгновенная реактивная правка «сейчас» = событие с нулевой длительностью. */
