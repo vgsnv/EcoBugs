@@ -2,13 +2,15 @@
  * Ядро симуляции. Чистый TS, без единого импорта из RN/Skia (см. план §3).
  * Фиксированный timestep, детерминизм от (seed + genesis + timeline).
  *
- * Фаза 0: только травоядные, бесполое размножение, RuleBrain.
+ * Травоядные, бесполое размножение. Поведение — NeatBrain (растущая NEAT-сеть);
+ * движок про NEAT ничего не знает, дёргает brain.decide за интерфейсом Brain.
  */
 import { PRNG } from './prng.ts';
 import { Gene, randomGenome, mutate } from './genome.ts';
 import type { Genome } from './genome.ts';
-import { RuleBrain } from './brain.ts';
+import { NeatBrain } from './brain.ts';
 import type { Brain, Sensors } from './brain.ts';
+import { NeatContext } from './neat.ts';
 import { SpatialGrid } from './grid.ts';
 import type { WorldGenesis, WorldConfig, TimelineEvent, Easing } from './types.ts';
 
@@ -44,6 +46,8 @@ export class World {
   config: WorldConfig;              // живой, тик читает каждый кадр
   private rng: PRNG;
   private grid: SpatialGrid;
+  // Реестр инноваций NEAT — per-world (детерминизм: не глобальный модульный счётчик).
+  neat: NeatContext;
 
   creatures: Creature[] = [];
   // Еда — параллельные массивы координат (дёшево и grid-friendly).
@@ -59,6 +63,7 @@ export class World {
     this.config = { ...config };
     this.rng = new PRNG(genesis.seed);
     this.grid = new SpatialGrid(genesis.width, genesis.height, genesis.cellSize);
+    this.neat = new NeatContext();
     this.foodX = new Float32Array(genesis.maxFood);
     this.foodY = new Float32Array(genesis.maxFood);
 
@@ -71,7 +76,7 @@ export class World {
         energy: g.body[Gene.ReproThreshold] * 0.5,
         age: 0,
         genome: g,
-        brain: new RuleBrain(),
+        brain: new NeatBrain(g.brain),
       });
     }
     // Немного стартовой еды, чтобы первое поколение не вымерло сразу.
@@ -228,14 +233,14 @@ export class World {
       if (c.energy >= reproT) {
         const childEnergy = c.energy * 0.5;
         c.energy -= childEnergy;
-        const childGenome = mutate(c.genome, this.rng);
+        const childGenome = mutate(c.genome, this.rng, this.neat);
         newborns.push({
           x: this.wrap(c.x + this.rng.range(-2, 2), width),
           y: this.wrap(c.y + this.rng.range(-2, 2), height),
           energy: childEnergy,
           age: 0,
           genome: childGenome,
-          brain: new RuleBrain(),
+          brain: new NeatBrain(childGenome.brain),
         });
       }
 
@@ -290,6 +295,13 @@ export class World {
     for (const c of this.creatures) {
       mix(c.x); mix(c.y); mix(c.energy);
       for (let i = 0; i < c.genome.body.length; i++) mix(c.genome.body[i]);
+      // Мозг тоже влияет на будущее → в хэш (иначе тест детерминизма его не покрывает).
+      const br = c.genome.brain;
+      mix(br.nodes.length);
+      for (const conn of br.connections) {
+        mix(conn.inNode); mix(conn.outNode); mix(conn.weight);
+        mix(conn.enabled ? 1 : 0); mix(conn.innovation);
+      }
     }
     return h >>> 0;
   }
