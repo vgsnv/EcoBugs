@@ -1,12 +1,14 @@
 import {
-  WORLD_FORMAT_VERSION, createWorld, lightFromIntensity, makeParams, rasterizeSpotIntensity, rasterizeTemperature,
+  WORLD_FORMAT_VERSION, createWorld, lightFromIntensity, makeParams, rasterizeSpotIntensity, rasterizeTemperature, smoothLevelAt,
 } from '../core/index.ts';
+
+const VISC_COLORS: readonly (readonly [number, number, number])[] = [[25, 70, 150], [60, 160, 165], [170, 135, 80]];
 
 const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
 const status = document.querySelector<HTMLDivElement>('#status')!;
 
-// Временная проверка этапов 2–3: карта света и температура с сильным
-// ускорением времени; клавиша T переключает слой. Полноценная песочница — этап 6.
+// Временная проверка этапов 2–4: свет (L), температура (T), вязкость (V)
+// с сильным ускорением времени. Полноценная песочница — этап 6.
 const world = createWorld(makeParams({ seed: 1 }));
 const { width, height } = world.params;
 const CELL = 4;
@@ -24,10 +26,14 @@ const ctx = canvas.getContext('2d')!;
 const image = ctx.createImageData(cols, rows);
 let intensity: Float32Array = new Float32Array(cols * rows);
 let temperature: Float32Array = new Float32Array(cols * rows);
-let layer: 'light' | 'temperature' = 'light';
+type Layer = 'light' | 'temperature' | 'viscosity';
+let layer: Layer = 'light';
+const LAYER_KEYS: Record<string, Layer> = { l: 'light', д: 'light', t: 'temperature', е: 'temperature', v: 'viscosity', м: 'viscosity' };
+const LAYER_NAMES: Record<Layer, string> = { light: 'свет', temperature: 'температура', viscosity: 'вязкость' };
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 't' || e.key === 'T' || e.key === 'е' || e.key === 'Е') layer = layer === 'light' ? 'temperature' : 'light';
+  const next = LAYER_KEYS[e.key.toLowerCase()];
+  if (next) layer = next;
 });
 
 function draw(): void {
@@ -43,6 +49,15 @@ function draw(): void {
       image.data[i] = c;
       image.data[i + 1] = c;
       image.data[i + 2] = Math.round(c * 0.8);
+    } else if (layer === 'viscosity') {
+      // Вода — синяя, отмель — бирюзовая, суша — охристая; границы плавные.
+      const x = ((k % cols) + 0.5) * CELL;
+      const y = (Math.floor(k / cols) + 0.5) * CELL;
+      const l = smoothLevelAt(world.viscosity, x, y);
+      const [a, b, u] = l <= 1 ? [VISC_COLORS[0], VISC_COLORS[1], l] : [VISC_COLORS[1], VISC_COLORS[2], l - 1];
+      image.data[i] = Math.round(a[0] + (b[0] - a[0]) * u);
+      image.data[i + 1] = Math.round(a[1] + (b[1] - a[1]) * u);
+      image.data[i + 2] = Math.round(a[2] + (b[2] - a[2]) * u);
     } else {
       // Холодное — синее, тёплое — красное.
       const u = tMax > tMin ? (temperature[k] - tMin) / (tMax - tMin) : 0;
@@ -53,8 +68,7 @@ function draw(): void {
     image.data[i + 3] = 255;
   }
   ctx.putImageData(image, 0, 0);
-  const layerName = layer === 'light' ? 'свет' : 'температура';
-  status.textContent = `Песочница мира · формат v${WORLD_FORMAT_VERSION} · сид ${p.seed} · шаг ${world.step.toLocaleString('ru')} · ×${STEPS_PER_FRAME} за кадр · слой: ${layerName} (T — переключить)`;
+  status.textContent = `Песочница мира · формат v${WORLD_FORMAT_VERSION} · сид ${p.seed} · шаг ${world.step.toLocaleString('ru')} · ×${STEPS_PER_FRAME} за кадр · слой: ${LAYER_NAMES[layer]} (L / T / V)`;
 }
 
 function frame(): void {

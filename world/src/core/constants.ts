@@ -38,3 +38,18 @@ export const SPOT_MIN_RADIUS = 0.55;
 export const SPOT_SIZE_SPREAD = 0.45;
 export const SPOT_SIZE_MIN = 0.35;
 export const SPOT_SIZE_MAX = 3;
+
+/** Размер ячейки карты вязкости, единиц мира. */
+export const VISCOSITY_CELL = 4;
+
+/** Множитель сопротивления движению для воды, отмели, суши (к базовой вязкости). */
+export const VISCOSITY_MULTIPLIERS: readonly [number, number, number] = [1, 3, 9];
+
+/** Доля усваиваемого света для воды, отмели, суши. */
+export const LIGHT_ABSORPTION: readonly [number, number, number] = [0.5, 0.75, 1];
+
+/** Минимальная ширина кольца отмели вокруг суши, в ячейках карты. */
+export const SHALLOWS_RING_MIN = 2;
+
+/** Радиус размытия границ градаций, в ячейках карты. */
+export const VISCOSITY_BLUR = 3;
