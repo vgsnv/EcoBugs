@@ -20,10 +20,10 @@ const CELL = 4;
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(190, 225, 255, 0.22)';
-const GLASS_GLOSS_FROM = 'rgba(255, 255, 255, 0.5)';
-const GLASS_GLOSS_TO = 'rgba(170, 210, 240, 0.16)';
-const GLASS_EDGE = 'rgba(235, 248, 255, 0.85)';
-const GLASS_SHADOW = 'rgba(0, 12, 28, 0.7)';
+const GLASS_GLOSS_FROM = 'rgba(205, 228, 245, 0.85)';
+const GLASS_GLOSS_TO = 'rgba(150, 190, 222, 0.45)';
+const GLASS_EDGE = 'rgba(255, 255, 255, 0.9)';
+const GLASS_SHADOW = 'rgba(30, 55, 80, 0.65)';
 
 type Rgb = readonly [number, number, number];
 const VISC_COLORS: readonly Rgb[] = [[25, 70, 150], [60, 160, 165], [170, 135, 80]];

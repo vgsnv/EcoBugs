@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Песочница мира</title>
     <style>
-      :root { color-scheme: dark; --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9; --muted: #8b949e; --accent: #2f81f7; --danger: #f85149; }
+      :root { color-scheme: light; --bg: #f3f5f8; --panel: #ffffff; --border: #d0d7de; --text: #1f2328; --muted: #59636e; --accent: #0969da; --danger: #cf222e; --control: #f6f8fa; }
       * { box-sizing: border-box; }
       html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font: 13px system-ui, sans-serif; }
       main { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
@@ -18,13 +18,13 @@
       label.inline { flex-direction: row; align-items: center; gap: 6px; }
       .row { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
       .value { color: var(--muted); font-variant-numeric: tabular-nums; }
-      input[type=number], select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px; width: 100%; }
+      input[type=number], select { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px; width: 100%; }
       input[type=range] { width: 100%; }
-      button { background: #21262d; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; cursor: pointer; white-space: nowrap; }
+      button { background: var(--control); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; cursor: pointer; white-space: nowrap; }
       button:hover:not(:disabled) { border-color: var(--muted); }
       button:disabled { opacity: 0.5; cursor: default; }
       button.primary { background: var(--accent); border-color: var(--accent); color: #fff; padding: 6px; }
-      button.active { border-color: var(--accent); color: #fff; }
+      button.active { border-color: var(--accent); color: var(--accent); background: #ddf4ff; }
       .speeds { justify-content: flex-start; flex-wrap: wrap; }
       .time { font-variant-numeric: tabular-nums; }
       .note { color: var(--muted); font-size: 12px; }
