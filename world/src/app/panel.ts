@@ -3,10 +3,10 @@
  * Параметры задаются при сотворении, поэтому правки копятся в черновике
  * и применяются кнопкой «Создать мир».
  */
-import { LAYOUTS, LAYOUT_PRESETS, validateParams, type WorldParams } from '../core/index.ts';
+import { LAYOUTS, LAYOUT_PRESETS, makeParams, validateParams, type WorldParams } from '../core/index.ts';
 import { LAYER_NAMES, type Layer } from './render.ts';
 
-export const SPEEDS = [1, 10, 100, 1000, 10000] as const;
+export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
 
 export interface PanelHandlers {
   onCreate(params: WorldParams): void;
@@ -75,6 +75,8 @@ export class Panel {
   private readonly probeBox = el('div', { className: 'probe' });
   private readonly createButton = el('button', { className: 'primary', textContent: 'Создать мир' });
   private readonly fileStatus = el('div', { className: 'note' });
+  private readonly revertButton = el('button', { textContent: 'Отменить правки' });
+  private readonly defaultsButton = el('button', { textContent: 'По умолчанию' });
   private readonly inputs: (() => void)[] = [];
   private current: WorldParams;
 
@@ -90,11 +92,14 @@ export class Panel {
       this.dirtyNote,
       this.errorsBox,
       this.createButton,
+      el('span', { className: 'row' }, this.revertButton, this.defaultsButton),
       this.timeSection(),
       this.layerSection(),
       this.fileSection(),
       el('section', {}, el('h3', { textContent: 'Под курсором' }), this.probeBox),
     );
+    this.revertButton.addEventListener('click', () => this.replaceDraft(this.current));
+    this.defaultsButton.addEventListener('click', () => this.replaceDraft(makeParams({ seed: this.draft.seed })));
     this.createButton.addEventListener('click', () => {
       if (validateParams(this.draft).length === 0) handlers.onCreate(structuredClone(this.draft));
     });
@@ -105,6 +110,13 @@ export class Panel {
   /** Мир создан с этими параметрами — черновик совпадает с миром. */
   setCurrent(params: WorldParams): void {
     this.current = structuredClone(params);
+    this.draft = structuredClone(params);
+    for (const sync of this.inputs) sync();
+    this.refresh();
+  }
+
+  /** Заменить черновик целиком и обновить все поля панели. */
+  private replaceDraft(params: WorldParams): void {
     this.draft = structuredClone(params);
     for (const sync of this.inputs) sync();
     this.refresh();
@@ -264,6 +276,8 @@ export class Panel {
     this.createButton.disabled = errors.length > 0;
     const dirty = JSON.stringify(this.draft) !== JSON.stringify(this.current);
     this.dirtyNote.textContent = dirty ? 'Параметры задаются при сотворении — изменения применятся к новому миру.' : '';
+    this.revertButton.disabled = !dirty;
+    this.defaultsButton.disabled = JSON.stringify(this.draft) === JSON.stringify(makeParams({ seed: this.draft.seed }));
   }
 }
 

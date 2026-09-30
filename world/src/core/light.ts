@@ -1,8 +1,8 @@
 /**
  * Карта света (спецификация, раздел «Свет»): светлые пятна на тёмном фоне.
  *
- * Реализация: пятно — группа мягких эллипсов (здесь — кругов) с минимальным
- * радиусом, поэтому пятно не исчезает. Свет пятен в точке — максимум по
+ * Реализация: пятно — группа мягких эллипсов с минимальным размером, поэтому
+ * пятно не исчезает. Эллипсы вытянуты, медленно вращаются, край у них волнистый. Свет пятен в точке — максимум по
  * эллипсам, поэтому яркость не складывается. Эллипсы группы колеблются
  * относительно центра пятна — пятно вытягивается, делится и сливается обратно;
  * у каждого пятна свой медленный дрейф — разные пятна встречаются и сливаются.
@@ -11,7 +11,7 @@
  * Всё движение — формулы от номера шага: свет на любом шаге считается сразу.
  */
 import {
-  LIGHT_DRIFT_SPEED, LIGHT_MAP_SCALE, LIGHT_TURN_PERIOD, SPOT_EDGE, SPOT_MAX_BLOBS,
+  LIGHT_DRIFT_SPEED, LIGHT_MAP_SCALE, LIGHT_TURN_PERIOD, SPOT_ASPECT_MAX, SPOT_EDGE, SPOT_EDGE_WAVE, SPOT_MAX_BLOBS, SPOT_SPIN_PERIOD,
   SPOT_MIN_RADIUS, SPOT_OWN_DRIFT, SPOT_SIZE_MAX, SPOT_SIZE_MIN, SPOT_SIZE_SPREAD,
   SPOT_WOBBLE_PERIOD, SPOT_WOBBLE_REACH,
 } from './constants.ts';
@@ -22,8 +22,15 @@ const TAU = Math.PI * 2;
 const GOLDEN = 1.6180339887;
 
 interface Blob {
-  /** Базовый радиус. */
+  /** Базовый радиус (средний; полуоси — radius·√aspect и radius/√aspect). */
   radius: number;
+  /** Вытянутость: отношение полуосей, ≥ 1. */
+  aspect: number;
+  /** Поворот эллипса: начальный угол и угловая скорость. */
+  a0: number; wa: number;
+  /** Волны края: две гармоники по углу (3 и 5 горбов) — амплитуда, фаза, скорость смены. */
+  e3: number; p3: number; w3: number;
+  e5: number; p5: number; w5: number;
   /** Колебание смещения от центра пятна по x и y: амплитуда, частота, фаза. */
   ax: number; wx: number; px: number;
   ay: number; wy: number; py: number;
@@ -82,8 +89,13 @@ function makeSpot(rng: Rng, mapW: number, mapH: number, meanRadius: number): Spo
   for (let j = 0; j < blobCount; j++) {
     const reach = j === 0 ? 0.3 : SPOT_WOBBLE_REACH;
     const w = () => TAU / (SPOT_WOBBLE_PERIOD * rng.range(0.6, 1.6));
+    const wave3 = SPOT_EDGE_WAVE * rng.range(0.3, 0.7);
     blobs.push({
       radius: radius * (j === 0 ? 1 : rng.range(0.5, 0.9)),
+      aspect: rng.range(1, SPOT_ASPECT_MAX),
+      a0: rng.range(0, TAU), wa: (TAU / (SPOT_SPIN_PERIOD * rng.range(0.6, 1.6))) * (rng.next() < 0.5 ? -1 : 1),
+      e3: wave3, p3: rng.range(0, TAU), w3: w() * 0.5,
+      e5: SPOT_EDGE_WAVE - wave3, p5: rng.range(0, TAU), w5: w() * 0.7,
       ax: radius * reach * rng.range(0.3, 1), wx: w(), px: rng.range(0, TAU),
       ay: radius * reach * rng.range(0.3, 1), wy: w(), py: rng.range(0, TAU),
       wr: w(), pr: rng.range(0, TAU),
@@ -113,6 +125,33 @@ function falloff(dist: number, radius: number): number {
   return u * u * (3 - 2 * u);
 }
 
+/** Наибольшая полуось эллипса в шаге t. */
+function blobMajor(b: Blob, t: number): number {
+  return blobRadius(b, t) * Math.sqrt(b.aspect);
+}
+
+/** Радиус, дальше которого эллипс заведомо не светит (с волнами и краем). */
+function blobReach(b: Blob, t: number): number {
+  return blobMajor(b, t) * (1 + SPOT_EDGE_WAVE) * (1 + SPOT_EDGE);
+}
+
+/**
+ * Свет эллипса в точке, заданной смещением (dx, dy) от его центра: 1 внутри,
+ * плавно до 0 на краю. Край волнистый: граница по углу — 1 ± волны.
+ */
+function blobIntensity(b: Blob, dx: number, dy: number, t: number): number {
+  const r = blobRadius(b, t);
+  const k = Math.sqrt(b.aspect);
+  const angle = b.a0 + b.wa * t;
+  const c = Math.cos(angle);
+  const sn = Math.sin(angle);
+  const u = (dx * c + dy * sn) / (r * k);
+  const v = (-dx * sn + dy * c) * k / r;
+  const phi = Math.atan2(v, u);
+  const bound = 1 + b.e3 * Math.sin(3 * phi + b.p3 + b.w3 * t) + b.e5 * Math.sin(5 * phi + b.p5 + b.w5 * t);
+  return falloff(Math.hypot(u, v), bound);
+}
+
 /** Центры эллипсов пятна на карте в шаге t (без общего сдвига карты). */
 function blobCenter(s: Spot, b: Blob, t: number, mapW: number, mapH: number): [number, number] {
   return [
@@ -139,12 +178,11 @@ function spotIntensityOnMap(spots: readonly Spot[], x: number, y: number, t: num
   for (const s of spots) {
     for (const b of s.blobs) {
       const [cx, cy] = blobCenter(s, b, t, mapW, mapH);
-      const r = blobRadius(b, t);
       const dx = wrapDelta(x - cx, mapW);
       const dy = wrapDelta(y - cy, mapH);
-      const reach = r * (1 + SPOT_EDGE);
+      const reach = blobReach(b, t);
       if (Math.abs(dx) > reach || Math.abs(dy) > reach) continue;
-      const v = falloff(Math.hypot(dx, dy), r);
+      const v = blobIntensity(b, dx, dy, t);
       if (v > best) {
         best = v;
         if (best === 1) return 1;
@@ -243,8 +281,7 @@ export function rasterizeSpotIntensity(map: LightMap, t: number, cols: number, r
   for (const s of map.spots) {
     for (const b of s.blobs) {
       const [mx, my] = blobCenter(s, b, t, W, H);
-      const r = blobRadius(b, t);
-      const reach = r * (1 + SPOT_EDGE);
+      const reach = blobReach(b, t);
       // Положение центра в координатах чашки — ближайшая копия на сомкнутой карте.
       const cx0 = wrap(mx + ox, W);
       const cy0 = wrap(my + oy, H);
@@ -259,7 +296,7 @@ export function rasterizeSpotIntensity(map: LightMap, t: number, cols: number, r
           for (let j = j0; j <= j1; j++) {
             const py = (j + 0.5) * cell - cy;
             for (let i = i0; i <= i1; i++) {
-              const v = falloff(Math.hypot((i + 0.5) * cell - cx, py), r);
+              const v = blobIntensity(b, (i + 0.5) * cell - cx, py, t);
               const k = j * cols + i;
               if (v > field[k]) field[k] = v;
             }
@@ -271,9 +308,12 @@ export function rasterizeSpotIntensity(map: LightMap, t: number, cols: number, r
   return field;
 }
 
-/** Текущий размер каждого пятна (наибольший радиус его эллипсов) — для проверки «пятно не исчезает». */
+/**
+ * Текущий размер каждого пятна — наименьшая возможная полуось его крупнейшего
+ * эллипса с учётом волн края. Для проверки «пятно не исчезает».
+ */
 export function spotSizes(map: LightMap, t: number): number[] {
-  return map.spots.map((s) => Math.max(...s.blobs.map((b) => blobRadius(b, t))));
+  return map.spots.map((s) => Math.max(...s.blobs.map((b) => (blobRadius(b, t) / Math.sqrt(b.aspect)) * (1 - b.e3 - b.e5))));
 }
 
 /** Доля чашки под пятнами в шаге t — оценка по сетке. */

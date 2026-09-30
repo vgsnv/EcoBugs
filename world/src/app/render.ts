@@ -23,6 +23,11 @@ const VISC_COLORS: readonly Rgb[] = [[25, 70, 150], [60, 160, 165], [170, 135, 8
 const COLD: Rgb = [40, 70, 200];
 const WARM: Rgb = [255, 120, 40];
 
+/** Свет → яркость пикселя 0…1: экспоненциальное насыщение, одинаковое для всех миров. */
+export function lightTone(light: number): number {
+  return 1 - Math.exp(-1.1 * light);
+}
+
 function mix(a: Rgb, b: Rgb, u: number): Rgb {
   return [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u];
 }
@@ -83,8 +88,9 @@ export class WorldRenderer {
       this.intensity = rasterizeSpotIntensity(w.light, w.step, this.cols, this.rows, CELL, this.intensity);
       const data = this.image.data;
       if (layer === 'light') {
+        // Абсолютная шкала с мягким насыщением: яркость солнца видна глазами.
         for (let k = 0; k < this.intensity.length; k++) {
-          const c = (lightFromIntensity(w.light, this.intensity[k]) / p.sun) * 255;
+          const c = lightTone(lightFromIntensity(w.light, this.intensity[k])) * 255;
           data[k * 4] = c;
           data[k * 4 + 1] = c;
           data[k * 4 + 2] = c * 0.8;

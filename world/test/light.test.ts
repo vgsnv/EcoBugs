@@ -6,7 +6,7 @@ import {
   createLightMap, dishCoverage, lightAt, lightDriftVelocity, lightOffset, mapCoverage,
   rasterizeSpotIntensity, spotIntensityAt, spotIntensityAtMap, spotSizes,
 } from '../src/core/light.ts';
-import { LIGHT_DRIFT_SPEED, SPOT_MIN_RADIUS } from '../src/core/constants.ts';
+import { LIGHT_DRIFT_SPEED, SPOT_ASPECT_MAX, SPOT_EDGE_WAVE, SPOT_MIN_RADIUS, SPOT_SIZE_MIN } from '../src/core/constants.ts';
 
 const params = makeParams({ seed: 11 });
 const map = createLightMap(params);
@@ -73,7 +73,9 @@ test('пятно не исчезает: размер каждого пятна �
   for (let t = 0; t < 3_000_000; t += 7919) {
     const sizes = spotSizes(map, t);
     assert.equal(sizes.length, map.spots.length);
-    for (const r of sizes) assert.ok(r >= params.spotSize * 0.35 * SPOT_MIN_RADIUS * 0.99, `размер ${r}`);
+    const floor = ((params.spotSize * SPOT_SIZE_MIN * SPOT_MIN_RADIUS) / Math.sqrt(SPOT_ASPECT_MAX)) * (1 - SPOT_EDGE_WAVE);
+    assert.ok(floor > 0);
+    for (const r of sizes) assert.ok(r >= floor * 0.99, `размер ${r} меньше ${floor}`);
   }
 });
 
