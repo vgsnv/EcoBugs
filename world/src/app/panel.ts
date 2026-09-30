@@ -16,6 +16,9 @@ export interface PanelHandlers {
   onSpeed(speed: number): void;
   onSave(): void;
   onLoad(file: File): void;
+  onZoomIn(): void;
+  onZoomOut(): void;
+  onZoomFit(): void;
 }
 
 export interface PanelRoots {
@@ -93,6 +96,7 @@ export class Panel {
   private readonly pauseButton = el('button', { title: 'Пауза / пуск (Пробел)' });
   private readonly speedButtons = new Map<number, HTMLButtonElement>();
   private readonly stepButton = el('button', { textContent: '+1 шаг', title: 'Один шаг (→)' });
+  private readonly zoomButton = el('button', { className: 'zoom', title: 'Показать чашку целиком (0)' });
   private readonly createButton = el('button', { className: 'primary', textContent: 'Создать мир' });
   private readonly status = el('span', { className: 'status' });
   private statusTimer = 0;
@@ -154,12 +158,18 @@ export class Panel {
       if (file) this.handlers.onLoad(file);
       picker.value = '';
     });
+    const zoomOut = el('button', { textContent: '−', title: 'Отдалить (−, колесо мыши)' });
+    const zoomIn = el('button', { textContent: '+', title: 'Приблизить (+, колесо мыши). Перетаскивание — сдвинуть вид' });
+    zoomOut.addEventListener('click', () => this.handlers.onZoomOut());
+    zoomIn.addEventListener('click', () => this.handlers.onZoomIn());
+    this.zoomButton.addEventListener('click', () => this.handlers.onZoomFit());
     const toggle = el('button', { className: 'params-toggle', textContent: 'Параметры' });
     toggle.addEventListener('click', () => this.toggleParams(true));
     this.roots.toolbar.append(
       el('span', { className: 'group' }, this.pauseButton, this.stepButton),
       speeds,
       this.timeLabel,
+      el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn),
       el('span', { className: 'spacer' }),
       this.status,
       el('span', { className: 'group' }, save, load),
@@ -213,7 +223,6 @@ export class Panel {
     const seed = el('input', { type: 'number', min: '0', max: String(0xffffffff), step: '1' });
     const random = el('button', { textContent: 'Случайный' });
     const layout = el('select', {}, ...LAYOUTS.map((id) => el('option', { value: id, textContent: LAYOUT_PRESETS[id].name })));
-    const size = el('select', {}, ...['800×600', '1200×600', '600×600', '1000×500'].map((s) => el('option', { value: s, textContent: s })));
 
     seed.addEventListener('input', () => { this.draft.seed = Number(seed.value); this.refresh(); });
     random.addEventListener('click', () => {
@@ -222,26 +231,15 @@ export class Panel {
       this.refresh();
     });
     layout.addEventListener('change', () => { this.draft.layout = layout.value as WorldParams['layout']; this.refresh(); });
-    size.addEventListener('change', () => {
-      const [w, h] = size.value.split('×').map(Number);
-      this.draft.width = w;
-      this.draft.height = h;
-      this.refresh();
-    });
     this.inputs.push(() => {
       seed.value = String(this.draft.seed);
       layout.value = this.draft.layout;
-      const key = `${this.draft.width}×${this.draft.height}`;
-      if (![...size.options].some((o) => o.value === key)) size.append(el('option', { value: key, textContent: key }));
-      size.value = key;
     });
     return [
       this.mark(el('label', {}, this.caption('Сид', 'Из него строится вся случайность мира: один сид — один и тот же мир.'), el('span', { className: 'row' }, seed, random)),
         () => this.draft.seed !== this.current.seed),
       this.mark(el('label', {}, this.caption('Планировка', 'Готовая заготовка перегородок внутри чашки.'), layout),
         () => this.draft.layout !== this.current.layout),
-      this.mark(el('label', {}, this.caption('Размер чашки', 'Ширина и высота чашки в единицах мира.'), size),
-        () => this.draft.width !== this.current.width || this.draft.height !== this.current.height),
     ];
   }
 
@@ -316,6 +314,11 @@ export class Panel {
     this.pauseButton.textContent = paused ? '▶ Пуск' : '⏸ Пауза';
     this.stepButton.disabled = !paused;
     for (const [s, b] of this.speedButtons) b.classList.toggle('active', s === speed);
+  }
+
+  /** Масштаб относительно вида «вся чашка». */
+  setZoom(relative: number): void {
+    this.zoomButton.textContent = relative < 1.005 ? 'Вся чашка' : `×${relative < 10 ? relative.toFixed(1) : Math.round(relative)}`;
   }
 
   /** Подсказка у курсора: строки и позиция в координатах окна; null — скрыть. */

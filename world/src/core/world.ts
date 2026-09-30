@@ -1,6 +1,7 @@
 /**
  * Мир: параметры + номер шага. Всё остальное строится из сида детерминированно.
  */
+import { DISH_HEIGHT, DISH_WIDTH } from './constants.ts';
 import { mix32 } from './prng.ts';
 import { type WorldParams, validateParams } from './params.ts';
 import { type LightMap, createLightMap } from './light.ts';
@@ -31,7 +32,7 @@ export function createWorld(params: WorldParams): World {
   const errors = validateParams(params);
   if (errors.length > 0) throw new InvalidParamsError(errors);
   const own = structuredClone(params);
-  return { params: own, step: 0, light: createLightMap(own), viscosity: createViscosityMap(own), partitions: buildLayout(own.layout, own.width, own.height) };
+  return { params: own, step: 0, light: createLightMap(own), viscosity: createViscosityMap(own), partitions: buildLayout(own.layout, DISH_WIDTH, DISH_HEIGHT) };
 }
 
 /**
@@ -59,7 +60,7 @@ export function hashNumbers(values: Iterable<number>): number {
 export function worldHash(world: World): number {
   const p = world.params;
   return hashNumbers([
-    p.seed, p.width, p.height, p.sun, p.backgroundLevel, p.illumination, p.spotSize,
+    p.seed, DISH_WIDTH, DISH_HEIGHT, p.sun, p.backgroundLevel, p.illumination, p.spotSize,
     p.baseTemperature, p.spotHeat, p.baseViscosity,
     p.viscosityShares.water, p.viscosityShares.shallows, p.viscosityShares.land,
     p.viscosityZoneSize, [...p.layout].reduce((a, c) => a * 31 + c.charCodeAt(0), 7),

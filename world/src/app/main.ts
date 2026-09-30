@@ -13,6 +13,8 @@ import { WorldRenderer } from './render.ts';
 const BASE_STEPS_PER_SECOND = 30;
 /** Больше шагов за кадр не делаем, чтобы не подвесить вкладку. */
 const MAX_STEPS_PER_FRAME = 100_000;
+/** Шаг масштаба кнопками и клавишами. */
+const ZOOM_STEP = 1.5;
 const GRADATION_NAMES = ['Вода', 'Отмель', 'Суша'];
 
 const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
@@ -34,7 +36,11 @@ const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#pa
   onSpeed: (s) => { speed = s; carry = 0; },
   onSave: () => saveWorld(),
   onLoad: (file) => { void loadWorld(file); },
+  onZoomIn: () => renderer.zoomBy(ZOOM_STEP),
+  onZoomOut: () => renderer.zoomBy(1 / ZOOM_STEP),
+  onZoomFit: () => renderer.fit(),
 });
+renderer.onZoomChange = (relative) => panel.setZoom(relative);
 
 function saveWorld(): void {
   const blob = new Blob([serializeWorld(world, new Date())], { type: 'application/json' });
@@ -71,11 +77,44 @@ function stepOnce(): void {
   stepWorld(world);
 }
 
-canvas.addEventListener('mousemove', (e) => {
+// Камера: колесо — масштаб у курсора, щипок и прокрутка двумя пальцами на
+// тачпаде — масштаб и сдвиг, перетаскивание — сдвиг, двойной клик — приблизить.
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const lines = e.deltaMode === 1;
+  const mouseWheel = lines || (e.deltaX === 0 && Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 40);
+  if (e.ctrlKey || mouseWheel) {
+    renderer.zoomBy(Math.exp(-e.deltaY * (lines ? 0.06 : e.ctrlKey ? 0.01 : 0.002)), e.clientX, e.clientY);
+  } else {
+    renderer.panBy(-e.deltaX, -e.deltaY);
+  }
+}, { passive: false });
+
+let drag: { x: number; y: number } | null = null;
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  drag = { x: e.clientX, y: e.clientY };
+  canvas.setPointerCapture(e.pointerId);
+  canvas.parentElement!.classList.add('dragging');
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (drag) {
+    renderer.panBy(e.clientX - drag.x, e.clientY - drag.y);
+    drag = { x: e.clientX, y: e.clientY };
+    pointer = null;
+    return;
+  }
   const at = renderer.toWorld(e.clientX, e.clientY);
   pointer = at ? { x: at[0], y: at[1], clientX: e.clientX, clientY: e.clientY } : null;
 });
-canvas.addEventListener('mouseleave', () => { pointer = null; });
+const endDrag = () => {
+  drag = null;
+  canvas.parentElement!.classList.remove('dragging');
+};
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+canvas.addEventListener('pointerleave', () => { pointer = null; });
+canvas.addEventListener('dblclick', (e) => renderer.zoomBy(2, e.clientX, e.clientY));
 
 // Горячие клавиши: не мешают полям ввода.
 document.addEventListener('keydown', (e) => {
@@ -94,6 +133,12 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === 'ArrowRight') {
     e.preventDefault();
     stepOnce();
+  } else if (e.key === '+' || e.key === '=') {
+    renderer.zoomBy(ZOOM_STEP);
+  } else if (e.key === '-' || e.key === '_') {
+    renderer.zoomBy(1 / ZOOM_STEP);
+  } else if (e.key === '0') {
+    renderer.fit();
   } else if (SPEED_KEYS.includes(e.key)) {
     speed = SPEEDS[SPEED_KEYS.indexOf(e.key)];
     carry = 0;

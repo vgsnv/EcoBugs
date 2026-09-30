@@ -8,6 +8,7 @@
  * и не меняется.
  */
 import {
+  DISH_HEIGHT, DISH_WIDTH,
   LIGHT_ABSORPTION, SHALLOWS_RING_MIN, VISCOSITY_BLUR, VISCOSITY_CELL, VISCOSITY_MULTIPLIERS,
 } from './constants.ts';
 import { periodicFbm } from './noise.ts';
@@ -96,18 +97,18 @@ function boxBlur(src: Float32Array, cols: number, rows: number, radius: number):
 
 export function createViscosityMap(params: WorldParams): ViscosityMap {
   const cell = VISCOSITY_CELL;
-  const cols = Math.ceil(params.width / cell);
-  const rows = Math.ceil(params.height / cell);
+  const cols = Math.ceil(DISH_WIDTH / cell);
+  const rows = Math.ceil(DISH_HEIGHT / cell);
   const n = cols * rows;
 
   // Плавное поле с масштабом «размера зон»: одна ячейка решётки шума ≈ две зоны.
-  const cellsX = Math.max(1, Math.round(params.width / (params.viscosityZoneSize * 2)));
-  const cellsY = Math.max(1, Math.round(params.height / (params.viscosityZoneSize * 2)));
+  const cellsX = Math.max(1, Math.round(DISH_WIDTH / (params.viscosityZoneSize * 2)));
+  const cellsY = Math.max(1, Math.round(DISH_HEIGHT / (params.viscosityZoneSize * 2)));
   const noise = periodicFbm(deriveSeed(params.seed, 'viscosity'), cellsX, cellsY, 4);
   const field = new Float32Array(n);
   for (let j = 0; j < rows; j++) {
     for (let i = 0; i < cols; i++) {
-      field[j * cols + i] = noise(((i + 0.5) * cell / params.width) * cellsX, ((j + 0.5) * cell / params.height) * cellsY);
+      field[j * cols + i] = noise(((i + 0.5) * cell / DISH_WIDTH) * cellsX, ((j + 0.5) * cell / DISH_HEIGHT) * cellsY);
     }
   }
   const sorted = Float32Array.from(field).sort();

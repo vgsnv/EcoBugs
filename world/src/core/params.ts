@@ -18,10 +18,6 @@ export interface ViscosityShares {
 export interface WorldParams {
   /** Вся случайность мира. */
   seed: number;
-  /** Ширина чашки в единицах мира. */
-  width: number;
-  /** Высота чашки в единицах мира. */
-  height: number;
   /** Заготовка перегородок. */
   layout: LayoutId;
   /** Яркость света в пятнах. */
@@ -46,8 +42,6 @@ export interface WorldParams {
 
 export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
   seed: 1,
-  width: 800,
-  height: 600,
   layout: 'open',
   sun: 1,
   backgroundLevel: 0.2,
@@ -72,8 +66,6 @@ export function makeParams(overrides: Partial<WorldParams> = {}): WorldParams {
 /** Названия параметров для сообщений об ошибках. */
 export const PARAM_LABELS: Readonly<Record<string, string>> = {
   'seed': 'Сид',
-  'width': 'Ширина чашки',
-  'height': 'Высота чашки',
   'layout': 'Планировка',
   'sun': 'Солнце',
   'backgroundLevel': 'Яркость фона',
@@ -111,8 +103,6 @@ export function validateParams(p: WorldParams): string[] {
   if (!Number.isInteger(p.seed) || p.seed < 0 || p.seed > 0xffffffff) {
     errors.push(`Сид: ожидается целое от 0 до ${0xffffffff}`);
   }
-  inRange('width', p.width, 100, 10000);
-  inRange('height', p.height, 100, 10000);
   if (!LAYOUTS.includes(p.layout)) errors.push(`Планировка: неизвестная заготовка «${String(p.layout)}»`);
   inRange('sun', p.sun, 0, 100, true);
   inRange('backgroundLevel', p.backgroundLevel, 0, 1, true);

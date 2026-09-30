@@ -1,11 +1,12 @@
 /**
- * Отрисовка мира на векторном холсте в разрешении экрана — как освещённая
- * местность. Вязкость — сама местность: вода синяя, суша тёмный камень,
- * отмель — камень под тонким слоем воды, переходы плавные (строится один раз
- * на мир и размер). Свет освещает её пятнами: вне пятен тень, нагрев теплит
- * освещённые места. Вокруг — стеклянная стена чашки, перегородки тем же стеклом.
+ * Отрисовка мира на холсте в разрешении экрана — как освещённая местность,
+ * с камерой: масштаб и перемещение. Вязкость — сама местность: вода синяя,
+ * суша тёмный камень, отмель — камень под тонким слоем воды, переходы плавные.
+ * Местность рисуется плитками под текущий масштаб и кешируется. Свет освещает
+ * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
+ * стеклянная стена чашки, перегородки тем же стеклом.
  */
-import { hash3, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, type World } from '../core/index.ts';
+import { DISH_HEIGHT, DISH_WIDTH, hash3, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, type World } from '../core/index.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
@@ -108,12 +109,67 @@ export function lightTone(light: number): number {
 
 const rgb = (c: Rgb, alpha = 1) => `rgba(${Math.round(c[0])}, ${Math.round(c[1])}, ${Math.round(c[2])}, ${alpha})`;
 
+/** Сторона плитки местности, пикселей. */
+const TILE = 256;
+/** Масштабы плиток — пикселей устройства на единицу мира, степени двойки. */
+const TILE_SCALE_MIN = 0.5;
+const TILE_SCALE_MAX = 32;
+/** Сколько плиток держать в памяти (≈256 КБ каждая). */
+const TILE_CACHE = 240;
+/** Сколько миллисекунд кадра можно тратить на новые плитки. */
+const TILE_BUDGET_MS = 8;
+/** Наибольшее приближение — пикселей экрана (CSS) на единицу мира. */
+const MAX_ZOOM_CSS = 24;
+
+/** Цвет местности в точке мира: вязкость и фактура камня, посчитанные один раз на мир. */
+function terrainSampler(world: World): (x: number, y: number, out: Uint8ClampedArray, k: number) => void {
+  const seed = world.params.seed;
+  // Фактура камня в единицах мира — узор только для глаза, на модель не влияет.
+  const fbm = periodicFbm(seed ^ 0x51a7e, Math.ceil(DISH_WIDTH / 40), Math.ceil(DISH_HEIGHT / 40), 4);
+  const mottle = gridField(DISH_WIDTH, DISH_HEIGHT, 4, (x, y) => fbm(x / 40, y / 40));
+  const grain = gridField(DISH_WIDTH, DISH_HEIGHT, 1.25, (x, y) => hash3(seed ^ 0x6a41, Math.round(x * 0.8), Math.round(y * 0.8)) / 2147483648 - 1);
+  const edge = cellEdges(seed ^ 0xc4ac, Math.ceil(DISH_WIDTH / STONE_SLAB), Math.ceil(DISH_HEIGHT / STONE_SLAB));
+  return (x, y, out, k) => {
+    const L = smoothLevelAt(world.viscosity, x, y);
+    const crack = 1 - smoothstep(0.02, 0.07, edge(x / STONE_SLAB, y / STONE_SLAB));
+    const v = STONE_BASE + STONE_MOTTLE * mottle(x, y) + STONE_GRAIN * grain(x, y) - STONE_CRACK * crack;
+    // Вода мелеет к отмели и сходит на нет к суше; камень под ней светлее.
+    const shallow = smoothstep(0.2, 1.3, L);
+    const dry = smoothstep(1.35, 1.75, L);
+    const under = v + STONE_UNDERWATER_LIFT * (1 - dry);
+    const water = mix(DEEP_WATER, SHALLOW_WATER, shallow);
+    const cover = (1 - SHALLOWS_CLARITY * shallow) * (1 - dry);
+    out[k] = under + (water[0] - under) * cover;
+    out[k + 1] = under + (water[1] - under) * cover;
+    out[k + 2] = under + 4 + (water[2] - under - 4) * cover;
+    out[k + 3] = 255;
+  };
+}
+
+/** Кусок местности [x0, x0 + w) × [y0, y0 + h) единиц мира в масштабе `scale`; вне чашки — прозрачно. */
+function renderTerrain(sample: ReturnType<typeof terrainSampler>, x0: number, y0: number, pw: number, ph: number, scale: number): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = pw;
+  c.height = ph;
+  const tctx = c.getContext('2d')!;
+  const img = tctx.createImageData(pw, ph);
+  for (let j = 0; j < ph; j++) {
+    const y = y0 + (j + 0.5) / scale;
+    if (y < 0 || y >= DISH_HEIGHT) continue;
+    for (let i = 0; i < pw; i++) {
+      const x = x0 + (i + 0.5) / scale;
+      if (x < 0 || x >= DISH_WIDTH) continue;
+      sample(x, y, img.data, (j * pw + i) * 4);
+    }
+  }
+  tctx.putImageData(img, 0, 0);
+  return c;
+}
+
 export class WorldRenderer {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
-  /** Подложка вязкости в пикселях экрана. */
-  private readonly terrain = document.createElement('canvas');
-  /** Маска пятен света одним цветом. */
+  /** Маска пятен света одним цветом, в пикселях экрана. */
   private readonly spots = document.createElement('canvas');
   private readonly sctx: CanvasRenderingContext2D;
   /** Слой тени с «дырами» пятен — накладывается умножением. */
@@ -122,106 +178,206 @@ export class WorldRenderer {
   private world!: World;
   /** Толщина стены вокруг чашки, единиц мира — как у перегородок. */
   private wall = 0;
-  /** Пикселей холста на единицу мира. */
-  private scale = 1;
+  /** Местность целиком в самом мелком масштабе — подложка, пока нет плиток. */
+  private base!: HTMLCanvasElement;
+  private sample!: ReturnType<typeof terrainSampler>;
+  /** Плитки местности: ключ «масштаб:i:j», порядок — давность использования. */
+  private readonly tiles = new Map<string, HTMLCanvasElement>();
+  /** Кромка стекла (в единицах мира) — строится один раз на мир. */
+  private edges = new Path2D();
+  /** Камера: центр вида в единицах мира и пикселей устройства на единицу мира. */
+  private cx = DISH_WIDTH / 2;
+  private cy = DISH_HEIGHT / 2;
+  private zoom = 1;
+  /** Вид «вся чашка»: при изменении размера окна остаётся вписанным. */
+  private fitted = true;
+  /** Вызывается при смене масштаба (для подписи в панели). */
+  onZoomChange: (relative: number) => void = () => {};
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
     this.sctx = this.spots.getContext('2d')!;
     this.hctx = this.shade.getContext('2d')!;
-    new ResizeObserver(() => this.resize()).observe(canvas.parentElement ?? canvas);
+    new ResizeObserver(() => this.resize()).observe(canvas);
   }
 
   setWorld(world: World): void {
     this.world = world;
     this.wall = world.partitions.thickness;
-    this.resize(true);
+    this.sample = terrainSampler(world);
+    this.base = renderTerrain(this.sample, 0, 0, DISH_WIDTH * TILE_SCALE_MIN, DISH_HEIGHT * TILE_SCALE_MIN, TILE_SCALE_MIN);
+    this.tiles.clear();
+    this.edges = this.buildEdges();
+    this.resize();
+    this.fit();
   }
 
-  /** Подогнать разрешение холста под его размер на экране и плотность пикселей. */
-  private resize(force = false): void {
-    if (!this.world) return;
-    const { width, height } = this.world.params;
-    const totalW = width + 2 * this.wall;
-    const totalH = height + 2 * this.wall;
-    // Вписать чашку в свободное место по ширине и по высоте.
-    const box = this.canvas.parentElement ?? this.canvas;
-    const fit = Math.min((box.clientWidth || totalW) / totalW, (box.clientHeight || totalH) / totalH);
-    const scale = fit * (window.devicePixelRatio || 1);
-    this.canvas.style.width = `${Math.floor(totalW * fit)}px`;
-    this.canvas.style.height = `${Math.floor(totalH * fit)}px`;
-    if (!force && Math.abs(scale - this.scale) < 1e-3) return;
-    this.scale = scale;
-    this.canvas.width = Math.round(totalW * scale);
-    this.canvas.height = Math.round(totalH * scale);
-    this.spots.width = Math.round(width * scale);
-    this.spots.height = Math.round(height * scale);
-    this.shade.width = this.spots.width;
-    this.shade.height = this.spots.height;
-    this.buildTerrain();
+  private get dpr(): number {
+    return window.devicePixelRatio || 1;
   }
 
-  private buildTerrain(): void {
-    const { width, height, seed } = this.world.params;
-    const tw = Math.round(width * this.scale);
-    const th = Math.round(height * this.scale);
-    this.terrain.width = tw;
-    this.terrain.height = th;
-    const tctx = this.terrain.getContext('2d')!;
-    const img = tctx.createImageData(tw, th);
-    // Фактура камня в единицах мира — узор только для глаза, на модель не влияет.
-    const fbm = periodicFbm(seed ^ 0x51a7e, Math.ceil(width / 40), Math.ceil(height / 40), 4);
-    const mottle = gridField(width, height, 2, (x, y) => fbm(x / 40, y / 40));
-    const grain = gridField(width, height, 1.25, (x, y) => hash3(seed ^ 0x6a41, Math.round(x * 0.8), Math.round(y * 0.8)) / 2147483648 - 1);
-    const edge = cellEdges(seed ^ 0xc4ac, Math.ceil(width / STONE_SLAB), Math.ceil(height / STONE_SLAB));
-    for (let j = 0; j < th; j++) {
-      const y = (j + 0.5) / this.scale;
-      for (let i = 0; i < tw; i++) {
-        const x = (i + 0.5) / this.scale;
-        const L = smoothLevelAt(this.world.viscosity, x, y);
-        const crack = 1 - smoothstep(0.02, 0.07, edge(x / STONE_SLAB, y / STONE_SLAB));
-        const v = STONE_BASE + STONE_MOTTLE * mottle(x, y) + STONE_GRAIN * grain(x, y) - STONE_CRACK * crack;
-        // Вода мелеет к отмели и сходит на нет к суше; камень под ней светлее.
-        const shallow = smoothstep(0.2, 1.3, L);
-        const dry = smoothstep(1.35, 1.75, L);
-        const under = v + STONE_UNDERWATER_LIFT * (1 - dry);
-        const water = mix(DEEP_WATER, SHALLOW_WATER, shallow);
-        const cover = (1 - SHALLOWS_CLARITY * shallow) * (1 - dry);
-        const k = (j * tw + i) * 4;
-        img.data[k] = under + (water[0] - under) * cover;
-        img.data[k + 1] = under + (water[1] - under) * cover;
-        img.data[k + 2] = under + 4 + (water[2] - under - 4) * cover;
-        img.data[k + 3] = 255;
+  /** Подогнать разрешение холстов под размер на экране и плотность пикселей. */
+  private resize(): void {
+    const w = Math.max(1, Math.round(this.canvas.clientWidth * this.dpr));
+    const h = Math.max(1, Math.round(this.canvas.clientHeight * this.dpr));
+    if (w !== this.canvas.width || h !== this.canvas.height) {
+      for (const c of [this.canvas, this.spots, this.shade]) {
+        c.width = w;
+        c.height = h;
       }
     }
-    tctx.putImageData(img, 0, 0);
+    if (!this.world) return;
+    if (this.fitted) this.fit();
+    else this.setView(this.zoom, this.cx, this.cy);
   }
 
-  /** Экранные пиксели → единицы мира (для толщины линий). */
-  private px(n: number): number {
-    return (n * (window.devicePixelRatio || 1)) / this.scale;
+  // ── Камера ────────────────────────────────────────────────────────────
+
+  /** Масштаб, при котором чашка со стенкой целиком вписана в холст. */
+  private fitZoom(): number {
+    return Math.min(this.canvas.width / (DISH_WIDTH + 2 * this.wall), this.canvas.height / (DISH_HEIGHT + 2 * this.wall));
   }
+
+  /** Установить вид: масштаб в допустимых пределах, чашка не уезжает из кадра. */
+  private setView(zoom: number, cx: number, cy: number): void {
+    const min = this.fitZoom();
+    const max = Math.max(min, MAX_ZOOM_CSS * this.dpr);
+    this.zoom = Math.min(max, Math.max(min, zoom));
+    this.fitted = this.zoom <= min * 1.0001;
+    const clampAxis = (c: number, size: number, view: number) => {
+      const half = view / this.zoom / 2;
+      const lo = -this.wall + half, hi = size + this.wall - half;
+      return lo > hi ? size / 2 : Math.min(hi, Math.max(lo, c));
+    };
+    this.cx = clampAxis(cx, DISH_WIDTH, this.canvas.width);
+    this.cy = clampAxis(cy, DISH_HEIGHT, this.canvas.height);
+    this.onZoomChange(this.zoom / min);
+  }
+
+  /** Показать чашку целиком. */
+  fit(): void {
+    this.setView(0, DISH_WIDTH / 2, DISH_HEIGHT / 2);
+  }
+
+  /** Приблизить (factor > 1) или отдалить так, чтобы точка экрана осталась на месте; без точки — центр. */
+  zoomBy(factor: number, clientX?: number, clientY?: number): void {
+    const rect = this.canvas.getBoundingClientRect();
+    const sx = clientX === undefined ? this.canvas.width / 2 : (clientX - rect.left) * this.dpr;
+    const sy = clientY === undefined ? this.canvas.height / 2 : (clientY - rect.top) * this.dpr;
+    const [wx, wy] = this.screenToWorld(sx, sy);
+    const z = Math.min(Math.max(this.fitZoom(), MAX_ZOOM_CSS * this.dpr), Math.max(this.fitZoom(), this.zoom * factor));
+    this.setView(z, wx - (sx - this.canvas.width / 2) / z, wy - (sy - this.canvas.height / 2) / z);
+  }
+
+  /** Сдвинуть вид на столько пикселей экрана (CSS). */
+  panBy(dx: number, dy: number): void {
+    this.setView(this.zoom, this.cx - (dx * this.dpr) / this.zoom, this.cy - (dy * this.dpr) / this.zoom);
+  }
+
+  private screenToWorld(sx: number, sy: number): [number, number] {
+    return [this.cx + (sx - this.canvas.width / 2) / this.zoom, this.cy + (sy - this.canvas.height / 2) / this.zoom];
+  }
+
+  /** Координаты мира по точке экрана; вне чашки — null. */
+  toWorld(clientX: number, clientY: number): [number, number] | null {
+    const rect = this.canvas.getBoundingClientRect();
+    const [x, y] = this.screenToWorld((clientX - rect.left) * this.dpr, (clientY - rect.top) * this.dpr);
+    return x >= 0 && y >= 0 && x < DISH_WIDTH && y < DISH_HEIGHT ? [x, y] : null;
+  }
+
+  /** Перенос мира на экран: ctx.setTransform с этими числами. */
+  private view(): [number, number, number, number, number, number] {
+    const z = this.zoom;
+    return [z, 0, 0, z, this.canvas.width / 2 - this.cx * z, this.canvas.height / 2 - this.cy * z];
+  }
+
+  /** Экранные пиксели (CSS) → единицы мира (для толщины линий). */
+  private px(n: number): number {
+    return (n * this.dpr) / this.zoom;
+  }
+
+  // ── Местность плитками ────────────────────────────────────────────────
+
+  /** Нарисовать местность в видимой части: готовые плитки, остальное — из подложки; недостающие достроить. */
+  private drawTerrain(): void {
+    const ctx = this.ctx;
+    ctx.setTransform(...this.view());
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(this.base, 0, 0, DISH_WIDTH, DISH_HEIGHT);
+    const scale = Math.min(TILE_SCALE_MAX, Math.max(TILE_SCALE_MIN, 2 ** Math.ceil(Math.log2(this.zoom))));
+    if (scale <= TILE_SCALE_MIN) return;
+    const span = TILE / scale;
+    const [x0, y0] = this.screenToWorld(0, 0);
+    const [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
+    const i0 = Math.max(0, Math.floor(x0 / span)), i1 = Math.min(Math.ceil(DISH_WIDTH / span) - 1, Math.floor(x1 / span));
+    const j0 = Math.max(0, Math.floor(y0 / span)), j1 = Math.min(Math.ceil(DISH_HEIGHT / span) - 1, Math.floor(y1 / span));
+    const missing: [number, number][] = [];
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const key = `${scale}:${i}:${j}`;
+        const tile = this.tiles.get(key);
+        if (tile) {
+          this.tiles.delete(key);
+          this.tiles.set(key, tile);
+          ctx.drawImage(tile, i * span, j * span, span, span);
+        } else {
+          // Пока плитки нет — ближайшая готовая крупнее (мельче масштабом), иначе подложка.
+          this.drawCoarser(scale, i, j, span);
+          missing.push([i, j]);
+        }
+      }
+    }
+    // Сначала ближние к центру вида.
+    const ci = (x0 + x1) / 2 / span, cj = (y0 + y1) / 2 / span;
+    missing.sort((a, b) => Math.hypot(a[0] - ci, a[1] - cj) - Math.hypot(b[0] - ci, b[1] - cj));
+    const start = performance.now();
+    for (const [i, j] of missing) {
+      if (performance.now() - start > TILE_BUDGET_MS) break;
+      const tile = renderTerrain(this.sample, i * span, j * span, TILE, TILE, scale);
+      this.tiles.set(`${scale}:${i}:${j}`, tile);
+      ctx.drawImage(tile, i * span, j * span, span, span);
+    }
+    while (this.tiles.size > TILE_CACHE) this.tiles.delete(this.tiles.keys().next().value!);
+  }
+
+  private drawCoarser(scale: number, i: number, j: number, span: number): void {
+    for (let s = scale / 2, k = 2; s > TILE_SCALE_MIN; s /= 2, k *= 2) {
+      const tile = this.tiles.get(`${s}:${Math.floor(i / k)}:${Math.floor(j / k)}`);
+      if (!tile) continue;
+      const part = TILE / k;
+      this.ctx.drawImage(tile, (i % k) * part, (j % k) * part, part, part, i * span, j * span, span, span);
+      return;
+    }
+  }
+
+  // ── Кадр ──────────────────────────────────────────────────────────────
 
   draw(): void {
     const w = this.world;
     const p = w.params;
     const ctx = this.ctx;
-    const s = this.scale;
-    const offset = this.wall * s;
+    const z = this.zoom;
+    const view = this.view();
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    ctx.drawImage(this.terrain, offset, offset);
+    ctx.save();
+    ctx.beginPath();
+    ctx.setTransform(...view);
+    ctx.rect(0, 0, DISH_WIDTH, DISH_HEIGHT);
+    ctx.clip();
+    this.drawTerrain();
 
-    // Маска пятен: контуры одним цветом во вспомогательный холст (перекрытия
-    // не складываются).
+    // Маска пятен: контуры одним цветом (перекрытия не складываются).
     const sctx = this.sctx;
     sctx.setTransform(1, 0, 0, 1, 0, 0);
     sctx.clearRect(0, 0, this.spots.width, this.spots.height);
-    sctx.setTransform(s, 0, 0, s, 0, 0);
+    sctx.setTransform(...view);
     sctx.beginPath();
-    for (const poly of spotOutlines(w.light, w.step, p.width, p.height)) {
+    // Отрезков в контуре — столько, чтобы при любом масштабе край оставался гладким.
+    const segments = Math.min(360, Math.max(48, Math.round(p.spotSize * z)));
+    for (const poly of spotOutlines(w.light, w.step, DISH_WIDTH, DISH_HEIGHT, segments)) {
       sctx.moveTo(poly[0], poly[1]);
       for (let i = 2; i < poly.length; i += 2) sctx.lineTo(poly[i], poly[i + 1]);
       sctx.closePath();
@@ -231,8 +387,7 @@ export class WorldRenderer {
 
     // Сила света пятен в абсолютной шкале: 1 при солнце 1.
     const lit = lightTone(p.sun) / lightTone(1);
-    const dpr = window.devicePixelRatio || 1;
-    const penumbra = Math.min(3 * dpr, Math.max(0.5, (p.spotSize * SPOT_EDGE * s) / 6));
+    const penumbra = Math.min(3 * this.dpr, Math.max(0.5, (p.spotSize * SPOT_EDGE * z) / 6));
 
     // Тень: сплошной слой с «дырами» там, где светят пятна (при тусклом солнце
     // дыры неполные), накладывается на местность умножением.
@@ -250,29 +405,27 @@ export class WorldRenderer {
     hctx.filter = 'none';
     hctx.globalAlpha = 1;
 
-    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'multiply';
-    ctx.drawImage(this.shade, offset, offset);
+    ctx.drawImage(this.shade, 0, 0);
     // Свет — солнечный тёплый оттенок освещённых мест; нагрев его усиливает.
     const warmth = Math.min(0.95, SUN_WARMTH * Math.min(1, lit) + HEAT_WARMTH * Math.min(1, p.spotHeat / 2));
-    ctx.globalCompositeOperation = 'multiply';
     ctx.globalAlpha = warmth;
     ctx.filter = `blur(${penumbra.toFixed(1)}px)`;
-    ctx.drawImage(this.spots, offset, offset);
+    ctx.drawImage(this.spots, 0, 0);
     // И чуть высветляет их, чтобы свет читался и на тёмной суше.
     ctx.globalCompositeOperation = 'screen';
     ctx.globalAlpha = SUN_GLOW * Math.min(1, lit);
-    ctx.drawImage(this.spots, offset, offset);
+    ctx.drawImage(this.spots, 0, 0);
     // Яркое солнце высветляет освещённые места.
     if (lit > 1) {
-      ctx.globalCompositeOperation = 'screen';
       ctx.globalAlpha = Math.min(1, (lit - 1) * GLARE_STRENGTH);
       ctx.filter = `blur(${penumbra.toFixed(1)}px) grayscale(1) brightness(2)`;
-      ctx.drawImage(this.spots, offset, offset);
+      ctx.drawImage(this.spots, 0, 0);
     }
     ctx.restore();
 
-    ctx.setTransform(s, 0, 0, s, 0, 0);
+    ctx.setTransform(...view);
     this.drawWalls();
   }
 
@@ -280,17 +433,12 @@ export class WorldRenderer {
   private drawWalls(): void {
     const ctx = this.ctx;
     const W = this.wall;
-    const { width, height } = this.world.params;
-    ctx.clearRect(0, 0, width + 2 * W, W);
-    ctx.clearRect(0, height + W, width + 2 * W, W);
-    ctx.clearRect(0, 0, W, height + 2 * W);
-    ctx.clearRect(width + W, 0, W, height + 2 * W);
     const solid = new Path2D();
     // Обод чашки: внешний прямоугольник минус внутренний (правило even-odd),
     // стекло с бликом — светлее к углам.
-    solid.rect(0, 0, width + 2 * W, height + 2 * W);
-    solid.rect(W, W, width, height);
-    const gloss = ctx.createLinearGradient(0, 0, width + 2 * W, height + 2 * W);
+    solid.rect(-W, -W, DISH_WIDTH + 2 * W, DISH_HEIGHT + 2 * W);
+    solid.rect(0, 0, DISH_WIDTH, DISH_HEIGHT);
+    const gloss = ctx.createLinearGradient(-W, -W, DISH_WIDTH + W, DISH_HEIGHT + W);
     gloss.addColorStop(0, GLASS_GLOSS_FROM);
     gloss.addColorStop(0.5, GLASS_GLOSS_TO);
     gloss.addColorStop(1, GLASS_GLOSS_FROM);
@@ -302,62 +450,50 @@ export class WorldRenderer {
       for (let k = 1; k < part.points.length; k++) {
         const [ax, ay] = part.points[k - 1];
         const [bx, by] = part.points[k];
-        parts.rect(W + Math.min(ax, bx) - W / 2, W + Math.min(ay, by) - W / 2, Math.abs(bx - ax) + W, Math.abs(by - ay) + W);
+        parts.rect(Math.min(ax, bx) - W / 2, Math.min(ay, by) - W / 2, Math.abs(bx - ax) + W, Math.abs(by - ay) + W);
       }
     }
     ctx.fillStyle = GLASS_FILL;
     ctx.fill(parts);
-    this.outline();
-  }
 
-  /**
-   * Кромка стекла: внешний край обода и граница между свободными ячейками
-   * чашки и занятыми (стена или перегородка). Стыки перегородок со стеной и
-   * между собой поэтому не обводятся.
-   */
-  private outline(): void {
-    const ctx = this.ctx;
-    const W = this.wall;
-    const { width, height } = this.world.params;
-    const lay = this.world.partitions;
-    const c = lay.cell;
-    const solid = (i: number, j: number) =>
-      i < 0 || j < 0 || i >= lay.cols || j >= lay.rows || lay.blocked[j * lay.cols + i] === 1;
     const half = this.px(0.5);
     ctx.lineWidth = this.px(1);
     ctx.strokeStyle = GLASS_EDGE;
-    ctx.strokeRect(half, half, width + 2 * W - 2 * half, height + 2 * W - 2 * half);
-    ctx.beginPath();
-    for (let j = 0; j < lay.rows; j++) {
-      for (let i = 0; i < lay.cols; i++) {
-        if (solid(i, j)) continue;
-        const x = W + Math.min(i * c, width);
-        const y = W + Math.min(j * c, height);
-        const x1 = W + Math.min((i + 1) * c, width);
-        const y1 = W + Math.min((j + 1) * c, height);
-        if (solid(i - 1, j)) { ctx.moveTo(x, y); ctx.lineTo(x, y1); }
-        if (solid(i + 1, j)) { ctx.moveTo(x1, y); ctx.lineTo(x1, y1); }
-        if (solid(i, j - 1)) { ctx.moveTo(x, y); ctx.lineTo(x1, y); }
-        if (solid(i, j + 1)) { ctx.moveTo(x, y1); ctx.lineTo(x1, y1); }
-      }
-    }
+    ctx.strokeRect(-W + half, -W + half, DISH_WIDTH + 2 * W - 2 * half, DISH_HEIGHT + 2 * W - 2 * half);
     // Как у стекла: тёмный контур по краю (виден на светлом) и светлый блик
     // поверх него (виден на тёмном).
     ctx.strokeStyle = GLASS_SHADOW;
     ctx.lineWidth = this.px(2);
-    ctx.stroke();
+    ctx.stroke(this.edges);
     ctx.strokeStyle = GLASS_EDGE;
     ctx.lineWidth = this.px(0.75);
-    ctx.stroke();
+    ctx.stroke(this.edges);
   }
 
-  /** Координаты мира по точке экрана; вне чашки — null. */
-  toWorld(clientX: number, clientY: number): [number, number] | null {
-    const rect = this.canvas.getBoundingClientRect();
-    const { width, height } = this.world.params;
-    const units = (width + 2 * this.wall) / rect.width;
-    const x = (clientX - rect.left) * units - this.wall;
-    const y = (clientY - rect.top) * units - this.wall;
-    return x >= 0 && y >= 0 && x < width && y < height ? [x, y] : null;
+  /**
+   * Кромка стекла: граница между свободными ячейками чашки и занятыми (стена
+   * или перегородка). Стыки перегородок со стеной и между собой поэтому не
+   * обводятся.
+   */
+  private buildEdges(): Path2D {
+    const lay = this.world.partitions;
+    const c = lay.cell;
+    const solid = (i: number, j: number) =>
+      i < 0 || j < 0 || i >= lay.cols || j >= lay.rows || lay.blocked[j * lay.cols + i] === 1;
+    const path = new Path2D();
+    for (let j = 0; j < lay.rows; j++) {
+      for (let i = 0; i < lay.cols; i++) {
+        if (solid(i, j)) continue;
+        const x = Math.min(i * c, DISH_WIDTH);
+        const y = Math.min(j * c, DISH_HEIGHT);
+        const x1 = Math.min((i + 1) * c, DISH_WIDTH);
+        const y1 = Math.min((j + 1) * c, DISH_HEIGHT);
+        if (solid(i - 1, j)) { path.moveTo(x, y); path.lineTo(x, y1); }
+        if (solid(i + 1, j)) { path.moveTo(x1, y); path.lineTo(x1, y1); }
+        if (solid(i, j - 1)) { path.moveTo(x, y); path.lineTo(x1, y); }
+        if (solid(i, j + 1)) { path.moveTo(x, y1); path.lineTo(x1, y1); }
+      }
+    }
+    return path;
   }
 }

@@ -11,6 +11,7 @@
  * Всё движение — формулы от номера шага: свет на любом шаге считается сразу.
  */
 import {
+  DISH_HEIGHT, DISH_WIDTH,
   LIGHT_DRIFT_SPEED, LIGHT_MAP_SCALE, LIGHT_TURN_PERIOD, SPOT_ASPECT_MAX, SPOT_EDGE, SPOT_EDGE_WAVE, SPOT_MAX_BLOBS, SPOT_SPIN_PERIOD,
   SPOT_MIN_RADIUS, SPOT_OWN_DRIFT, SPOT_SIZE_MAX, SPOT_SIZE_MIN, SPOT_SIZE_SPREAD,
   SPOT_WOBBLE_PERIOD, SPOT_WOBBLE_REACH,
@@ -161,16 +162,64 @@ function blobCenter(s: Spot, b: Blob, t: number, mapW: number, mapH: number): [n
 }
 
 /** Доля карты, занятая пятнами в шаге t — оценка по сетке. */
-function coverage(spots: readonly Spot[], mapW: number, mapH: number, t: number, cells = 64): number {
-  let lit = 0;
-  const cw = mapW / cells;
-  const ch = mapH / cells;
-  for (let j = 0; j < cells; j++) {
-    for (let i = 0; i < cells; i++) {
-      if (spotIntensityOnMap(spots, (i + 0.5) * cw, (j + 0.5) * ch, t, mapW, mapH) >= 0.5) lit++;
+/**
+ * Доля карты под пятнами в момент t — по сетке `cells × cells`. Каждый эллипс
+ * обновляет только клетки в своей окрестности, поэтому пятна можно добавлять
+ * порциями без пересчёта всей карты.
+ */
+class CoverageGrid {
+  private readonly field: Float32Array;
+  private readonly cw: number;
+  private readonly ch: number;
+  private lit = 0;
+  private readonly cells: number;
+  private readonly mapW: number;
+  private readonly mapH: number;
+  private readonly t: number;
+
+  constructor(mapW: number, mapH: number, t: number, cells = 128) {
+    this.cells = cells;
+    this.mapW = mapW;
+    this.mapH = mapH;
+    this.t = t;
+    this.field = new Float32Array(cells * cells);
+    this.cw = mapW / cells;
+    this.ch = mapH / cells;
+  }
+
+  add(spot: Spot): void {
+    const { cells, cw, ch, t, field } = this;
+    for (const b of spot.blobs) {
+      const [cx, cy] = blobCenter(spot, b, t, this.mapW, this.mapH);
+      const reach = blobReach(b, t);
+      const i0 = Math.floor((cx - reach) / cw), i1 = Math.ceil((cx + reach) / cw);
+      const j0 = Math.floor((cy - reach) / ch), j1 = Math.ceil((cy + reach) / ch);
+      for (let jj = j0; jj <= Math.min(j1, j0 + cells - 1); jj++) {
+        const j = wrap(jj, cells);
+        const dy = wrapDelta((j + 0.5) * ch - cy, this.mapH);
+        for (let ii = i0; ii <= Math.min(i1, i0 + cells - 1); ii++) {
+          const i = wrap(ii, cells);
+          const k = j * cells + i;
+          if (field[k] >= 0.5) continue;
+          const v = blobIntensity(b, wrapDelta((i + 0.5) * cw - cx, this.mapW), dy, t);
+          if (v > field[k]) {
+            field[k] = v;
+            if (v >= 0.5) this.lit++;
+          }
+        }
+      }
     }
   }
-  return lit / (cells * cells);
+
+  get share(): number {
+    return this.lit / (this.cells * this.cells);
+  }
+}
+
+function coverage(spots: readonly Spot[], mapW: number, mapH: number, t: number): number {
+  const grid = new CoverageGrid(mapW, mapH, t);
+  for (const s of spots) grid.add(s);
+  return grid.share;
 }
 
 function spotIntensityOnMap(spots: readonly Spot[], x: number, y: number, t: number, mapW: number, mapH: number): number {
@@ -194,16 +243,21 @@ function spotIntensityOnMap(spots: readonly Spot[], x: number, y: number, t: num
 
 export function createLightMap(params: WorldParams): LightMap {
   const rng = new Rng(deriveSeed(params.seed, 'light'));
-  const mapW = params.width * LIGHT_MAP_SCALE;
-  const mapH = params.height * LIGHT_MAP_SCALE;
+  const mapW = DISH_WIDTH * LIGHT_MAP_SCALE;
+  const mapH = DISH_HEIGHT * LIGHT_MAP_SCALE;
 
   // Пятна добавляются, пока доля карты под пятнами не достигнет освещённости.
   const spots: Spot[] = [];
   const meanArea = Math.PI * params.spotSize * params.spotSize;
   const batch = Math.max(1, Math.round((mapW * mapH * params.illumination) / meanArea / 4));
+  const grid = new CoverageGrid(mapW, mapH, 0);
   for (let guard = 0; guard < 200; guard++) {
-    for (let k = 0; k < batch; k++) spots.push(makeSpot(rng, mapW, mapH, params.spotSize));
-    if (coverage(spots, mapW, mapH, 0) >= params.illumination) break;
+    for (let k = 0; k < batch; k++) {
+      const spot = makeSpot(rng, mapW, mapH, params.spotSize);
+      spots.push(spot);
+      grid.add(spot);
+    }
+    if (grid.share >= params.illumination) break;
   }
 
   const drift: DriftHarmonic[] = [];

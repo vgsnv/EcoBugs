@@ -9,7 +9,7 @@ import { createWorld, worldHash, type World } from './world.ts';
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 1;
+export const WORLD_FORMAT_VERSION = 2;
 
 export interface WorldFile {
   format: typeof WORLD_FILE_FORMAT;
@@ -57,8 +57,6 @@ function readParams(raw: unknown, problems: string[]): WorldParams | null {
   const defaults = makeParams();
   const params: WorldParams = {
     seed: raw.seed as number,
-    width: raw.width as number,
-    height: raw.height as number,
     layout: raw.layout as LayoutId,
     sun: raw.sun as number,
     backgroundLevel: raw.backgroundLevel as number,
@@ -92,6 +90,9 @@ export function parseWorldFile(text: string): World {
   }
   if (data.version > WORLD_FORMAT_VERSION) {
     throw new WorldFileError([`Файл сохранён более новой версией (формат v${data.version}, поддерживается до v${WORLD_FORMAT_VERSION})`]);
+  }
+  if (data.version === 1) {
+    throw new WorldFileError(['Файл старого формата v1: тогда размер чашки был параметром, теперь чашка всегда 1600×1200']);
   }
   if (data.version < 1) {
     throw new WorldFileError([`Неизвестная версия формата v${data.version}`]);
