@@ -9,4 +9,6 @@ export const WORLD_FORMAT_VERSION = 1;
 export * from './prng.ts';
 export * from './noise.ts';
 export * from './params.ts';
+export * from './constants.ts';
+export * from './light.ts';
 export * from './world.ts';

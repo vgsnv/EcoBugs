@@ -1,14 +1,16 @@
 /**
- * Мир: параметры + номер шага. Всё остальное строится из сида детерминированно
- * (карты добавляются на следующих этапах).
+ * Мир: параметры + номер шага. Всё остальное строится из сида детерминированно.
  */
 import { mix32 } from './prng.ts';
 import { type WorldParams, validateParams } from './params.ts';
+import { type LightMap, createLightMap } from './light.ts';
 
 export interface World {
   readonly params: Readonly<WorldParams>;
   /** Возраст мира — число прошедших шагов, отсчёт с нуля. */
   step: number;
+  /** Карта света; строится из сида, движение — функция номера шага. */
+  readonly light: LightMap;
 }
 
 export class InvalidParamsError extends Error {
@@ -22,10 +24,14 @@ export class InvalidParamsError extends Error {
 export function createWorld(params: WorldParams): World {
   const errors = validateParams(params);
   if (errors.length > 0) throw new InvalidParamsError(errors);
-  return { params: structuredClone(params), step: 0 };
+  const own = structuredClone(params);
+  return { params: own, step: 0, light: createLightMap(own) };
 }
 
-/** Один шаг мира. Сдвиг карты света и ходы существ появятся позже. */
+/**
+ * Один шаг мира. Сдвиг карты света — функция номера шага, поэтому здесь
+ * достаточно увеличить возраст. Ходы существ появятся позже.
+ */
 export function stepWorld(world: World): void {
   world.step++;
 }
