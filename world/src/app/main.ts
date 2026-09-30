@@ -3,7 +3,7 @@
  * Скорость показа — дело приложения; мир знает только номер шага.
  */
 import {
-  WorldFileError, absorptionAt, createWorld, gradationAt, isBlocked, lightAt, makeParams, mutationStrength,
+  WorldFileError, lightDriftVelocity, absorptionAt, createWorld, gradationAt, isBlocked, lightAt, makeParams, mutationStrength,
   parseWorldFile, resistanceAt, serializeWorld, stepWorld, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
@@ -19,6 +19,10 @@ const GRADATION_NAMES = ['Вода', 'Отмель', 'Суша'];
 
 const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
 const renderer = new WorldRenderer(canvas);
+const minimap = document.querySelector<HTMLCanvasElement>('.minimap')!;
+const driftArrow = document.querySelector<SVGElement>('.light-drift svg')!;
+/** Время анимации (блики), секунды; стоит на паузе. */
+let animTime = 0;
 
 let world: World = createWorld(makeParams({ seed: 1 }));
 let paused = false;
@@ -116,6 +120,15 @@ canvas.addEventListener('pointercancel', endDrag);
 canvas.addEventListener('pointerleave', () => { pointer = null; });
 canvas.addEventListener('dblclick', (e) => renderer.zoomBy(2, e.clientX, e.clientY));
 
+// Мини-карта: клик или перетаскивание — перейти к этому месту чашки.
+minimap.addEventListener('pointerdown', (e) => {
+  minimap.setPointerCapture(e.pointerId);
+  renderer.centerFromMinimap(minimap, e.clientX, e.clientY);
+});
+minimap.addEventListener('pointermove', (e) => {
+  if (minimap.hasPointerCapture(e.pointerId)) renderer.centerFromMinimap(minimap, e.clientX, e.clientY);
+});
+
 // Горячие клавиши: не мешают полям ввода.
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
@@ -160,6 +173,7 @@ function probe(): void {
     `Свет ${lightAt(world.light, x, y, world.step).toFixed(3)} · усваивается ${absorptionAt(world.viscosity, x, y).toFixed(2)}`,
     `Температура ${temp.toFixed(2)} · мутации ${mutationStrength(temp).toFixed(2)}`,
     `Сопротивление движению ${resistanceAt(p, world.viscosity, x, y).toFixed(2)}`,
+    `Снос ${Math.hypot(...world.drift.at(x, y, world.step)).toFixed(3)} за шаг`,
   ], clientX, clientY);
 }
 
@@ -172,8 +186,12 @@ function frame(now: number): void {
     const n = Math.min(MAX_STEPS_PER_FRAME, Math.floor(carry));
     carry -= n;
     for (let i = 0; i < n; i++) stepWorld(world);
+    animTime += dt;
   }
-  renderer.draw();
+  renderer.draw(animTime);
+  renderer.drawMinimap(minimap);
+  const [dvx, dvy] = lightDriftVelocity(world.light, world.step);
+  driftArrow.style.transform = `rotate(${Math.atan2(dvy, dvx)}rad)`;
   panel.setTime(world.step, paused, speed, stepsPerSecond);
   probe();
   requestAnimationFrame(frame);

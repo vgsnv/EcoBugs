@@ -18,6 +18,12 @@
       canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
       .stage.dragging canvas { cursor: grabbing; }
       .zoom { font-variant-numeric: tabular-nums; min-width: 64px; }
+      .minimap { position: absolute; right: 10px; bottom: 10px; width: 176px; height: 132px; border: 1px solid rgba(255, 255, 255, 0.8); border-radius: 4px; box-shadow: 0 4px 12px rgba(31, 35, 40, 0.3); cursor: pointer; z-index: 1; }
+      .minimap[hidden] { display: none; }
+      .light-drift { position: absolute; left: 10px; top: 10px; display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 4px; background: rgba(255, 255, 255, 0.85); border: 1px solid var(--border); border-radius: 14px; font-size: 11.5px; color: var(--muted); z-index: 1; user-select: none; }
+      .light-drift svg { width: 20px; height: 20px; }
+      .light-drift circle { fill: #fff; stroke: var(--border); }
+      .light-drift path { fill: none; stroke: #c98a1c; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
       #toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 16px; }
       .group { display: inline-flex; }
@@ -90,7 +96,12 @@
   <body>
     <div class="app">
       <header id="toolbar"></header>
-      <div class="stage"><canvas id="world"></canvas><div class="tip" hidden></div></div>
+      <div class="stage">
+        <canvas id="world"></canvas>
+        <div class="tip" hidden></div>
+        <div class="light-drift" title="Куда сдвигается карта света. Сдвиг очень медленный — заметен на ускорении."><svg viewBox="-12 -12 24 24"><circle r="11" /><path d="M -6 0 H 6 M 2 -4 L 6 0 L 2 4" /></svg><span>дрейф света</span></div>
+        <canvas class="minimap" hidden title="Вся чашка. Клик — перейти сюда"></canvas>
+      </div>
       <footer id="legend"></footer>
       <aside id="params"></aside>
       <div id="scrim"></div>

@@ -6,7 +6,7 @@
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
-import { DISH_HEIGHT, DISH_WIDTH, hash3, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, type World } from '../core/index.ts';
+import { DISH_HEIGHT, DISH_WIDTH, hash3, isBlocked, periodicFbm, smoothLevelAt, spotAnchors, spotOutlines, SPOT_EDGE, type World } from '../core/index.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
@@ -109,6 +109,60 @@ export function lightTone(light: number): number {
 
 const rgb = (c: Rgb, alpha = 1) => `rgba(${Math.round(c[0])}, ${Math.round(c[1])}, ${Math.round(c[2])}, ${alpha})`;
 
+/** Блики на освещённой воде: сила, размер узора ряби в единицах мира, скорость, единиц в секунду. */
+const GLINT_ALPHA = 0.15;
+const GLINT_LAYERS = [
+  { size: 130, vx: 5, vy: 2.5 },
+  { size: 210, vx: -3.5, vy: 4 },
+] as const;
+/**
+ * Линии течений: начала — через столько единиц по краю пятна; шаг прокладки
+ * и предел длины в шагах (единицы мира); порог слабого течения (доля силы
+ * сноса); пунктир и его скорость (CSS px); цвет.
+ */
+const LINE_ANCHOR_SPACING = 60;
+const LINE_STEP = 4;
+const LINE_MAX_POINTS = 150;
+const LINE_MIN_SHARE = 0.05;
+const LINE_DASH = 5;
+const LINE_GAP = 5;
+const LINE_SPEED_CSS = 14;
+const LINE_COLOR = 'rgba(235, 245, 255, 0.6)';
+/** Наконечник — только у линии не короче стольких CSS px; ниже такого масштаба (CSS px на единицу) линий вдвое меньше. */
+const LINE_HEAD_MIN_CSS = 18;
+const LINE_THIN_BELOW_CSS = 0.8;
+
+/** Бесшовная текстура ряби: тонкая светлая сетка там, где шум близок к нулю. */
+let rippleTexture: HTMLCanvasElement | null = null;
+function ripple(): HTMLCanvasElement {
+  if (rippleTexture) return rippleTexture;
+  const size = 256;
+  const c = document.createElement('canvas');
+  c.width = size;
+  c.height = size;
+  const tctx = c.getContext('2d')!;
+  const img = tctx.createImageData(size, size);
+  // Сумма двух шумов со сдвигом: у одного шума нули в узлах решётки дают
+  // заметную сетку, у суммы — нет.
+  const a = periodicFbm(0x51f7, 4, 4, 2);
+  const b = periodicFbm(0x9e37, 4, 4, 2);
+  for (let j = 0; j < size; j++) {
+    for (let i = 0; i < size; i++) {
+      const u = (i / size) * 4, w = (j / size) * 4;
+      const n = a(u, w) + b(u + 0.37, w + 0.61);
+      const v = Math.max(0, 1 - Math.abs(n) * 6) ** 3;
+      const k = (j * size + i) * 4;
+      img.data[k] = 255;
+      img.data[k + 1] = 250;
+      img.data[k + 2] = 230;
+      img.data[k + 3] = v * 255;
+    }
+  }
+  tctx.putImageData(img, 0, 0);
+  rippleTexture = c;
+  return c;
+}
+
 /** Сторона плитки местности, пикселей. */
 const TILE = 256;
 /** Масштабы плиток — пикселей устройства на единицу мира, степени двойки. */
@@ -175,6 +229,19 @@ export class WorldRenderer {
   /** Слой тени с «дырами» пятен — накладывается умножением. */
   private readonly shade = document.createElement('canvas');
   private readonly hctx: CanvasRenderingContext2D;
+  /** Слой бликов: рябь, оставленная только на освещённой воде. */
+  private readonly glint = document.createElement('canvas');
+  private readonly gctx: CanvasRenderingContext2D;
+  private readonly ripplePattern: CanvasPattern;
+  /** Где вода (альфа), в масштабе 1:4 — строится один раз на мир. */
+  private waterMask = document.createElement('canvas');
+  /** Перегородки одним путём (в единицах мира). */
+  private parts = new Path2D();
+  /** Линии течений и ключ вида, для которого они проведены. */
+  private lines = { body: new Path2D(), heads: new Path2D() };
+  private linesKey = '';
+  /** Контуры пятен последнего кадра — для мини-карты. */
+  private lastSpots = new Path2D();
   private world!: World;
   /** Толщина стены вокруг чашки, единиц мира — как у перегородок. */
   private wall = 0;
@@ -199,6 +266,8 @@ export class WorldRenderer {
     this.ctx = canvas.getContext('2d')!;
     this.sctx = this.spots.getContext('2d')!;
     this.hctx = this.shade.getContext('2d')!;
+    this.gctx = this.glint.getContext('2d')!;
+    this.ripplePattern = this.gctx.createPattern(ripple(), 'repeat')!;
     new ResizeObserver(() => this.resize()).observe(canvas);
   }
 
@@ -209,6 +278,8 @@ export class WorldRenderer {
     this.base = renderTerrain(this.sample, 0, 0, DISH_WIDTH * TILE_SCALE_MIN, DISH_HEIGHT * TILE_SCALE_MIN, TILE_SCALE_MIN);
     this.tiles.clear();
     this.edges = this.buildEdges();
+    this.parts = this.buildParts();
+    this.waterMask = this.buildWaterMask();
     this.resize();
     this.fit();
   }
@@ -222,7 +293,7 @@ export class WorldRenderer {
     const w = Math.max(1, Math.round(this.canvas.clientWidth * this.dpr));
     const h = Math.max(1, Math.round(this.canvas.clientHeight * this.dpr));
     if (w !== this.canvas.width || h !== this.canvas.height) {
-      for (const c of [this.canvas, this.spots, this.shade]) {
+      for (const c of [this.canvas, this.spots, this.shade, this.glint]) {
         c.width = w;
         c.height = h;
       }
@@ -353,7 +424,8 @@ export class WorldRenderer {
 
   // ── Кадр ──────────────────────────────────────────────────────────────
 
-  draw(): void {
+  /** Кадр; `animTime` — секунды анимации бликов (стоит на паузе). */
+  draw(animTime = 0): void {
     const w = this.world;
     const p = w.params;
     const ctx = this.ctx;
@@ -374,16 +446,17 @@ export class WorldRenderer {
     sctx.setTransform(1, 0, 0, 1, 0, 0);
     sctx.clearRect(0, 0, this.spots.width, this.spots.height);
     sctx.setTransform(...view);
-    sctx.beginPath();
+    const spotsPath = new Path2D();
     // Отрезков в контуре — столько, чтобы при любом масштабе край оставался гладким.
     const segments = Math.min(360, Math.max(48, Math.round(p.spotSize * z)));
     for (const poly of spotOutlines(w.light, w.step, DISH_WIDTH, DISH_HEIGHT, segments)) {
-      sctx.moveTo(poly[0], poly[1]);
-      for (let i = 2; i < poly.length; i += 2) sctx.lineTo(poly[i], poly[i + 1]);
-      sctx.closePath();
+      spotsPath.moveTo(poly[0], poly[1]);
+      for (let i = 2; i < poly.length; i += 2) spotsPath.lineTo(poly[i], poly[i + 1]);
+      spotsPath.closePath();
     }
+    this.lastSpots = spotsPath;
     sctx.fillStyle = rgb(SUN_COLOR);
-    sctx.fill('nonzero');
+    sctx.fill(spotsPath, 'nonzero');
 
     // Сила света пятен в абсолютной шкале: 1 при солнце 1.
     const lit = lightTone(p.sun) / lightTone(1);
@@ -423,10 +496,154 @@ export class WorldRenderer {
       ctx.filter = `blur(${penumbra.toFixed(1)}px) grayscale(1) brightness(2)`;
       ctx.drawImage(this.spots, 0, 0);
     }
+    ctx.filter = 'none';
+    this.drawGlints(animTime, lit);
     ctx.restore();
 
     ctx.setTransform(...view);
+    this.drawDriftLines(animTime);
     this.drawWalls();
+  }
+
+  /** Блики: две сдвигающиеся ряби, оставленные только на воде и в пятнах света. */
+  private drawGlints(time: number, lit: number): void {
+    const g = this.gctx;
+    const [x0, y0] = this.screenToWorld(0, 0);
+    const [x1, y1] = this.screenToWorld(this.glint.width, this.glint.height);
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+    g.clearRect(0, 0, this.glint.width, this.glint.height);
+    g.setTransform(...this.view());
+    GLINT_LAYERS.forEach((layer, n) => {
+      const k = layer.size / 256;
+      this.ripplePattern.setTransform(new DOMMatrix([k, 0, 0, k, layer.vx * time, layer.vy * time]));
+      g.fillStyle = this.ripplePattern;
+      g.globalCompositeOperation = n === 0 ? 'source-over' : 'lighter';
+      g.fillRect(x0, y0, x1 - x0, y1 - y0);
+    });
+    g.globalCompositeOperation = 'destination-in';
+    g.imageSmoothingEnabled = true;
+    g.drawImage(this.waterMask, 0, 0, DISH_WIDTH, DISH_HEIGHT);
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.drawImage(this.spots, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+    const ctx = this.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = GLINT_ALPHA * Math.min(1, lit);
+    ctx.drawImage(this.glint, 0, 0);
+  }
+
+  /**
+   * Линии течений — часть пятен света: от точек на внешнем краю каждого пятна
+   * по течению до его конца, бегущим пунктиром, на конце — наконечник. Точки
+   * движутся вместе с пятнами, поэтому линии не пропадают, а плавно меняются
+   * вслед за светом; где течения нет, линия нулевой длины.
+   */
+  private drawDriftLines(animTime: number): void {
+    const w = this.world;
+    const strength = w.params.driftStrength;
+    if (strength <= 0) return;
+    const key = `${this.zoom.toFixed(4)}:${this.cx.toFixed(1)}:${this.cy.toFixed(1)}:${w.step}:${this.canvas.width}x${this.canvas.height}`;
+    if (key !== this.linesKey) {
+      this.linesKey = key;
+      this.lines = this.traceDriftLines();
+    }
+    const ctx = this.ctx;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = this.px(1.2);
+    ctx.strokeStyle = LINE_COLOR;
+    ctx.setLineDash([this.px(LINE_DASH), this.px(LINE_GAP)]);
+    // Пунктир бежит вдоль течения; быстрее при большей силе сноса.
+    ctx.lineDashOffset = -this.px(animTime * LINE_SPEED_CSS * Math.min(2, strength / 0.3));
+    ctx.stroke(this.lines.body);
+    ctx.setLineDash([]);
+    ctx.fillStyle = LINE_COLOR;
+    ctx.fill(this.lines.heads);
+  }
+
+  private traceDriftLines(): { body: Path2D; heads: Path2D } {
+    const w = this.world;
+    const minSpeed = w.params.driftStrength * LINE_MIN_SHARE;
+    const body = new Path2D();
+    const heads = new Path2D();
+    // Только пятна рядом с видимой частью: линия уходит от края не дальше, чем течение.
+    const [vx0, vy0] = this.screenToWorld(0, 0);
+    const [vx1, vy1] = this.screenToWorld(this.canvas.width, this.canvas.height);
+    const pad = LINE_STEP * LINE_MAX_POINTS;
+    const anchors = spotAnchors(w.light, w.step, DISH_WIDTH, DISH_HEIGHT, LINE_ANCHOR_SPACING);
+    const v: [number, number] = [0, 0];
+    const minLen = this.px(LINE_HEAD_MIN_CSS);
+    // На мелком масштабе — каждая вторая точка: иначе линии сливаются в рябь.
+    const stride = (this.zoom / this.dpr) < LINE_THIN_BELOW_CSS ? 4 : 2;
+    for (let a = 0; a < anchors.length; a += stride) {
+      let x = anchors[a], y = anchors[a + 1];
+      if (x < vx0 - pad || x > vx1 + pad || y < vy0 - pad || y > vy1 + pad) continue;
+      if (x < 0 || y < 0 || x >= DISH_WIDTH || y >= DISH_HEIGHT || isBlocked(w.partitions, x, y)) continue;
+      let px = 0, py = 0, len = 0, started = false;
+      for (let n = 0; n < LINE_MAX_POINTS; n++) {
+        w.drift.at(x, y, w.step, v);
+        const s = Math.hypot(v[0], v[1]);
+        if (s < minSpeed) break;
+        const ux = v[0] / s, uy = v[1] / s;
+        // Разворот — место встречи течений: там конец.
+        if (n > 0 && ux * px + uy * py < 0.2) break;
+        const nx = x + ux * LINE_STEP, ny = y + uy * LINE_STEP;
+        if (nx < 0 || ny < 0 || nx >= DISH_WIDTH || ny >= DISH_HEIGHT || isBlocked(w.partitions, nx, ny)) break;
+        if (!started) { body.moveTo(x, y); started = true; }
+        body.lineTo(nx, ny);
+        x = nx; y = ny; px = ux; py = uy; len += LINE_STEP;
+      }
+      // Наконечник — только у заметной линии, по направлению последнего шага.
+      if (len < minLen) continue;
+      const h = this.px(4.5), hw = this.px(2.6);
+      heads.moveTo(x + px * h * 0.4, y + py * h * 0.4);
+      heads.lineTo(x - px * h - py * hw, y - py * h + px * hw);
+      heads.lineTo(x - px * h + py * hw, y - py * h - px * hw);
+      heads.closePath();
+    }
+    return { body, heads };
+  }
+
+  /** Мини-карта при приближении: вся чашка, пятна света, перегородки и рамка вида; скрыта, когда видна вся чашка. */
+  drawMinimap(mini: HTMLCanvasElement): void {
+    mini.hidden = this.fitted;
+    if (this.fitted || !this.world) return;
+    const w = Math.round(mini.clientWidth * this.dpr);
+    const h = Math.round(mini.clientHeight * this.dpr);
+    if (mini.width !== w || mini.height !== h) { mini.width = w; mini.height = h; }
+    const m = mini.getContext('2d')!;
+    const s = w / DISH_WIDTH;
+    m.setTransform(s, 0, 0, s, 0, 0);
+    m.globalCompositeOperation = 'source-over';
+    m.drawImage(this.base, 0, 0, DISH_WIDTH, DISH_HEIGHT);
+    m.globalCompositeOperation = 'multiply';
+    m.fillStyle = rgb(SHADE_COLOR);
+    m.fillRect(0, 0, DISH_WIDTH, DISH_HEIGHT);
+    m.globalCompositeOperation = 'source-over';
+    m.save();
+    m.clip(this.lastSpots);
+    m.drawImage(this.base, 0, 0, DISH_WIDTH, DISH_HEIGHT);
+    m.restore();
+    m.fillStyle = 'rgba(214, 230, 245, 0.9)';
+    m.fill(this.parts);
+    const [x0, y0] = this.screenToWorld(0, 0);
+    const [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
+    m.lineWidth = 2 * this.dpr / s;
+    m.strokeStyle = '#ffffff';
+    m.strokeRect(Math.max(0, x0), Math.max(0, y0), Math.min(DISH_WIDTH, x1) - Math.max(0, x0), Math.min(DISH_HEIGHT, y1) - Math.max(0, y0));
+  }
+
+  /** Точка мини-карты (координаты окна) → центр вида там. */
+  centerFromMinimap(mini: HTMLCanvasElement, clientX: number, clientY: number): void {
+    const r = mini.getBoundingClientRect();
+    const x = ((clientX - r.left) / r.width) * DISH_WIDTH;
+    const y = ((clientY - r.top) / r.height) * DISH_HEIGHT;
+    this.setView(this.zoom, x, y);
   }
 
   /** Стена вокруг чашки и перегородки: одна заливка, одна обводка (в единицах мира). */
@@ -444,17 +661,8 @@ export class WorldRenderer {
     gloss.addColorStop(1, GLASS_GLOSS_FROM);
     ctx.fillStyle = gloss;
     ctx.fill(solid, 'evenodd');
-    // Перегородка — прямоугольники-отрезки толщиной W с квадратными концами.
-    const parts = new Path2D();
-    for (const part of this.world.partitions.partitions) {
-      for (let k = 1; k < part.points.length; k++) {
-        const [ax, ay] = part.points[k - 1];
-        const [bx, by] = part.points[k];
-        parts.rect(Math.min(ax, bx) - W / 2, Math.min(ay, by) - W / 2, Math.abs(bx - ax) + W, Math.abs(by - ay) + W);
-      }
-    }
     ctx.fillStyle = GLASS_FILL;
-    ctx.fill(parts);
+    ctx.fill(this.parts);
 
     const half = this.px(0.5);
     ctx.lineWidth = this.px(1);
@@ -468,6 +676,42 @@ export class WorldRenderer {
     ctx.strokeStyle = GLASS_EDGE;
     ctx.lineWidth = this.px(0.75);
     ctx.stroke(this.edges);
+  }
+
+  /** Перегородки — прямоугольники-отрезки толщиной стенки с квадратными концами. */
+  private buildParts(): Path2D {
+    const W = this.wall;
+    const parts = new Path2D();
+    for (const part of this.world.partitions.partitions) {
+      for (let k = 1; k < part.points.length; k++) {
+        const [ax, ay] = part.points[k - 1];
+        const [bx, by] = part.points[k];
+        parts.rect(Math.min(ax, bx) - W / 2, Math.min(ay, by) - W / 2, Math.abs(bx - ax) + W, Math.abs(by - ay) + W);
+      }
+    }
+    return parts;
+  }
+
+  /** Маска воды для бликов: непрозрачна в воде, гаснет к отмели, пуста на суше и перегородках. */
+  private buildWaterMask(): HTMLCanvasElement {
+    const step = 4;
+    const cols = DISH_WIDTH / step, rows = DISH_HEIGHT / step;
+    const c = document.createElement('canvas');
+    c.width = cols;
+    c.height = rows;
+    const mctx = c.getContext('2d')!;
+    const img = mctx.createImageData(cols, rows);
+    for (let j = 0; j < rows; j++) {
+      for (let i = 0; i < cols; i++) {
+        const x = (i + 0.5) * step, y = (j + 0.5) * step;
+        const water = isBlocked(this.world.partitions, x, y) ? 0 : 1 - smoothstep(0.35, 0.95, smoothLevelAt(this.world.viscosity, x, y));
+        const k = (j * cols + i) * 4;
+        img.data[k] = img.data[k + 1] = img.data[k + 2] = 255;
+        img.data[k + 3] = water * 255;
+      }
+    }
+    mctx.putImageData(img, 0, 0);
+    return c;
   }
 
   /**

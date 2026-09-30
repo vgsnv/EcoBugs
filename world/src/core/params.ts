@@ -34,6 +34,8 @@ export interface WorldParams {
   viscosityShares: ViscosityShares;
   /** Средний размер зон вязкости в единицах мира. */
   viscosityZoneSize: number;
+  /** Сила сноса: смещение за шаг в начале течения, единиц мира. */
+  driftStrength: number;
 }
 
 export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
@@ -47,6 +49,7 @@ export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
   baseViscosity: 1,
   viscosityShares: Object.freeze({ water: 0.6, shallows: 0.25, land: 0.15 }),
   viscosityZoneSize: 120,
+  driftStrength: 0.3,
 });
 
 /** Параметры по умолчанию с заданным сидом и частичными переопределениями. */
@@ -69,6 +72,7 @@ export const PARAM_LABELS: Readonly<Record<string, string>> = {
   'spotHeat': 'Нагрев в пятнах',
   'baseViscosity': 'Базовая вязкость',
   'viscosityZoneSize': 'Размер зон вязкости',
+  'driftStrength': 'Сила сноса',
   'viscosityShares': 'Доли вязкости',
   'viscosityShares.water': 'Доля воды',
   'viscosityShares.shallows': 'Доля отмели',
@@ -106,6 +110,7 @@ export function validateParams(p: WorldParams): string[] {
   inRange('spotHeat', p.spotHeat, 0, 100);
   inRange('baseViscosity', p.baseViscosity, 0, 100, true);
   inRange('viscosityZoneSize', p.viscosityZoneSize, 1, 10000);
+  inRange('driftStrength', p.driftStrength, 0, 100);
 
   const s = p.viscosityShares;
   if (typeof s !== 'object' || s === null) {

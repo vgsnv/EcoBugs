@@ -429,3 +429,48 @@ export function spotOutlines(map: LightMap, t: number, dishW: number, dishH: num
   }
   return out;
 }
+
+/**
+ * Точки на внешнем краю пятен (где свет пятна сошёл до фона) — отсюда
+ * начинаются течения. У каждого эллипса пятна их постоянное число, примерно
+ * через `spacing` единиц по краю, и они движутся вместе с пятном, поэтому
+ * порядок точек от шага к шагу сохраняется. Плоский массив x, y, … в
+ * координатах чашки, с копиями у сомкнутых краёв.
+ */
+export function spotAnchors(map: LightMap, t: number, dishW: number, dishH: number, spacing: number): Float64Array {
+  const [ox, oy] = lightOffset(map, t);
+  const W = map.mapWidth;
+  const H = map.mapHeight;
+  const out: number[] = [];
+  const outer = 1 + SPOT_EDGE;
+  for (const s of map.spots) {
+    for (const b of s.blobs) {
+      const [mx, my] = blobCenter(s, b, t, W, H);
+      const reach = blobReach(b, t);
+      const cx0 = wrap(mx + ox, W);
+      const cy0 = wrap(my + oy, H);
+      const r = blobRadius(b, t);
+      const k = Math.sqrt(b.aspect);
+      const angle = b.a0 + b.wa * t;
+      const c = Math.cos(angle);
+      const sn = Math.sin(angle);
+      // Число точек — от базового размера эллипса, а не от текущего: не меняется со временем.
+      const count = Math.max(3, Math.round((TAU * b.radius * outer) / spacing));
+      for (const cx of [cx0, cx0 - W]) {
+        if (cx + reach < 0 || cx - reach > dishW) continue;
+        for (const cy of [cy0, cy0 - H]) {
+          if (cy + reach < 0 || cy - reach > dishH) continue;
+          for (let i = 0; i < count; i++) {
+            const phi = (i / count) * TAU;
+            const bound = (1 + b.e3 * Math.sin(3 * phi + b.p3 + b.w3 * t) + b.e5 * Math.sin(5 * phi + b.p5 + b.w5 * t)) * outer;
+            const u = bound * Math.cos(phi) * r * k;
+            const v = (bound * Math.sin(phi) * r) / k;
+            out.push(cx + u * c - v * sn, cy + u * sn + v * c);
+          }
+        }
+      }
+    }
+  }
+  return Float64Array.from(out);
+}
+

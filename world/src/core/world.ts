@@ -7,6 +7,7 @@ import { type WorldParams, validateParams } from './params.ts';
 import { type LightMap, createLightMap } from './light.ts';
 import { type ViscosityMap, createViscosityMap } from './viscosity.ts';
 import { type PartitionLayout, buildLayout, layoutForSeed } from './partitions.ts';
+import { Drift } from './drift.ts';
 
 export interface World {
   readonly params: Readonly<WorldParams>;
@@ -18,6 +19,8 @@ export interface World {
   readonly viscosity: ViscosityMap;
   /** Перегородки по выбранной заготовке; не меняются. */
   readonly partitions: PartitionLayout;
+  /** Снос: течения от пятен света; функция номера шага. */
+  readonly drift: Drift;
 }
 
 export class InvalidParamsError extends Error {
@@ -32,7 +35,10 @@ export function createWorld(params: WorldParams): World {
   const errors = validateParams(params);
   if (errors.length > 0) throw new InvalidParamsError(errors);
   const own = structuredClone(params);
-  return { params: own, step: 0, light: createLightMap(own), viscosity: createViscosityMap(own), partitions: buildLayout(layoutForSeed(own.seed), DISH_WIDTH, DISH_HEIGHT) };
+  const light = createLightMap(own);
+  const viscosity = createViscosityMap(own);
+  const partitions = buildLayout(layoutForSeed(own.seed), DISH_WIDTH, DISH_HEIGHT);
+  return { params: own, step: 0, light, viscosity, partitions, drift: new Drift({ params: own, light, viscosity, partitions }) };
 }
 
 /**
@@ -63,7 +69,7 @@ export function worldHash(world: World): number {
     p.seed, DISH_WIDTH, DISH_HEIGHT, p.sun, p.backgroundLevel, p.illumination, p.spotSize,
     p.baseTemperature, p.spotHeat, p.baseViscosity,
     p.viscosityShares.water, p.viscosityShares.shallows, p.viscosityShares.land,
-    p.viscosityZoneSize,
+    p.viscosityZoneSize, p.driftStrength,
     world.step,
   ]);
 }

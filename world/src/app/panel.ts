@@ -35,7 +35,7 @@ export const SPEED_KEYS = SPEEDS.map((_, i) => String(i + 1));
 
 const OPEN_GROUPS_KEY = 'ecobugs.params.open';
 
-type NumberKey = 'sun' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'baseViscosity' | 'viscosityZoneSize';
+type NumberKey = 'sun' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'baseViscosity' | 'viscosityZoneSize' | 'driftStrength';
 
 interface SliderSpec {
   key: NumberKey;
@@ -69,6 +69,12 @@ const GROUPS: readonly { title: string; sliders: readonly SliderSpec[] }[] = [
     sliders: [
       { key: 'baseViscosity', label: 'Базовая', hint: 'Общее сопротивление движению; градации умножают его.', min: 0.1, max: 5, step: 0.1 },
       { key: 'viscosityZoneSize', label: 'Размер зон', hint: 'Средний размер зон воды, отмели и суши.', min: 30, max: 300, step: 5 },
+    ],
+  },
+  {
+    title: 'Снос',
+    sliders: [
+      { key: 'driftStrength', label: 'Сила сноса', hint: 'Течения идут от краёв пятен света наружу. Сила — смещение за шаг в начале течения; по пути течение слабеет (быстрее на отмели, почти сразу на суше) и чем сильнее, тем дальше уходит. Снесённое копится там, где течения кончаются.', min: 0, max: 1, step: 0.05 },
     ],
   },
 ];
@@ -339,6 +345,8 @@ export class Panel {
       item(css(SUN_COLOR), 'пятна света'),
       item(css(DEEP_WATER.map((c, i) => (c * SHADE_COLOR[i]) / 255) as unknown as Rgb), 'тень'),
       item('rgb(255, 170, 70)', 'нагрев — теплее'),
+      item('rgb(40, 80, 150)', 'течение — бегущий пунктир от пятна до конца течения'),
+      item('repeating-linear-gradient(60deg, rgba(255,250,230,0.9) 0 1px, transparent 1px 4px), rgb(84, 144, 210)', 'блики — вода на свету'),
       item('rgba(150, 190, 222, 0.6)', 'стекло — стенки и перегородки'),
     );
   }

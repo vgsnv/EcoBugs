@@ -9,12 +9,13 @@ import { createWorld, worldHash, type World } from './world.ts';
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 3;
+export const WORLD_FORMAT_VERSION = 4;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
   1: 'тогда размер чашки был параметром, теперь чашка всегда 1600×1200',
   2: 'тогда планировка была параметром, теперь её выбирает сид',
+  3: 'тогда в мире не было сноса',
 };
 
 export interface WorldFile {
@@ -72,6 +73,7 @@ function readParams(raw: unknown, problems: string[]): WorldParams | null {
     baseViscosity: raw.baseViscosity as number,
     viscosityShares: { water: shares.water as number, shallows: shares.shallows as number, land: shares.land as number },
     viscosityZoneSize: raw.viscosityZoneSize as number,
+    driftStrength: raw.driftStrength as number,
   };
   for (const key of Object.keys(defaults) as (keyof WorldParams)[]) {
     if (!(key in raw)) problems.push(`Нет параметра «${key}»`);
