@@ -15,8 +15,8 @@ test('makeParams не портит значения по умолчанию', ()
 
 test('неверные параметры отклоняются с понятными ошибками', () => {
   const errors = validateParams(makeParams({ seed: -1, backgroundLevel: 1.5, viscosityShares: { water: 0.5, shallows: 0.1, land: 0.1 } }));
-  assert.ok(errors.some((e) => e.startsWith('seed')));
-  assert.ok(errors.some((e) => e.startsWith('backgroundLevel')));
+  assert.ok(errors.some((e) => e.startsWith('Сид')));
+  assert.ok(errors.some((e) => e.startsWith('Яркость фона')));
   assert.ok(errors.some((e) => e.includes('сумма долей')));
   assert.throws(() => createWorld(makeParams({ width: 0 })), InvalidParamsError);
 });

@@ -41,7 +41,7 @@ test('сила мутаций везде больше нуля и выше в т
 });
 
 test('базовая температура должна быть больше нуля', () => {
-  assert.ok(validateParams(makeParams({ baseTemperature: 0 })).some((e) => e.startsWith('baseTemperature')));
+  assert.ok(validateParams(makeParams({ baseTemperature: 0 })).some((e) => e.startsWith('Базовая температура')));
 });
 
 test('поле температуры согласовано с полем интенсивности', () => {

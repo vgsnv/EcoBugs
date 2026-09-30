@@ -69,6 +69,26 @@ export function makeParams(overrides: Partial<WorldParams> = {}): WorldParams {
   };
 }
 
+/** Названия параметров для сообщений об ошибках. */
+export const PARAM_LABELS: Readonly<Record<string, string>> = {
+  'seed': 'Сид',
+  'width': 'Ширина чашки',
+  'height': 'Высота чашки',
+  'layout': 'Планировка',
+  'sun': 'Солнце',
+  'backgroundLevel': 'Яркость фона',
+  'illumination': 'Освещённость',
+  'spotSize': 'Размер пятен',
+  'baseTemperature': 'Базовая температура',
+  'spotHeat': 'Нагрев в пятнах',
+  'baseViscosity': 'Базовая вязкость',
+  'viscosityZoneSize': 'Размер зон вязкости',
+  'viscosityShares': 'Доли вязкости',
+  'viscosityShares.water': 'Доля воды',
+  'viscosityShares.shallows': 'Доля отмели',
+  'viscosityShares.land': 'Доля суши',
+};
+
 /**
  * Проверка параметров. Возвращает список ошибок на русском; пустой — всё верно.
  * Используется и при создании мира, и при загрузке файла.
@@ -77,7 +97,7 @@ export function validateParams(p: WorldParams): string[] {
   const errors: string[] = [];
   const finite = (name: string, v: unknown): v is number => {
     if (typeof v !== 'number' || !Number.isFinite(v)) {
-      errors.push(`${name}: ожидается число`);
+      errors.push(`${PARAM_LABELS[name] ?? name}: ожидается число`);
       return false;
     }
     return true;
@@ -85,15 +105,15 @@ export function validateParams(p: WorldParams): string[] {
   const inRange = (name: string, v: unknown, min: number, max: number, open = false) => {
     if (!finite(name, v)) return;
     const ok = open ? v > min && v < max : v >= min && v <= max;
-    if (!ok) errors.push(`${name}: ${v} вне ${open ? '(' : '['}${min}, ${max}${open ? ')' : ']'}`);
+    if (!ok) errors.push(`${PARAM_LABELS[name] ?? name}: ${v} вне ${open ? '(' : '['}${min}, ${max}${open ? ')' : ']'}`);
   };
 
   if (!Number.isInteger(p.seed) || p.seed < 0 || p.seed > 0xffffffff) {
-    errors.push(`seed: ожидается целое от 0 до ${0xffffffff}`);
+    errors.push(`Сид: ожидается целое от 0 до ${0xffffffff}`);
   }
   inRange('width', p.width, 100, 10000);
   inRange('height', p.height, 100, 10000);
-  if (!LAYOUTS.includes(p.layout)) errors.push(`layout: неизвестная заготовка «${String(p.layout)}»`);
+  if (!LAYOUTS.includes(p.layout)) errors.push(`Планировка: неизвестная заготовка «${String(p.layout)}»`);
   inRange('sun', p.sun, 0, 100, true);
   inRange('backgroundLevel', p.backgroundLevel, 0, 1, true);
   inRange('illumination', p.illumination, 0, 1, true);
@@ -106,14 +126,14 @@ export function validateParams(p: WorldParams): string[] {
 
   const s = p.viscosityShares;
   if (typeof s !== 'object' || s === null) {
-    errors.push('viscosityShares: ожидается объект');
+    errors.push('Доли вязкости: ожидается объект');
   } else {
     inRange('viscosityShares.water', s.water, 0, 1);
     inRange('viscosityShares.shallows', s.shallows, 0, 1);
     inRange('viscosityShares.land', s.land, 0, 1);
     const sum = s.water + s.shallows + s.land;
-    if (Math.abs(sum - 1) > 1e-6) errors.push(`viscosityShares: сумма долей ${sum}, а должна быть 1`);
-    if (s.land > 0 && !(s.shallows > 0)) errors.push('viscosityShares: суша без отмели невозможна — суша отделена от воды отмелью');
+    if (Math.abs(sum - 1) > 1e-6) errors.push(`Доли вязкости: сумма долей ${sum}, а должна быть 1`);
+    if (s.land > 0 && !(s.shallows > 0)) errors.push('Доли вязкости: суша без отмели невозможна — суша отделена от воды отмелью');
   }
   return errors;
 }

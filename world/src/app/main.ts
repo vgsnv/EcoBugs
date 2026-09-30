@@ -1,101 +1,88 @@
+/**
+ * Песочница неживой природы: мир, панель параметров, время, слои.
+ * Скорость показа — дело приложения; мир знает только номер шага.
+ */
 import {
-  LAYOUTS, LAYOUT_PRESETS, WORLD_FORMAT_VERSION, createWorld, lightFromIntensity, makeParams, rasterizeSpotIntensity,
-  rasterizeTemperature, smoothLevelAt, type World,
+  LAYOUT_PRESETS, absorptionAt, createWorld, gradationAt, isBlocked, lightAt, makeParams, mutationStrength,
+  resistanceAt, stepWorld, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
+import { Panel } from './panel.ts';
+import { WorldRenderer, type Layer } from './render.ts';
 
-const VISC_COLORS: readonly (readonly [number, number, number])[] = [[25, 70, 150], [60, 160, 165], [170, 135, 80]];
+/** Шагов в секунду при скорости ×1. */
+const BASE_STEPS_PER_SECOND = 30;
+/** Больше шагов за кадр не делаем, чтобы не подвесить вкладку. */
+const MAX_STEPS_PER_FRAME = 100_000;
+const GRADATION_NAMES = ['вода', 'отмель', 'суша'];
 
 const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
-const status = document.querySelector<HTMLDivElement>('#status')!;
+const renderer = new WorldRenderer(canvas);
 
-// Временная проверка этапов 2–5: свет (L), температура (T), вязкость (V),
-// заготовка перегородок (P) с сильным ускорением времени. Полноценная песочница — этап 6.
 let world: World = createWorld(makeParams({ seed: 1 }));
-const { width, height } = world.params;
-const CELL = 4;
-const cols = Math.ceil(width / CELL);
-const rows = Math.ceil(height / CELL);
-const STEPS_PER_FRAME = 1500;
-
-// Поля рисуются в малый буфер и растягиваются, перегородки — поверх в полном разрешении.
-canvas.width = width;
-canvas.height = height;
-const buffer = document.createElement('canvas');
-buffer.width = cols;
-buffer.height = rows;
-const bctx = buffer.getContext('2d')!;
-const ctx = canvas.getContext('2d')!;
-ctx.imageSmoothingEnabled = false;
-const image = bctx.createImageData(cols, rows);
-let intensity: Float32Array = new Float32Array(cols * rows);
-let temperature: Float32Array = new Float32Array(cols * rows);
-type Layer = 'light' | 'temperature' | 'viscosity';
 let layer: Layer = 'light';
-const LAYER_KEYS: Record<string, Layer> = { l: 'light', д: 'light', t: 'temperature', е: 'temperature', v: 'viscosity', м: 'viscosity' };
-const LAYER_NAMES: Record<Layer, string> = { light: 'свет', temperature: 'температура', viscosity: 'вязкость' };
+let showPartitions = true;
+let paused = false;
+let speed = 1;
+let carry = 0;
+let lastTime = performance.now();
+let pointer: [number, number] | null = null;
 
-window.addEventListener('keydown', (e) => {
-  const key = e.key.toLowerCase();
-  const next = LAYER_KEYS[key];
-  if (next) layer = next;
-  if (key === 'p' || key === 'з') {
-    const idx = (LAYOUTS.indexOf(world.params.layout) + 1) % LAYOUTS.length;
-    const step = world.step;
-    world = createWorld(makeParams({ ...world.params, layout: LAYOUTS[idx] }));
-    world.step = step;
-  }
+const panel = new Panel(document.querySelector<HTMLElement>('#panel')!, world.params, {
+  onCreate: (params: WorldParams) => setWorld(createWorld(params)),
+  onTogglePause: () => { paused = !paused; },
+  onStepOnce: () => { stepWorld(world); },
+  onSpeed: (s) => { speed = s; carry = 0; },
+  onLayer: (l) => { layer = l; },
+  onPartitions: (show) => { showPartitions = show; },
 });
 
-function draw(): void {
-  const p = world.params;
-  intensity = rasterizeSpotIntensity(world.light, world.step, cols, rows, CELL, intensity);
-  if (layer === 'temperature') temperature = rasterizeTemperature(p, world.light, world.step, cols, rows, CELL, intensity, temperature);
-  const tMin = p.baseTemperature;
-  const tMax = p.baseTemperature + p.spotHeat;
-  for (let k = 0; k < intensity.length; k++) {
-    const i = k * 4;
-    if (layer === 'light') {
-      const c = Math.round((lightFromIntensity(world.light, intensity[k]) / p.sun) * 255);
-      image.data[i] = c;
-      image.data[i + 1] = c;
-      image.data[i + 2] = Math.round(c * 0.8);
-    } else if (layer === 'viscosity') {
-      // Вода — синяя, отмель — бирюзовая, суша — охристая; границы плавные.
-      const x = ((k % cols) + 0.5) * CELL;
-      const y = (Math.floor(k / cols) + 0.5) * CELL;
-      const l = smoothLevelAt(world.viscosity, x, y);
-      const [a, b, u] = l <= 1 ? [VISC_COLORS[0], VISC_COLORS[1], l] : [VISC_COLORS[1], VISC_COLORS[2], l - 1];
-      image.data[i] = Math.round(a[0] + (b[0] - a[0]) * u);
-      image.data[i + 1] = Math.round(a[1] + (b[1] - a[1]) * u);
-      image.data[i + 2] = Math.round(a[2] + (b[2] - a[2]) * u);
-    } else {
-      // Холодное — синее, тёплое — красное.
-      const u = tMax > tMin ? (temperature[k] - tMin) / (tMax - tMin) : 0;
-      image.data[i] = Math.round(40 + 215 * u);
-      image.data[i + 1] = Math.round(60 + 60 * u);
-      image.data[i + 2] = Math.round(160 * (1 - u) + 40);
-    }
-    image.data[i + 3] = 255;
-  }
-  bctx.putImageData(image, 0, 0);
-  ctx.drawImage(buffer, 0, 0, width, height);
-  ctx.strokeStyle = '#111';
-  ctx.lineWidth = world.partitions.thickness;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  for (const part of world.partitions.partitions) {
-    ctx.beginPath();
-    part.points.forEach(([x, y], k) => (k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
-    ctx.stroke();
-  }
-  status.textContent = `Песочница мира · формат v${WORLD_FORMAT_VERSION} · сид ${p.seed} · шаг ${world.step.toLocaleString('ru')} · ×${STEPS_PER_FRAME} за кадр · слой: ${LAYER_NAMES[layer]} (L / T / V) · ${LAYOUT_PRESETS[p.layout].name} (P)`;
+function setWorld(next: World): void {
+  world = next;
+  renderer.setWorld(world);
+  panel.setCurrent(world.params);
+  document.title = `Песочница мира · ${LAYOUT_PRESETS[world.params.layout].name}`;
 }
 
-function frame(): void {
-  world.step += STEPS_PER_FRAME;
-  draw();
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  pointer = [((e.clientX - rect.left) / rect.width) * world.params.width, ((e.clientY - rect.top) / rect.height) * world.params.height];
+});
+canvas.addEventListener('mouseleave', () => { pointer = null; });
+
+function probe(): void {
+  if (!pointer) { panel.setProbe(null); return; }
+  const [x, y] = pointer;
+  const p = world.params;
+  if (isBlocked(world.partitions, x, y) && world.partitions.partitions.length > 0 && x >= 0 && y >= 0 && x < p.width && y < p.height) {
+    panel.setProbe([`(${Math.round(x)}, ${Math.round(y)})`, 'Перегородка']);
+    return;
+  }
+  const temp = temperatureAt(p, world.light, x, y, world.step);
+  panel.setProbe([
+    `(${Math.round(x)}, ${Math.round(y)})`,
+    `Свет: ${lightAt(world.light, x, y, world.step).toFixed(3)}`,
+    `Температура: ${temp.toFixed(2)} · сила мутаций ${mutationStrength(temp).toFixed(2)}`,
+    `Градация: ${GRADATION_NAMES[gradationAt(world.viscosity, x, y)]}`,
+    `Сопротивление движению: ${resistanceAt(p, world.viscosity, x, y).toFixed(2)}`,
+    `Доля усваиваемого света: ${absorptionAt(world.viscosity, x, y).toFixed(2)}`,
+  ]);
+}
+
+function frame(now: number): void {
+  const dt = Math.min(0.25, (now - lastTime) / 1000);
+  lastTime = now;
+  const stepsPerSecond = BASE_STEPS_PER_SECOND * speed;
+  if (!paused) {
+    carry += dt * stepsPerSecond;
+    const n = Math.min(MAX_STEPS_PER_FRAME, Math.floor(carry));
+    carry -= n;
+    for (let i = 0; i < n; i++) stepWorld(world);
+  }
+  renderer.draw(layer, showPartitions);
+  panel.setTime(world.step, paused, speed, stepsPerSecond);
+  probe();
   requestAnimationFrame(frame);
 }
 
-draw();
+setWorld(world);
 requestAnimationFrame(frame);
