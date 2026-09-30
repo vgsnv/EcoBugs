@@ -1,0 +1,118 @@
+/**
+ * Параметры мира (спецификация, раздел «Параметры»). Задаются при сотворении
+ * и больше не меняются. Значения по умолчанию предварительные — их подбираем,
+ * глядя на мир в песочнице.
+ */
+
+/** Заготовки планировки перегородок. Набор растёт на этапе 5. */
+export const LAYOUTS = ['open'] as const;
+export type LayoutId = (typeof LAYOUTS)[number];
+
+/** Доли чашки под каждой градацией вязкости; в сумме 1. */
+export interface ViscosityShares {
+  water: number;
+  shallows: number;
+  land: number;
+}
+
+export interface WorldParams {
+  /** Вся случайность мира. */
+  seed: number;
+  /** Ширина чашки в единицах мира. */
+  width: number;
+  /** Высота чашки в единицах мира. */
+  height: number;
+  /** Заготовка перегородок. */
+  layout: LayoutId;
+  /** Яркость света в пятнах. */
+  sun: number;
+  /** Свет фона как доля от света в пятнах, (0, 1). */
+  backgroundLevel: number;
+  /** Средняя доля карты света, занятая пятнами, (0, 1). */
+  illumination: number;
+  /** Средний радиус пятна света в единицах мира. */
+  spotSize: number;
+  /** Температура на фоне — общий уровень мутаций. */
+  baseTemperature: number;
+  /** Насколько в пятне теплее, чем на фоне. */
+  spotHeat: number;
+  /** Общее сопротивление движению. */
+  baseViscosity: number;
+  /** Какую часть чашки занимают вода, отмель и суша. */
+  viscosityShares: ViscosityShares;
+  /** Средний размер зон вязкости в единицах мира. */
+  viscosityZoneSize: number;
+}
+
+export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
+  seed: 1,
+  width: 800,
+  height: 600,
+  layout: 'open',
+  sun: 1,
+  backgroundLevel: 0.2,
+  illumination: 0.3,
+  spotSize: 60,
+  baseTemperature: 1,
+  spotHeat: 1,
+  baseViscosity: 1,
+  viscosityShares: Object.freeze({ water: 0.6, shallows: 0.25, land: 0.15 }),
+  viscosityZoneSize: 120,
+});
+
+/** Параметры по умолчанию с заданным сидом и частичными переопределениями. */
+export function makeParams(overrides: Partial<WorldParams> = {}): WorldParams {
+  return {
+    ...DEFAULT_PARAMS,
+    ...overrides,
+    viscosityShares: { ...DEFAULT_PARAMS.viscosityShares, ...overrides.viscosityShares },
+  };
+}
+
+/**
+ * Проверка параметров. Возвращает список ошибок на русском; пустой — всё верно.
+ * Используется и при создании мира, и при загрузке файла.
+ */
+export function validateParams(p: WorldParams): string[] {
+  const errors: string[] = [];
+  const finite = (name: string, v: unknown): v is number => {
+    if (typeof v !== 'number' || !Number.isFinite(v)) {
+      errors.push(`${name}: ожидается число`);
+      return false;
+    }
+    return true;
+  };
+  const inRange = (name: string, v: unknown, min: number, max: number, open = false) => {
+    if (!finite(name, v)) return;
+    const ok = open ? v > min && v < max : v >= min && v <= max;
+    if (!ok) errors.push(`${name}: ${v} вне ${open ? '(' : '['}${min}, ${max}${open ? ')' : ']'}`);
+  };
+
+  if (!Number.isInteger(p.seed) || p.seed < 0 || p.seed > 0xffffffff) {
+    errors.push(`seed: ожидается целое от 0 до ${0xffffffff}`);
+  }
+  inRange('width', p.width, 100, 10000);
+  inRange('height', p.height, 100, 10000);
+  if (!LAYOUTS.includes(p.layout)) errors.push(`layout: неизвестная заготовка «${String(p.layout)}»`);
+  inRange('sun', p.sun, 0, 100, true);
+  inRange('backgroundLevel', p.backgroundLevel, 0, 1, true);
+  inRange('illumination', p.illumination, 0, 1, true);
+  inRange('spotSize', p.spotSize, 1, 10000);
+  inRange('baseTemperature', p.baseTemperature, 0, 100);
+  inRange('spotHeat', p.spotHeat, 0, 100);
+  inRange('baseViscosity', p.baseViscosity, 0, 100, true);
+  inRange('viscosityZoneSize', p.viscosityZoneSize, 1, 10000);
+
+  const s = p.viscosityShares;
+  if (typeof s !== 'object' || s === null) {
+    errors.push('viscosityShares: ожидается объект');
+  } else {
+    inRange('viscosityShares.water', s.water, 0, 1);
+    inRange('viscosityShares.shallows', s.shallows, 0, 1);
+    inRange('viscosityShares.land', s.land, 0, 1);
+    const sum = s.water + s.shallows + s.land;
+    if (Math.abs(sum - 1) > 1e-6) errors.push(`viscosityShares: сумма долей ${sum}, а должна быть 1`);
+    if (s.land > 0 && !(s.shallows > 0)) errors.push('viscosityShares: суша без отмели невозможна — суша отделена от воды отмелью');
+  }
+  return errors;
+}
