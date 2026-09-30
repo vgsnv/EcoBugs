@@ -3,8 +3,8 @@
  * Скорость показа — дело приложения; мир знает только номер шага.
  */
 import {
-  LAYOUT_PRESETS, absorptionAt, createWorld, gradationAt, isBlocked, lightAt, makeParams, mutationStrength,
-  resistanceAt, stepWorld, temperatureAt, type World, type WorldParams,
+  LAYOUT_PRESETS, WorldFileError, absorptionAt, createWorld, gradationAt, isBlocked, lightAt, makeParams, mutationStrength,
+  parseWorldFile, resistanceAt, serializeWorld, stepWorld, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
 import { Panel } from './panel.ts';
 import { WorldRenderer, type Layer } from './render.ts';
@@ -34,7 +34,31 @@ const panel = new Panel(document.querySelector<HTMLElement>('#panel')!, world.pa
   onSpeed: (s) => { speed = s; carry = 0; },
   onLayer: (l) => { layer = l; },
   onPartitions: (show) => { showPartitions = show; },
+  onSave: () => saveWorld(),
+  onLoad: (file) => { void loadWorld(file); },
 });
+
+function saveWorld(): void {
+  const blob = new Blob([serializeWorld(world, new Date())], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ecobugs-world-${world.params.seed}-${world.params.layout}-step-${world.step}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  panel.setFileStatus([`Сохранён мир на шаге ${world.step.toLocaleString('ru')}`], false);
+}
+
+async function loadWorld(file: File): Promise<void> {
+  try {
+    setWorld(parseWorldFile(await file.text()));
+    carry = 0;
+    panel.setFileStatus([`Загружен «${file.name}»: шаг ${world.step.toLocaleString('ru')}`], false);
+  } catch (e) {
+    const problems = e instanceof WorldFileError ? e.problems : [String(e)];
+    panel.setFileStatus([`«${file.name}» не загружен:`, ...problems], true);
+  }
+}
 
 function setWorld(next: World): void {
   world = next;

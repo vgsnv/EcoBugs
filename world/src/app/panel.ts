@@ -15,6 +15,8 @@ export interface PanelHandlers {
   onSpeed(speed: number): void;
   onLayer(layer: Layer): void;
   onPartitions(show: boolean): void;
+  onSave(): void;
+  onLoad(file: File): void;
 }
 
 type NumberKey = 'sun' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'baseViscosity' | 'viscosityZoneSize';
@@ -72,6 +74,7 @@ export class Panel {
   private readonly stepButton = el('button', { textContent: '+1 шаг' });
   private readonly probeBox = el('div', { className: 'probe' });
   private readonly createButton = el('button', { className: 'primary', textContent: 'Создать мир' });
+  private readonly fileStatus = el('div', { className: 'note' });
   private readonly inputs: (() => void)[] = [];
   private current: WorldParams;
 
@@ -89,6 +92,7 @@ export class Panel {
       this.createButton,
       this.timeSection(),
       this.layerSection(),
+      this.fileSection(),
       el('section', {}, el('h3', { textContent: 'Под курсором' }), this.probeBox),
     );
     this.createButton.addEventListener('click', () => {
@@ -213,6 +217,31 @@ export class Panel {
       ...radios,
       el('label', { className: 'inline' }, parts, 'Перегородки'),
     );
+  }
+
+  private fileSection(): HTMLElement {
+    const save = el('button', { textContent: 'Сохранить в файл' });
+    const load = el('button', { textContent: 'Загрузить из файла' });
+    const picker = el('input', { type: 'file', accept: '.json,application/json', hidden: true });
+    save.addEventListener('click', () => this.handlers.onSave());
+    load.addEventListener('click', () => picker.click());
+    picker.addEventListener('change', () => {
+      const file = picker.files?.[0];
+      if (file) this.handlers.onLoad(file);
+      picker.value = '';
+    });
+    return el('section', {},
+      el('h3', { textContent: 'Файл' }),
+      el('span', { className: 'row' }, save, load),
+      picker,
+      this.fileStatus,
+    );
+  }
+
+  /** Итог сохранения или загрузки: сообщение или список причин отказа. */
+  setFileStatus(lines: readonly string[], isError: boolean): void {
+    this.fileStatus.className = isError ? 'errors' : 'note';
+    this.fileStatus.replaceChildren(...lines.map((l) => el('div', { textContent: l })));
   }
 
   setTime(step: number, paused: boolean, speed: number, stepsPerSecond: number): void {

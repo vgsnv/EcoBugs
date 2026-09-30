@@ -3,9 +3,6 @@
  * Спецификация — docs/spec/world.md.
  */
 
-/** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 1;
-
 export * from './prng.ts';
 export * from './noise.ts';
 export * from './params.ts';
@@ -14,4 +11,5 @@ export * from './light.ts';
 export * from './temperature.ts';
 export * from './viscosity.ts';
 export * from './partitions.ts';
+export * from './save.ts';
 export * from './world.ts';
