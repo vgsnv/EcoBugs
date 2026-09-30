@@ -79,8 +79,50 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLEl
   return node;
 }
 
-/** Пояснение к параметру — по наведению на ⓘ. */
-const info = (text: string) => el('span', { className: 'info', textContent: 'i', title: text });
+/** Пояснение к параметру — всплывает при наведении на ⓘ, по клику или касанию. */
+const info = (text: string) => {
+  const node = el('span', { className: 'info', textContent: 'i', tabIndex: 0 });
+  node.dataset.tip = text;
+  node.setAttribute('aria-label', text);
+  return node;
+};
+
+/**
+ * Одна всплывающая подсказка на страницу: позиционируется у ⓘ поверх всего,
+ * поэтому не обрезается прокруткой панели.
+ */
+function installInfoTips(): void {
+  const tip = el('div', { className: 'info-tip', hidden: true });
+  document.body.append(tip);
+  let pinned: HTMLElement | null = null;
+  const show = (target: HTMLElement) => {
+    tip.textContent = target.dataset.tip ?? '';
+    tip.hidden = false;
+    const r = target.getBoundingClientRect();
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    const x = Math.min(window.innerWidth - w - 8, Math.max(8, r.left + r.width / 2 - w / 2));
+    const below = r.bottom + 6 + h <= window.innerHeight - 8;
+    tip.style.left = `${x}px`;
+    tip.style.top = `${below ? r.bottom + 6 : r.top - 6 - h}px`;
+  };
+  const hide = () => { tip.hidden = true; pinned = null; };
+  const infoOf = (e: Event) => (e.target as HTMLElement).closest<HTMLElement>('.info');
+  document.addEventListener('mouseover', (e) => { const t = infoOf(e); if (t) show(t); });
+  document.addEventListener('mouseout', (e) => { if (infoOf(e) && !pinned) tip.hidden = true; });
+  document.addEventListener('focusin', (e) => { const t = infoOf(e); if (t) show(t); });
+  document.addEventListener('focusout', (e) => { if (infoOf(e)) hide(); });
+  // Клик или касание закрепляет подсказку; не передаёт фокус полю, к которому относится ⓘ.
+  document.addEventListener('click', (e) => {
+    const t = infoOf(e);
+    if (!t) { if (pinned) hide(); return; }
+    e.preventDefault();
+    if (pinned === t) { hide(); return; }
+    pinned = t;
+    show(t);
+  });
+  document.addEventListener('scroll', hide, true);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
+}
 
 const fmt = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(2));
 
@@ -116,6 +158,7 @@ export class Panel {
     this.buildToolbar();
     this.buildParams();
     this.buildLegend();
+    installInfoTips();
     roots.scrim.addEventListener('click', () => this.toggleParams(false));
     this.refresh();
   }

@@ -52,6 +52,8 @@
       .row { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
       .row.end { justify-content: flex-end; }
       .info { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--border); color: var(--muted); font-size: 10px; cursor: help; margin-left: 4px; }
+      .info:hover, .info:focus-visible { border-color: var(--accent); color: var(--accent); outline: none; }
+      .info-tip { position: fixed; z-index: 20; max-width: 260px; padding: 6px 9px; background: #1f2328; color: #fff; border-radius: 6px; font-size: 12px; line-height: 1.4; pointer-events: none; box-shadow: 0 4px 12px rgba(31, 35, 40, 0.25); }
       .value { color: var(--muted); font-variant-numeric: tabular-nums; }
       .changed .value { color: var(--accent); font-weight: 600; }
       .layout { display: flex; flex-direction: column; gap: 4px; }
