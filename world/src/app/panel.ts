@@ -1,7 +1,8 @@
 /**
- * Панель песочницы: параметры мира, время, слои, подсказка под курсором.
- * Параметры задаются при сотворении, поэтому правки копятся в черновике
- * и применяются кнопкой «Создать мир».
+ * Интерфейс песочницы. Над чашкой — управление живым миром (время, файл),
+ * под ней — легенда, у курсора — подсказка. Справа — параметры нового мира:
+ * они задаются при сотворении, поэтому правки копятся в черновике и
+ * применяются кнопкой «Создать мир».
  */
 import { LAYOUTS, LAYOUT_PRESETS, makeParams, validateParams, type WorldParams } from '../core/index.ts';
 import { DEEP_WATER, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render.ts';
@@ -16,6 +17,20 @@ export interface PanelHandlers {
   onSave(): void;
   onLoad(file: File): void;
 }
+
+export interface PanelRoots {
+  app: HTMLElement;
+  toolbar: HTMLElement;
+  params: HTMLElement;
+  legend: HTMLElement;
+  tip: HTMLElement;
+  scrim: HTMLElement;
+}
+
+/** Горячие клавиши скоростей: 1…7. */
+export const SPEED_KEYS = SPEEDS.map((_, i) => String(i + 1));
+
+const OPEN_GROUPS_KEY = 'ecobugs.params.open';
 
 type NumberKey = 'sun' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'baseViscosity' | 'viscosityZoneSize';
 
@@ -61,52 +76,42 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLEl
   return node;
 }
 
-const hint = (text: string) => el('small', { className: 'hint', textContent: text });
+/** Пояснение к параметру — по наведению на ⓘ. */
+const info = (text: string) => el('span', { className: 'info', textContent: 'i', title: text });
 
 const fmt = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(2));
 
 export class Panel {
   private draft: WorldParams;
+  private current: WorldParams;
+  private readonly roots: PanelRoots;
+  private readonly handlers: PanelHandlers;
   private readonly errorsBox = el('div', { className: 'errors' });
   private readonly dirtyNote = el('div', { className: 'note' });
   private readonly waterValue = el('span', { className: 'value' });
-  private readonly timeLabel = el('div', { className: 'time' });
-  private readonly pauseButton = el('button');
+  private readonly timeLabel = el('span', { className: 'time' });
+  private readonly pauseButton = el('button', { title: 'Пауза / пуск (Пробел)' });
   private readonly speedButtons = new Map<number, HTMLButtonElement>();
-  private readonly stepButton = el('button', { textContent: '+1 шаг' });
-  private readonly probeBox = el('div', { className: 'probe' });
+  private readonly stepButton = el('button', { textContent: '+1 шаг', title: 'Один шаг (→)' });
   private readonly createButton = el('button', { className: 'primary', textContent: 'Создать мир' });
-  private readonly fileStatus = el('div', { className: 'note' });
+  private readonly status = el('span', { className: 'status' });
+  private statusTimer = 0;
   private readonly revertButton = el('button', { textContent: 'Отменить правки' });
   private readonly defaultsButton = el('button', { textContent: 'По умолчанию' });
+  /** Синхронизация полей с черновиком; флаг — отличается ли поле от текущего мира. */
   private readonly inputs: (() => void)[] = [];
-  private current: WorldParams;
+  private readonly marks: { node: HTMLElement; changed: () => boolean }[] = [];
 
-  private readonly handlers: PanelHandlers;
-
-  constructor(root: HTMLElement, initial: WorldParams, handlers: PanelHandlers) {
+  constructor(roots: PanelRoots, initial: WorldParams, handlers: PanelHandlers) {
+    this.roots = roots;
     this.handlers = handlers;
     this.draft = structuredClone(initial);
     this.current = structuredClone(initial);
-    root.append(
-      this.worldSection(),
-      ...GROUPS.map((g) => this.sliderGroup(g.title, g.sliders, g.title === 'Вязкость' ? this.sharesRows() : [])),
-      this.dirtyNote,
-      this.errorsBox,
-      this.createButton,
-      el('span', { className: 'row' }, this.revertButton, this.defaultsButton),
-      this.timeSection(),
-      this.legendSection(),
-      this.fileSection(),
-      el('section', {}, el('h3', { textContent: 'Под курсором' }), this.probeBox),
-    );
-    this.revertButton.addEventListener('click', () => this.replaceDraft(this.current));
-    this.defaultsButton.addEventListener('click', () => this.replaceDraft(makeParams({ seed: this.draft.seed })));
-    this.createButton.addEventListener('click', () => {
-      if (validateParams(this.draft).length === 0) handlers.onCreate(structuredClone(this.draft));
-    });
+    this.buildToolbar();
+    this.buildParams();
+    this.buildLegend();
+    roots.scrim.addEventListener('click', () => this.toggleParams(false));
     this.refresh();
-    this.setProbe(null);
   }
 
   /** Мир создан с этими параметрами — черновик совпадает с миром. */
@@ -117,6 +122,11 @@ export class Panel {
     this.refresh();
   }
 
+  /** Открыть или закрыть выдвижную панель параметров (на узком экране). */
+  toggleParams(open?: boolean): void {
+    this.roots.app.classList.toggle('params-open', open);
+  }
+
   /** Заменить черновик целиком и обновить все поля панели. */
   private replaceDraft(params: WorldParams): void {
     this.draft = structuredClone(params);
@@ -124,7 +134,82 @@ export class Panel {
     this.refresh();
   }
 
-  private worldSection(): HTMLElement {
+  private buildToolbar(): void {
+    this.pauseButton.addEventListener('click', () => this.handlers.onTogglePause());
+    this.stepButton.addEventListener('click', () => this.handlers.onStepOnce());
+    const speeds = el('span', { className: 'group' });
+    SPEEDS.forEach((s, i) => {
+      const b = el('button', { textContent: `×${s.toLocaleString('ru')}`, title: `Скорость ×${s.toLocaleString('ru')} (${i + 1})` });
+      b.addEventListener('click', () => this.handlers.onSpeed(s));
+      this.speedButtons.set(s, b);
+      speeds.append(b);
+    });
+    const save = el('button', { textContent: 'Сохранить', title: 'Сохранить мир в файл (Ctrl+S)' });
+    const load = el('button', { textContent: 'Загрузить', title: 'Загрузить мир из файла' });
+    const picker = el('input', { type: 'file', accept: '.json,application/json', hidden: true });
+    save.addEventListener('click', () => this.handlers.onSave());
+    load.addEventListener('click', () => picker.click());
+    picker.addEventListener('change', () => {
+      const file = picker.files?.[0];
+      if (file) this.handlers.onLoad(file);
+      picker.value = '';
+    });
+    const toggle = el('button', { className: 'params-toggle', textContent: 'Параметры' });
+    toggle.addEventListener('click', () => this.toggleParams(true));
+    this.roots.toolbar.append(
+      el('span', { className: 'group' }, this.pauseButton, this.stepButton),
+      speeds,
+      this.timeLabel,
+      el('span', { className: 'spacer' }),
+      this.status,
+      el('span', { className: 'group' }, save, load),
+      picker,
+      toggle,
+    );
+  }
+
+  private buildParams(): void {
+    const close = el('button', { className: 'params-close', textContent: '✕', title: 'Закрыть (Esc)' });
+    close.addEventListener('click', () => this.toggleParams(false));
+    const open = loadOpenGroups();
+    const group = (title: string, fields: HTMLElement[], openByDefault: boolean) => {
+      const d = el('details', { open: open[title] ?? openByDefault }, el('summary', { textContent: title }), el('div', { className: 'fields' }, ...fields));
+      d.addEventListener('toggle', () => saveOpenGroup(title, d.open));
+      return d;
+    };
+    this.roots.params.append(
+      el('div', { className: 'params-head' }, el('h2', { textContent: 'Параметры нового мира' }), close),
+      el('div', { className: 'params-body' },
+        group('Мир', this.worldFields(), true),
+        ...GROUPS.map((g) => group(g.title, [...g.sliders.map((s) => this.slider(s)), ...(g.title === 'Вязкость' ? this.sharesRows() : [])], g.title === 'Свет')),
+      ),
+      el('div', { className: 'params-foot' },
+        this.dirtyNote,
+        this.errorsBox,
+        this.createButton,
+        el('span', { className: 'row' }, this.revertButton, this.defaultsButton),
+      ),
+    );
+    this.revertButton.addEventListener('click', () => this.replaceDraft(this.current));
+    this.defaultsButton.addEventListener('click', () => this.replaceDraft(makeParams({ seed: this.draft.seed })));
+    this.createButton.addEventListener('click', () => {
+      if (validateParams(this.draft).length > 0) return;
+      this.handlers.onCreate(structuredClone(this.draft));
+      this.toggleParams(false);
+    });
+  }
+
+  /** Подпись поля: название, ⓘ с пояснением и (если есть) значение справа. */
+  private caption(label: string, text: string, value?: HTMLElement): HTMLElement {
+    return el('span', { className: 'row' }, el('span', {}, label, info(text)), ...(value ? [value] : []));
+  }
+
+  private mark(node: HTMLElement, changed: () => boolean): HTMLElement {
+    this.marks.push({ node, changed });
+    return node;
+  }
+
+  private worldFields(): HTMLElement[] {
     const seed = el('input', { type: 'number', min: '0', max: String(0xffffffff), step: '1' });
     const random = el('button', { textContent: 'Случайный' });
     const layout = el('select', {}, ...LAYOUTS.map((id) => el('option', { value: id, textContent: LAYOUT_PRESETS[id].name })));
@@ -150,12 +235,14 @@ export class Panel {
       if (![...size.options].some((o) => o.value === key)) size.append(el('option', { value: key, textContent: key }));
       size.value = key;
     });
-    return el('section', {},
-      el('h3', { textContent: 'Мир' }),
-      el('label', {}, 'Сид', el('span', { className: 'row' }, seed, random), hint('Из него строится вся случайность мира: один сид — один и тот же мир.')),
-      el('label', {}, 'Планировка', layout, hint('Готовая заготовка перегородок внутри чашки.')),
-      el('label', {}, 'Размер чашки', size, hint('Ширина и высота чашки в единицах мира.')),
-    );
+    return [
+      this.mark(el('label', {}, this.caption('Сид', 'Из него строится вся случайность мира: один сид — один и тот же мир.'), el('span', { className: 'row' }, seed, random)),
+        () => this.draft.seed !== this.current.seed),
+      this.mark(el('label', {}, this.caption('Планировка', 'Готовая заготовка перегородок внутри чашки.'), layout),
+        () => this.draft.layout !== this.current.layout),
+      this.mark(el('label', {}, this.caption('Размер чашки', 'Ширина и высота чашки в единицах мира.'), size),
+        () => this.draft.width !== this.current.width || this.draft.height !== this.current.height),
+    ];
   }
 
   private slider(spec: SliderSpec): HTMLElement {
@@ -170,7 +257,7 @@ export class Panel {
       input.value = String(this.draft[spec.key]);
       value.textContent = fmt(this.draft[spec.key]);
     });
-    return el('label', {}, el('span', { className: 'row' }, spec.label, value), input, hint(spec.hint));
+    return this.mark(el('label', {}, this.caption(spec.label, spec.hint, value), input), () => this.draft[spec.key] !== this.current[spec.key]);
   }
 
   private sharesRows(): HTMLElement[] {
@@ -179,7 +266,6 @@ export class Panel {
       const value = el('span', { className: 'value' });
       input.addEventListener('input', () => {
         this.draft.viscosityShares[key] = Number(input.value);
-        this.draft.viscosityShares.water = Math.round((1 - this.draft.viscosityShares.land - this.draft.viscosityShares.shallows) * 100) / 100;
         value.textContent = fmt(this.draft.viscosityShares[key]);
         this.refresh();
       });
@@ -187,81 +273,42 @@ export class Panel {
         input.value = String(this.draft.viscosityShares[key]);
         value.textContent = fmt(this.draft.viscosityShares[key]);
       });
-      return el('label', {}, el('span', { className: 'row' }, label, value), input, hint(text));
+      return this.mark(el('label', {}, this.caption(label, text, value), input),
+        () => this.draft.viscosityShares[key] !== this.current.viscosityShares[key]);
     };
     return [
       make('land', 'Доля суши', 'Высокая вязкость: двигаться дороже всего, свет усваивается лучше всего.'),
       make('shallows', 'Доля отмели', 'Средняя вязкость. Суша всегда отделена от воды отмелью.'),
-      el('label', {}, el('span', { className: 'row' }, 'Доля воды', this.waterValue), hint('Остаток чашки. Низкая вязкость: двигаться дешевле всего, свет усваивается хуже всего.')),
+      el('label', {}, this.caption('Доля воды', 'Остаток чашки. Низкая вязкость: двигаться дешевле всего, свет усваивается хуже всего.', this.waterValue)),
     ];
   }
 
-  private sliderGroup(title: string, sliders: readonly SliderSpec[], extra: HTMLElement[]): HTMLElement {
-    return el('section', {}, el('h3', { textContent: title }), ...sliders.map((s) => this.slider(s)), ...extra);
-  }
-
-  private timeSection(): HTMLElement {
-    this.pauseButton.addEventListener('click', () => this.handlers.onTogglePause());
-    this.stepButton.addEventListener('click', () => this.handlers.onStepOnce());
-    const speeds = el('span', { className: 'row speeds' });
-    for (const s of SPEEDS) {
-      const b = el('button', { textContent: `×${s.toLocaleString('ru')}` });
-      b.addEventListener('click', () => this.handlers.onSpeed(s));
-      this.speedButtons.set(s, b);
-      speeds.append(b);
-    }
-    return el('section', {},
-      el('h3', { textContent: 'Время' }),
-      this.timeLabel,
-      el('span', { className: 'row' }, this.pauseButton, this.stepButton),
-      speeds,
-    );
-  }
-
-  /** Легенда: что каким способом показано на единой картинке чашки. */
-  private legendSection(): HTMLElement {
-    const swatch = (c: Rgb | string) => {
-      const sw = el('span', { className: 'swatch' });
-      sw.style.background = typeof c === 'string' ? c : `rgb(${c.join(',')})`;
-      return sw;
-    };
+  /** Легенда строкой под чашкой: что каким способом показано. */
+  private buildLegend(): void {
     const css = (c: Rgb) => `rgb(${c.map(Math.round).join(',')})`;
-    const item = (sw: HTMLElement, text: string) => el('div', { className: 'legend-item' }, sw, text);
-    return el('section', {},
-      el('h3', { textContent: 'Обозначения' }),
-      item(swatch(css(DEEP_WATER)), 'Вода'),
-      item(swatch(css(SHALLOWS_SAMPLE)), 'Отмель: камень под водой'),
-      item(swatch(css(STONE_SAMPLE)), 'Суша: тёмный камень'),
-      item(swatch(css(SUN_COLOR)), 'Свет: освещённые пятна'),
-      item(swatch(css(DEEP_WATER.map((c, i) => Math.round((c * SHADE_COLOR[i]) / 255)) as unknown as Rgb)), 'Тень: вне пятен темнее'),
-      item(swatch('rgb(255, 170, 70)'), 'Нагрев: освещённые места теплее'),
-      item(swatch('rgba(150, 190, 222, 0.6)'), 'Стекло: стенки и перегородки'),
+    const item = (color: string, text: string) => {
+      const sw = el('span', { className: 'swatch' });
+      sw.style.background = color;
+      return el('span', { className: 'legend-item' }, sw, text);
+    };
+    this.roots.legend.append(
+      item(css(DEEP_WATER), 'вода'),
+      item(css(SHALLOWS_SAMPLE), 'отмель — камень под водой'),
+      item(css(STONE_SAMPLE), 'суша — тёмный камень'),
+      item(css(SUN_COLOR), 'пятна света'),
+      item(css(DEEP_WATER.map((c, i) => (c * SHADE_COLOR[i]) / 255) as unknown as Rgb), 'тень'),
+      item('rgb(255, 170, 70)', 'нагрев — теплее'),
+      item('rgba(150, 190, 222, 0.6)', 'стекло — стенки и перегородки'),
     );
   }
 
-  private fileSection(): HTMLElement {
-    const save = el('button', { textContent: 'Сохранить в файл' });
-    const load = el('button', { textContent: 'Загрузить из файла' });
-    const picker = el('input', { type: 'file', accept: '.json,application/json', hidden: true });
-    save.addEventListener('click', () => this.handlers.onSave());
-    load.addEventListener('click', () => picker.click());
-    picker.addEventListener('change', () => {
-      const file = picker.files?.[0];
-      if (file) this.handlers.onLoad(file);
-      picker.value = '';
-    });
-    return el('section', {},
-      el('h3', { textContent: 'Файл' }),
-      el('span', { className: 'row' }, save, load),
-      picker,
-      this.fileStatus,
-    );
-  }
-
-  /** Итог сохранения или загрузки: сообщение или список причин отказа. */
+  /** Итог сохранения или загрузки — коротко в строке управления, подробности по наведению. */
   setFileStatus(lines: readonly string[], isError: boolean): void {
-    this.fileStatus.className = isError ? 'errors' : 'note';
-    this.fileStatus.replaceChildren(...lines.map((l) => el('div', { textContent: l })));
+    clearTimeout(this.statusTimer);
+    this.status.className = isError ? 'status error' : 'status';
+    this.status.textContent = lines.join(' ');
+    this.status.title = lines.join('\n');
+    this.statusTimer = window.setTimeout(() => { this.status.textContent = ''; this.status.title = ''; }, isError ? 12000 : 4000);
   }
 
   setTime(step: number, paused: boolean, speed: number, stepsPerSecond: number): void {
@@ -271,8 +318,20 @@ export class Panel {
     for (const [s, b] of this.speedButtons) b.classList.toggle('active', s === speed);
   }
 
-  setProbe(lines: readonly string[] | null): void {
-    this.probeBox.replaceChildren(...(lines ?? ['Наведите курсор на чашку']).map((l) => el('div', { textContent: l })));
+  /** Подсказка у курсора: строки и позиция в координатах окна; null — скрыть. */
+  setProbe(lines: readonly string[] | null, clientX = 0, clientY = 0): void {
+    const tip = this.roots.tip;
+    if (!lines) { tip.hidden = true; return; }
+    tip.replaceChildren(...lines.map((l, i) => el('div', {}, i === 0 ? el('b', { textContent: l }) : l)));
+    tip.hidden = false;
+    const stage = tip.parentElement!.getBoundingClientRect();
+    const gap = 14;
+    let x = clientX - stage.left + gap;
+    let y = clientY - stage.top + gap;
+    if (x + tip.offsetWidth > stage.width) x = clientX - stage.left - gap - tip.offsetWidth;
+    if (y + tip.offsetHeight > stage.height) y = clientY - stage.top - gap - tip.offsetHeight;
+    tip.style.left = `${Math.max(0, x)}px`;
+    tip.style.top = `${Math.max(0, y)}px`;
   }
 
   private refresh(): void {
@@ -282,10 +341,31 @@ export class Panel {
     const errors = validateParams(this.draft);
     this.errorsBox.replaceChildren(...errors.map((e) => el('div', { textContent: e })));
     this.createButton.disabled = errors.length > 0;
-    const dirty = JSON.stringify(this.draft) !== JSON.stringify(this.current);
-    this.dirtyNote.textContent = dirty ? 'Параметры задаются при сотворении — изменения применятся к новому миру.' : '';
-    this.revertButton.disabled = !dirty;
+    let changed = 0;
+    for (const m of this.marks) {
+      const c = m.changed();
+      m.node.classList.toggle('changed', c);
+      if (c) changed++;
+    }
+    this.dirtyNote.textContent = changed ? `Изменено: ${changed} — применится к новому миру.` : '';
+    this.revertButton.disabled = changed === 0;
     this.defaultsButton.disabled = JSON.stringify(this.draft) === JSON.stringify(makeParams({ seed: this.draft.seed }));
   }
 }
 
+/** Какие группы параметров раскрыты — удобство одного зрителя, хранится в браузере. */
+function loadOpenGroups(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem(OPEN_GROUPS_KEY) ?? '{}') as Record<string, boolean>;
+  } catch {
+    return {};
+  }
+}
+
+function saveOpenGroup(title: string, open: boolean): void {
+  try {
+    localStorage.setItem(OPEN_GROUPS_KEY, JSON.stringify({ ...loadOpenGroups(), [title]: open }));
+  } catch {
+    // Хранилище недоступно — просто не запоминаем.
+  }
+}

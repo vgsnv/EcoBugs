@@ -145,8 +145,12 @@ export class WorldRenderer {
     const { width, height } = this.world.params;
     const totalW = width + 2 * this.wall;
     const totalH = height + 2 * this.wall;
-    const cssWidth = (this.canvas.parentElement ?? this.canvas).clientWidth || totalW;
-    const scale = (cssWidth * (window.devicePixelRatio || 1)) / totalW;
+    // Вписать чашку в свободное место по ширине и по высоте.
+    const box = this.canvas.parentElement ?? this.canvas;
+    const fit = Math.min((box.clientWidth || totalW) / totalW, (box.clientHeight || totalH) / totalH);
+    const scale = fit * (window.devicePixelRatio || 1);
+    this.canvas.style.width = `${Math.floor(totalW * fit)}px`;
+    this.canvas.style.height = `${Math.floor(totalH * fit)}px`;
     if (!force && Math.abs(scale - this.scale) < 1e-3) return;
     this.scale = scale;
     this.canvas.width = Math.round(totalW * scale);
