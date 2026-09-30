@@ -72,7 +72,7 @@ export const SHALLOWS_RING_MIN = 2;
 export const VISCOSITY_BLUR = 3;
 
 /** Толщина перегородки, единиц мира. Той же толщины рисуется стена вокруг чашки. */
-export const PARTITION_THICKNESS = 8;
+export const PARTITION_THICKNESS = 16;
 
 /** Размер ячейки растеризации перегородок, единиц мира. */
 export const PARTITION_CELL = 4;
