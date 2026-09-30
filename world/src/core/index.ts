@@ -12,5 +12,6 @@ export * from './temperature.ts';
 export * from './viscosity.ts';
 export * from './partitions.ts';
 export * from './drift.ts';
+export * from './mineral.ts';
 export * from './save.ts';
 export * from './world.ts';

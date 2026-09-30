@@ -3,7 +3,7 @@
  * Скорость показа — дело приложения; мир знает только номер шага.
  */
 import {
-  WorldFileError, lightDriftVelocity, absorptionAt, createWorld, gradationAt, isBlocked, lightAt, makeParams, mutationStrength,
+  WorldFileError, lightDriftVelocity, mineralDensityAt, mineralInMedium, absorptionAt, createWorld, gradationAt, isBlocked, lightAt, makeParams, mutationStrength,
   parseWorldFile, resistanceAt, serializeWorld, stepWorld, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
@@ -11,8 +11,11 @@ import { WorldRenderer } from './render.ts';
 
 /** Шагов в секунду при скорости ×1. */
 const BASE_STEPS_PER_SECOND = 30;
-/** Больше шагов за кадр не делаем, чтобы не подвесить вкладку. */
-const MAX_STEPS_PER_FRAME = 100_000;
+/**
+ * Сколько миллисекунд кадра можно тратить на шаги мира. Не успевает — мир
+ * идёт медленнее выбранной скорости (отставание не копится), вкладка не виснет.
+ */
+const STEP_BUDGET_MS = 24;
 /** Шаг масштаба кнопками и клавишами. */
 const ZOOM_STEP = 1.5;
 const GRADATION_NAMES = ['Вода', 'Отмель', 'Суша'];
@@ -21,8 +24,12 @@ const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
 const renderer = new WorldRenderer(canvas);
 const minimap = document.querySelector<HTMLCanvasElement>('.minimap')!;
 const driftArrow = document.querySelector<SVGElement>('.light-drift svg')!;
+const mineralStats = document.querySelector<HTMLElement>('.mineral-stats')!;
+let mineralStatsVersion = -1;
 /** Время анимации (блики), секунды; стоит на паузе. */
 let animTime = 0;
+/** Сколько шагов в секунду мир делает на самом деле. */
+let actualRate = 0;
 
 let world: World = createWorld(makeParams({ seed: 1 }));
 let paused = false;
@@ -71,6 +78,7 @@ async function loadWorld(file: File): Promise<void> {
 function setWorld(next: World): void {
   world = next;
   renderer.setWorld(world);
+  mineralStatsVersion = -1;
   panel.setCurrent(world.params);
   document.title = `Песочница мира · сид ${world.params.seed}`;
 }
@@ -163,6 +171,12 @@ function probe(): void {
   const { x, y, clientX, clientY } = pointer;
   const p = world.params;
   const where = `(${Math.round(x)}, ${Math.round(y)})`;
+  const volcano = world.mineral.volcanoes.findIndex((v) => Math.hypot(v.x - x, v.y - y) < 12);
+  if (volcano >= 0) {
+    const v = world.mineral.volcanoes[volcano];
+    panel.setProbe([`Вулкан ${volcano + 1} · ${where}`, `Извержений было: ${v.k - 1}`, `Следующее — через ${(v.next - world.step).toLocaleString('ru')} шагов`], clientX, clientY);
+    return;
+  }
   if (isBlocked(world.partitions, x, y)) {
     panel.setProbe([`Перегородка · ${where}`], clientX, clientY);
     return;
@@ -174,6 +188,7 @@ function probe(): void {
     `Температура ${temp.toFixed(2)} · мутации ${mutationStrength(temp).toFixed(2)}`,
     `Сопротивление движению ${resistanceAt(p, world.viscosity, x, y).toFixed(2)}`,
     `Снос ${Math.hypot(...world.drift.at(x, y, world.step)).toFixed(3)} за шаг`,
+    `Минерал ×${mineralDensityAt(world.mineral, p.mineralStock, x, y).toFixed(2)} от среднего`,
   ], clientX, clientY);
 }
 
@@ -181,18 +196,37 @@ function frame(now: number): void {
   const dt = Math.min(0.25, (now - lastTime) / 1000);
   lastTime = now;
   const stepsPerSecond = BASE_STEPS_PER_SECOND * speed;
+  let behind = false;
   if (!paused) {
     carry += dt * stepsPerSecond;
-    const n = Math.min(MAX_STEPS_PER_FRAME, Math.floor(carry));
-    carry -= n;
-    for (let i = 0; i < n; i++) stepWorld(world);
+    const want = Math.floor(carry);
+    const start = performance.now();
+    let n = 0;
+    while (n < want) {
+      stepWorld(world);
+      n++;
+      if ((n & 63) === 0 && performance.now() - start > STEP_BUDGET_MS) break;
+    }
+    behind = n < want;
+    carry = behind ? 0 : carry - n;
     animTime += dt;
+    // Настоящая скорость — сглаженно.
+    if (dt > 0) actualRate += (n / dt - actualRate) * Math.min(1, dt * 2);
+  } else {
+    actualRate = 0;
   }
   renderer.draw(animTime);
   renderer.drawMinimap(minimap);
   const [dvx, dvy] = lightDriftVelocity(world.light, world.step);
   driftArrow.style.transform = `rotate(${Math.atan2(dvy, dvx)}rad)`;
-  panel.setTime(world.step, paused, speed, stepsPerSecond);
+  if (world.mineral.version !== mineralStatsVersion) {
+    mineralStatsVersion = world.mineral.version;
+    const medium = mineralInMedium(world.mineral);
+    const total = medium + world.mineral.depths;
+    const share = (x: number) => `${Math.round((x / total) * 100)}%`;
+    mineralStats.innerHTML = `<b>минерал</b> · в среде ${share(medium)} · в недрах ${share(world.mineral.depths)} · извержений ${world.mineral.volcanoes.reduce((a, v) => a + v.k - 1, 0)}`;
+  }
+  panel.setTime(world.step, paused, speed, behind || actualRate < stepsPerSecond * 0.9 ? actualRate : stepsPerSecond, behind);
   probe();
   requestAnimationFrame(frame);
 }

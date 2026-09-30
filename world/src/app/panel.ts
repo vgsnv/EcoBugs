@@ -5,7 +5,7 @@
  * применяются кнопкой «Создать мир».
  */
 import { LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type WorldParams } from '../core/index.ts';
-import { DEEP_WATER, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render.ts';
+import { DEEP_WATER, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render.ts';
 
 export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
 
@@ -35,7 +35,7 @@ export const SPEED_KEYS = SPEEDS.map((_, i) => String(i + 1));
 
 const OPEN_GROUPS_KEY = 'ecobugs.params.open';
 
-type NumberKey = 'sun' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'baseViscosity' | 'viscosityZoneSize' | 'driftStrength';
+type NumberKey = 'sun' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'baseViscosity' | 'viscosityZoneSize' | 'driftStrength' | 'mineralStock' | 'volcanoCount' | 'eruptionInterval';
 
 interface SliderSpec {
   key: NumberKey;
@@ -75,6 +75,14 @@ const GROUPS: readonly { title: string; sliders: readonly SliderSpec[] }[] = [
     title: 'Снос',
     sliders: [
       { key: 'driftStrength', label: 'Сила сноса', hint: 'Течения идут от краёв пятен света наружу. Сила — смещение за шаг в начале течения; по пути течение слабеет (быстрее на отмели, почти сразу на суше) и чем сильнее, тем дальше уходит. Снесённое копится там, где течения кончаются.', min: 0, max: 1, step: 0.05 },
+    ],
+  },
+  {
+    title: 'Минерал',
+    sliders: [
+      { key: 'mineralStock', label: 'Запас минерала', hint: 'Общее количество минерала в мире (в среднем на единицу площади чашки). Оно постоянно: минерал переходит между средой, телами, останками и недрами.', min: 0.2, max: 5, step: 0.1 },
+      { key: 'volcanoCount', label: 'Число вулканов', hint: 'Сколько вулканов в чашке; в каждом отсеке хотя бы один, поэтому на деле их не меньше числа отсеков.', min: 1, max: 20, step: 1 },
+      { key: 'eruptionInterval', label: 'Промежуток между извержениями', hint: 'Средний промежуток между извержениями одного вулкана, в шагах; сами промежутки случайны. Извержение выбрасывает четверть минерала из недр.', min: 2000, max: 100000, step: 1000 },
     ],
   },
 ];
@@ -346,6 +354,8 @@ export class Panel {
       item(css(DEEP_WATER.map((c, i) => (c * SHADE_COLOR[i]) / 255) as unknown as Rgb), 'тень'),
       item('rgb(255, 170, 70)', 'нагрев — теплее'),
       item('rgb(40, 80, 150)', 'течение — бегущий пунктир от пятна до конца течения'),
+      item(css(MINERAL_COLOR), 'минерал — дымка, где его больше среднего'),
+      item('radial-gradient(circle, rgb(30,18,40) 0 35%, rgb(196,128,255) 36% 55%, transparent 56%)', 'вулкан'),
       item('repeating-linear-gradient(60deg, rgba(255,250,230,0.9) 0 1px, transparent 1px 4px), rgb(84, 144, 210)', 'блики — вода на свету'),
       item('rgba(150, 190, 222, 0.6)', 'стекло — стенки и перегородки'),
     );
@@ -360,12 +370,15 @@ export class Panel {
     this.statusTimer = window.setTimeout(() => { this.status.textContent = ''; this.status.title = ''; }, isError ? 12000 : 4000);
   }
 
-  setTime(step: number, paused: boolean, speed: number, stepsPerSecond: number): void {
-    this.timeLabel.textContent = `Шаг ${step.toLocaleString('ru')} · ${paused ? 'пауза' : `${Math.round(stepsPerSecond).toLocaleString('ru')} шагов/с`}`;
+  setTime(step: number, paused: boolean, speed: number, stepsPerSecond: number, behind = false): void {
+    const rate = `${Math.round(stepsPerSecond).toLocaleString('ru')} шагов/с`;
+    this.timeLabel.textContent = `Шаг ${step.toLocaleString('ru')} · ${paused ? 'пауза' : behind ? `${rate} · предел` : rate}`;
+    this.timeLabel.title = behind ? `Мир не успевает за скоростью ×${speed.toLocaleString('ru')} и идёт так быстро, как может` : '';
     this.pauseButton.textContent = paused ? '▶ Пуск' : '⏸ Пауза';
     this.stepButton.disabled = !paused;
     for (const [s, b] of this.speedButtons) b.classList.toggle('active', s === speed);
   }
+
 
   /** Масштаб относительно вида «вся чашка». */
   setZoom(relative: number): void {

@@ -6,7 +6,7 @@
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
-import { DISH_HEIGHT, DISH_WIDTH, hash3, isBlocked, periodicFbm, smoothLevelAt, spotAnchors, spotOutlines, SPOT_EDGE, type World } from '../core/index.ts';
+import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, hash3, isBlocked, periodicFbm, smoothLevelAt, spotAnchors, spotOutlines, SPOT_EDGE, type Eruption, type World } from '../core/index.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
@@ -163,6 +163,18 @@ function ripple(): HTMLCanvasElement {
   return c;
 }
 
+/**
+ * Минерал: фиолетовая дымка там, где минерала больше среднего (цвет не занят
+ * ни местностью, ни светом, ни будущей жизнью) — видны скопления, обычный фон
+ * чистый. Плотность, при которой дымка полная, — во столько раз выше средней;
+ * наибольшая непрозрачность.
+ */
+export const MINERAL_COLOR: Rgb = [196, 128, 255];
+const MINERAL_FULL = 4;
+const MINERAL_ALPHA = 0.6;
+/** Кольцо извержения: сколько секунд расходится. */
+const ERUPTION_SHOW_S = 3;
+
 /** Сторона плитки местности, пикселей. */
 const TILE = 256;
 /** Масштабы плиток — пикселей устройства на единицу мира, степени двойки. */
@@ -240,6 +252,13 @@ export class WorldRenderer {
   /** Линии течений и ключ вида, для которого они проведены. */
   private lines = { body: new Path2D(), heads: new Path2D() };
   private linesKey = '';
+  /** Дымка минерала (клетка поля — пиксель) и версия поля, по которой она построена. */
+  private readonly mineralCanvas = document.createElement('canvas');
+  private mineralVersion = -1;
+  /** Извержения, которые показываем: где и когда (время анимации) началось. */
+  private eruptions: { x: number; y: number; t0: number }[] = [];
+  private lastEruption: Eruption | null = null;
+  private seenMineral: unknown = null;
   /** Контуры пятен последнего кадра — для мини-карты. */
   private lastSpots = new Path2D();
   private world!: World;
@@ -501,8 +520,97 @@ export class WorldRenderer {
     ctx.restore();
 
     ctx.setTransform(...view);
+    this.drawMineral(animTime);
     this.drawDriftLines(animTime);
     this.drawWalls();
+  }
+
+  /** Дымка минерала, вулканы и кольца извержений. */
+  private drawMineral(animTime: number): void {
+    const m = this.world.mineral;
+    const stock = this.world.params.mineralStock;
+    const ctx = this.ctx;
+    if (m.version !== this.mineralVersion || this.mineralCanvas.width !== m.cols) {
+      this.mineralVersion = m.version;
+      const c = this.mineralCanvas;
+      c.width = m.cols;
+      c.height = m.rows;
+      const mctx = c.getContext('2d')!;
+      const img = mctx.createImageData(m.cols, m.rows);
+      const area = m.cell * m.cell;
+      // Размытие (три прохода [1 2 1] по каждой оси) — скопления выглядят
+      // округлыми пятнами, а не квадратами клеток. Только для показа.
+      const smooth = Float32Array.from(m.field);
+      const tmp = new Float32Array(smooth.length);
+      for (let pass = 0; pass < 3; pass++) {
+        for (let j = 0; j < m.rows; j++) {
+          for (let i = 0; i < m.cols; i++) {
+            const k = j * m.cols + i;
+            const l = i > 0 ? smooth[k - 1] : smooth[k], r = i < m.cols - 1 ? smooth[k + 1] : smooth[k];
+            tmp[k] = (l + 2 * smooth[k] + r) / 4;
+          }
+        }
+        for (let j = 0; j < m.rows; j++) {
+          for (let i = 0; i < m.cols; i++) {
+            const k = j * m.cols + i;
+            const u = j > 0 ? tmp[k - m.cols] : tmp[k], d = j < m.rows - 1 ? tmp[k + m.cols] : tmp[k];
+            smooth[k] = (u + 2 * tmp[k] + d) / 4;
+          }
+        }
+      }
+      for (let k = 0; k < m.field.length; k++) {
+        const d = smooth[k] / area / stock;
+        const a = Math.min(1, Math.max(0, (d - 1) / (MINERAL_FULL - 1))) ** 0.8 * MINERAL_ALPHA;
+        img.data[k * 4] = MINERAL_COLOR[0];
+        img.data[k * 4 + 1] = MINERAL_COLOR[1];
+        img.data[k * 4 + 2] = MINERAL_COLOR[2];
+        img.data[k * 4 + 3] = a * 255;
+      }
+      mctx.putImageData(img, 0, 0);
+    }
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, DISH_WIDTH, DISH_HEIGHT);
+    ctx.clip();
+    ctx.imageSmoothingEnabled = true;
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = 1;
+    ctx.drawImage(this.mineralCanvas, 0, 0, m.cols * m.cell, m.rows * m.cell);
+    ctx.restore();
+
+    // Новые извержения — в очередь показа: всё, что после последнего увиденного
+    // (мир сменился — начинаем заново, старые не показываем).
+    if (this.seenMineral !== m) { this.seenMineral = m; this.lastEruption = m.recent.at(-1) ?? null; this.eruptions = []; }
+    const from = this.lastEruption ? m.recent.lastIndexOf(this.lastEruption) + 1 : 0;
+    for (const e of m.recent.slice(from)) {
+      const v = m.volcanoes[e.volcano];
+      this.eruptions.push({ x: v.x, y: v.y, t0: animTime });
+    }
+    this.lastEruption = m.recent.at(-1) ?? this.lastEruption;
+    this.eruptions = this.eruptions.filter((e) => animTime - e.t0 < ERUPTION_SHOW_S);
+
+    for (const e of this.eruptions) {
+      const f = (animTime - e.t0) / ERUPTION_SHOW_S;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1 - f;
+      ctx.strokeStyle = rgb(MINERAL_COLOR);
+      ctx.lineWidth = this.px(2.5);
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, ERUPTION_RADIUS * (0.2 + f), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    // Вулканы: тёмный кружок с фиолетовой каймой.
+    const r = this.px(5);
+    for (const v of m.volcanoes) {
+      ctx.beginPath();
+      ctx.arc(v.x, v.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(30, 18, 40, 0.9)';
+      ctx.fill();
+      ctx.lineWidth = this.px(2);
+      ctx.strokeStyle = rgb(MINERAL_COLOR);
+      ctx.stroke();
+    }
   }
 
   /** Блики: две сдвигающиеся ряби, оставленные только на воде и в пятнах света. */

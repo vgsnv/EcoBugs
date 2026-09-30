@@ -8,6 +8,8 @@ import { type LightMap, createLightMap } from './light.ts';
 import { type ViscosityMap, createViscosityMap } from './viscosity.ts';
 import { type PartitionLayout, buildLayout, layoutForSeed } from './partitions.ts';
 import { Drift } from './drift.ts';
+import { MINERAL_PERIOD } from './constants.ts';
+import { createMineral, updateMineral, type MineralState } from './mineral.ts';
 
 export interface World {
   readonly params: Readonly<WorldParams>;
@@ -21,6 +23,8 @@ export interface World {
   readonly partitions: PartitionLayout;
   /** Снос: течения от пятен света; функция номера шага. */
   readonly drift: Drift;
+  /** Минерал в среде и недрах, вулканы — состояние, меняется по шагам. */
+  readonly mineral: MineralState;
 }
 
 export class InvalidParamsError extends Error {
@@ -38,15 +42,21 @@ export function createWorld(params: WorldParams): World {
   const light = createLightMap(own);
   const viscosity = createViscosityMap(own);
   const partitions = buildLayout(layoutForSeed(own.seed), DISH_WIDTH, DISH_HEIGHT);
-  return { params: own, step: 0, light, viscosity, partitions, drift: new Drift({ params: own, light, viscosity, partitions }) };
+  return {
+    params: own, step: 0, light, viscosity, partitions,
+    drift: new Drift({ params: own, light, viscosity, partitions }),
+    mineral: createMineral(own, partitions),
+  };
 }
 
 /**
- * Один шаг мира. Сдвиг карты света — функция номера шага, поэтому здесь
- * достаточно увеличить возраст. Ходы существ появятся позже.
+ * Один шаг мира. Сдвиг карты света и снос — функции номера шага; минерал —
+ * состояние, обновляется раз в MINERAL_PERIOD шагов. Ходы существ появятся позже.
  */
 export function stepWorld(world: World): void {
   world.step++;
+  // Снос, осаждение и извержения минерала — раз в MINERAL_PERIOD шагов, за весь промежуток.
+  if (world.step % MINERAL_PERIOD === 0) updateMineral(world.mineral, world.params, world.drift, world.partitions, world.step);
 }
 
 /** Хеш произвольных чисел в порядке перечисления. */
@@ -69,7 +79,10 @@ export function worldHash(world: World): number {
     p.seed, DISH_WIDTH, DISH_HEIGHT, p.sun, p.backgroundLevel, p.illumination, p.spotSize,
     p.baseTemperature, p.spotHeat, p.baseViscosity,
     p.viscosityShares.water, p.viscosityShares.shallows, p.viscosityShares.land,
-    p.viscosityZoneSize, p.driftStrength,
+    p.viscosityZoneSize, p.driftStrength, p.mineralStock, p.volcanoCount, p.eruptionInterval,
     world.step,
+    world.mineral.depths,
+    ...world.mineral.volcanoes.flatMap((v) => [v.k, v.next]),
+    ...world.mineral.field,
   ]);
 }

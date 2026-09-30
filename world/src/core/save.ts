@@ -9,14 +9,23 @@ import { createWorld, worldHash, type World } from './world.ts';
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 4;
+export const WORLD_FORMAT_VERSION = 5;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
   1: 'тогда размер чашки был параметром, теперь чашка всегда 1600×1200',
   2: 'тогда планировка была параметром, теперь её выбирает сид',
   3: 'тогда в мире не было сноса',
+  4: 'тогда в мире не было минерала',
 };
+
+export interface MineralFile {
+  depths: number;
+  /** Для каждого вулкана — номер следующего извержения и его шаг. */
+  volcanoes: [number, number][];
+  /** Растворённый минерал по клеткам: Float64, little-endian, base64. */
+  field: string;
+}
 
 export interface WorldFile {
   format: typeof WORLD_FILE_FORMAT;
@@ -25,6 +34,8 @@ export interface WorldFile {
   savedAt?: string;
   params: WorldParams;
   step: number;
+  /** Минерал — состояние мира, из сида его не восстановить. */
+  mineral: MineralFile;
   /** Контрольная сумма состояния, шестнадцатеричная. */
   checksum: string;
 }
@@ -44,12 +55,30 @@ export function worldToFile(world: World, savedAt?: Date): WorldFile {
     ...(savedAt ? { savedAt: savedAt.toISOString() } : {}),
     params: structuredClone(world.params),
     step: world.step,
+    mineral: {
+      depths: world.mineral.depths,
+      volcanoes: world.mineral.volcanoes.map((v) => [v.k, v.next]),
+      field: toBase64(new Uint8Array(world.mineral.field.buffer.slice(0))),
+    },
     checksum: worldHash(world).toString(16).padStart(8, '0'),
   };
 }
 
 export function serializeWorld(world: World, savedAt?: Date): string {
   return `${JSON.stringify(worldToFile(world, savedAt), null, 2)}\n`;
+}
+
+function toBase64(bytes: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+function fromBase64(text: string): Uint8Array {
+  const s = atob(text);
+  const bytes = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
+  return bytes;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -74,6 +103,9 @@ function readParams(raw: unknown, problems: string[]): WorldParams | null {
     viscosityShares: { water: shares.water as number, shallows: shares.shallows as number, land: shares.land as number },
     viscosityZoneSize: raw.viscosityZoneSize as number,
     driftStrength: raw.driftStrength as number,
+    mineralStock: raw.mineralStock as number,
+    volcanoCount: raw.volcanoCount as number,
+    eruptionInterval: raw.eruptionInterval as number,
   };
   for (const key of Object.keys(defaults) as (keyof WorldParams)[]) {
     if (!(key in raw)) problems.push(`Нет параметра «${key}»`);
@@ -119,8 +151,36 @@ export function parseWorldFile(text: string): World {
 
   const world = createWorld(params);
   world.step = step as number;
+  const mineralProblems = restoreMineral(world, data.mineral);
+  if (mineralProblems.length > 0) throw new WorldFileError(mineralProblems);
   if (worldHash(world) !== parseInt(data.checksum as string, 16)) {
     throw new WorldFileError(['Контрольная сумма не совпадает — файл повреждён или изменён вручную']);
   }
   return world;
 }
+
+/** Состояние минерала из файла; возвращает причины отказа. */
+function restoreMineral(world: World, raw: unknown): string[] {
+  if (!isObject(raw)) return ['Нет состояния минерала'];
+  const m = world.mineral;
+  if (typeof raw.depths !== 'number' || !Number.isFinite(raw.depths) || raw.depths < 0) return ['Минерал в недрах: ожидается неотрицательное число'];
+  if (!Array.isArray(raw.volcanoes) || raw.volcanoes.length !== m.volcanoes.length) return [`Вулканы: ожидается ${m.volcanoes.length}`];
+  if (typeof raw.field !== 'string') return ['Нет поля минерала'];
+  let bytes: Uint8Array;
+  try {
+    bytes = fromBase64(raw.field);
+  } catch {
+    return ['Поле минерала повреждено'];
+  }
+  if (bytes.length !== m.field.length * 8) return ['Поле минерала другого размера'];
+  const field = new Float64Array(bytes.buffer, bytes.byteOffset, m.field.length).slice();
+  for (const [i, entry] of (raw.volcanoes as unknown[]).entries()) {
+    if (!Array.isArray(entry) || entry.length !== 2 || !entry.every((x) => Number.isSafeInteger(x))) return [`Вулкан ${i + 1}: ожидаются два целых`];
+    m.volcanoes[i].k = entry[0] as number;
+    m.volcanoes[i].next = entry[1] as number;
+  }
+  m.field = field;
+  m.depths = raw.depths;
+  return [];
+}
+

@@ -1,7 +1,7 @@
 /**
  * Снос (спецификация, раздел «Снос»): течения начинаются на краю пятен света
- * и идут наружу, по самой дешёвой дороге; по пути тратят силу пропорционально
- * сопротивлению движению; кончаются, где сила иссякла или встретились течения
+ * с силой, ослабленной средой в месте старта, и идут наружу, по самой дешёвой
+ * дороге; по пути тратят силу пропорционально сопротивлению движению; кончаются, где сила иссякла или встретились течения
  * от разных пятен. Смещение за шаг равно силе течения в точке.
  *
  * Расчёт — «расстояние с ценой» от краёв пятен на грубой сетке (Дейкстра),
@@ -121,13 +121,19 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
   const intensity = rasterizeSpotIntensity(world.light, t, cols, rows, cell);
   const { blocked, resistance } = ground;
 
-  // Потраченная сила: 0 на краях пятен, растёт по пути; Infinity — не дошло.
+  // Потраченная сила: на краях пятен — сколько отняла среда на старте, дальше
+  // растёт по пути; Infinity — не дошло.
   const spent = new Float32Array(n).fill(Infinity);
+  const source = new Uint8Array(n);
+  const baseViscosity = world.params.baseViscosity;
   const heap = new Heap();
   for (let k = 0; k < n; k++) {
     if (!blocked[k] && intensity[k] >= DRIFT_SOURCE) {
-      spent[k] = 0;
-      heap.push(0, k);
+      // На старте течение тоже ослаблено средой: сила = сила сноса / множитель
+      // градации (вода — полная, отмель — втрое, суша — вдевятеро слабее).
+      source[k] = 1;
+      spent[k] = budget * (1 - baseViscosity / resistance[k]);
+      heap.push(spent[k], k);
     }
   }
   while (heap.size > 0) {
@@ -158,7 +164,7 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
   for (let j = 0; j < rows; j++) {
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
-      if (!reached(k) || spent[k] === 0) continue;
+      if (!reached(k) || source[k]) continue;
       const here = spent[k];
       const side = (m: number, ok: boolean) => (ok && reached(m) ? spent[m] - here : 0);
       // Разности в обе стороны: наружу — положительные, к пятну — отрицательные.
@@ -200,6 +206,12 @@ export class Drift {
       while (this.cache.size > 3) this.cache.delete(this.cache.keys().next().value!);
     }
     return f;
+  }
+
+  /** Поля в двух узлах вокруг шага t и доля пути между ними — для обхода клеток без интерполяции по точке. */
+  nodes(t: number): { a: DriftField; b: DriftField; u: number } {
+    const k = Math.floor(t / DRIFT_PERIOD);
+    return { a: this.node(k), b: this.node(k + 1), u: t / DRIFT_PERIOD - k };
   }
 
   /** Снос в точке (x, y) в шаге t: смещение за шаг, единиц мира. */
