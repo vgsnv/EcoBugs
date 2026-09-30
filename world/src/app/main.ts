@@ -68,8 +68,7 @@ function setWorld(next: World): void {
 }
 
 canvas.addEventListener('mousemove', (e) => {
-  const rect = canvas.getBoundingClientRect();
-  pointer = [((e.clientX - rect.left) / rect.width) * world.params.width, ((e.clientY - rect.top) / rect.height) * world.params.height];
+  pointer = renderer.toWorld(e.clientX, e.clientY);
 });
 canvas.addEventListener('mouseleave', () => { pointer = null; });
 
@@ -77,7 +76,7 @@ function probe(): void {
   if (!pointer) { panel.setProbe(null); return; }
   const [x, y] = pointer;
   const p = world.params;
-  if (isBlocked(world.partitions, x, y) && world.partitions.partitions.length > 0 && x >= 0 && y >= 0 && x < p.width && y < p.height) {
+  if (isBlocked(world.partitions, x, y)) {
     panel.setProbe([`(${Math.round(x)}, ${Math.round(y)})`, 'Перегородка']);
     return;
   }

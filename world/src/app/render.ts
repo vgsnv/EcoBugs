@@ -1,6 +1,6 @@
 /**
  * Отрисовка мира на холст: поле выбранного слоя в пониженном разрешении,
- * перегородки — поверх в полном. Вязкость не меняется, её картинка строится
+ * вокруг — стена чашки, поверх — перегородки тем же стилем, что и стена. Вязкость не меняется, её картинка строится
  * один раз на мир.
  */
 import {
@@ -17,6 +17,13 @@ export const LAYER_NAMES: Record<Layer, string> = {
 
 /** Размер ячейки отрисовки полей, единиц мира. */
 const CELL = 4;
+
+/** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
+const GLASS_FILL = 'rgba(190, 225, 255, 0.22)';
+const GLASS_GLOSS_FROM = 'rgba(255, 255, 255, 0.5)';
+const GLASS_GLOSS_TO = 'rgba(170, 210, 240, 0.16)';
+const GLASS_EDGE = 'rgba(235, 248, 255, 0.85)';
+const GLASS_SHADOW = 'rgba(0, 12, 28, 0.7)';
 
 type Rgb = readonly [number, number, number];
 const VISC_COLORS: readonly Rgb[] = [[25, 70, 150], [60, 160, 165], [170, 135, 80]];
@@ -52,11 +59,15 @@ export class WorldRenderer {
     this.bctx = this.buffer.getContext('2d')!;
   }
 
+  /** Толщина стены вокруг чашки на холсте — как у перегородок. */
+  private wall = 0;
+
   setWorld(world: World): void {
     this.world = world;
     const { width, height } = world.params;
-    this.canvas.width = width;
-    this.canvas.height = height;
+    this.wall = world.partitions.thickness;
+    this.canvas.width = width + 2 * this.wall;
+    this.canvas.height = height + 2 * this.wall;
     this.cols = Math.ceil(width / CELL);
     this.rows = Math.ceil(height / CELL);
     this.buffer.width = this.cols;
@@ -111,18 +122,95 @@ export class WorldRenderer {
     }
 
     const ctx = this.ctx;
+    const W = this.wall;
     ctx.imageSmoothingEnabled = layer === 'viscosity';
-    ctx.drawImage(this.buffer, 0, 0, p.width, p.height);
+    ctx.drawImage(this.buffer, W, W, p.width, p.height);
+    this.drawWalls(showPartitions);
+  }
+
+  /** Стена вокруг чашки и перегородки: одна заливка, одна обводка. */
+  private drawWalls(showPartitions: boolean): void {
+    const ctx = this.ctx;
+    const W = this.wall;
+    const { width, height } = this.world.params;
+    ctx.clearRect(0, 0, width + 2 * W, W);
+    ctx.clearRect(0, height + W, width + 2 * W, W);
+    ctx.clearRect(0, 0, W, height + 2 * W);
+    ctx.clearRect(width + W, 0, W, height + 2 * W);
+    const solid = new Path2D();
+    // Обод чашки: внешний прямоугольник минус внутренний (правило even-odd),
+    // стекло с бликом — светлее к верхнему левому углу.
+    solid.rect(0, 0, width + 2 * W, height + 2 * W);
+    solid.rect(W, W, width, height);
+    const gloss = ctx.createLinearGradient(0, 0, width + 2 * W, height + 2 * W);
+    gloss.addColorStop(0, GLASS_GLOSS_FROM);
+    gloss.addColorStop(0.5, GLASS_GLOSS_TO);
+    gloss.addColorStop(1, GLASS_GLOSS_FROM);
+    ctx.fillStyle = gloss;
+    ctx.fill(solid, 'evenodd');
     if (showPartitions) {
-      ctx.strokeStyle = '#0d1117';
-      ctx.lineWidth = w.partitions.thickness;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      for (const part of w.partitions.partitions) {
-        ctx.beginPath();
-        part.points.forEach(([x, y], k) => (k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
-        ctx.stroke();
+      // Перегородка — прямоугольники-отрезки толщиной W с квадратными концами.
+      const parts = new Path2D();
+      for (const part of this.world.partitions.partitions) {
+        for (let k = 1; k < part.points.length; k++) {
+          const [ax, ay] = part.points[k - 1];
+          const [bx, by] = part.points[k];
+          parts.rect(W + Math.min(ax, bx) - W / 2, W + Math.min(ay, by) - W / 2, Math.abs(bx - ax) + W, Math.abs(by - ay) + W);
+        }
+      }
+      ctx.fillStyle = GLASS_FILL;
+      ctx.fill(parts);
+    }
+    this.outline(showPartitions);
+  }
+
+  /**
+   * Кромка стекла: внешний край обода и граница между свободными ячейками
+   * чашки и занятыми (стена или перегородка). Стыки перегородок со стеной и
+   * между собой поэтому не обводятся.
+   */
+  private outline(showPartitions: boolean): void {
+    const ctx = this.ctx;
+    const W = this.wall;
+    const { width, height } = this.world.params;
+    const lay = this.world.partitions;
+    const c = lay.cell;
+    const solid = (i: number, j: number) =>
+      i < 0 || j < 0 || i >= lay.cols || j >= lay.rows || (showPartitions && lay.blocked[j * lay.cols + i] === 1);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = GLASS_EDGE;
+    ctx.strokeRect(0.5, 0.5, width + 2 * W - 1, height + 2 * W - 1);
+    ctx.beginPath();
+    for (let j = 0; j < lay.rows; j++) {
+      for (let i = 0; i < lay.cols; i++) {
+        if (solid(i, j)) continue;
+        const x = W + Math.min(i * c, width);
+        const y = W + Math.min(j * c, height);
+        const x1 = W + Math.min((i + 1) * c, width);
+        const y1 = W + Math.min((j + 1) * c, height);
+        if (solid(i - 1, j)) { ctx.moveTo(x, y); ctx.lineTo(x, y1); }
+        if (solid(i + 1, j)) { ctx.moveTo(x1, y); ctx.lineTo(x1, y1); }
+        if (solid(i, j - 1)) { ctx.moveTo(x, y); ctx.lineTo(x1, y); }
+        if (solid(i, j + 1)) { ctx.moveTo(x, y1); ctx.lineTo(x1, y1); }
       }
     }
+    // Как у стекла: тёмный контур по краю (виден на светлом) и светлый блик
+    // поверх него (виден на тёмном).
+    ctx.strokeStyle = GLASS_SHADOW;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.strokeStyle = GLASS_EDGE;
+    ctx.lineWidth = 0.75;
+    ctx.stroke();
+  }
+
+  /** Координаты мира по точке экрана; вне чашки — null. */
+  toWorld(clientX: number, clientY: number): [number, number] | null {
+    const rect = this.canvas.getBoundingClientRect();
+    const scale = this.canvas.width / rect.width;
+    const x = (clientX - rect.left) * scale - this.wall;
+    const y = (clientY - rect.top) * scale - this.wall;
+    const { width, height } = this.world.params;
+    return x >= 0 && y >= 0 && x < width && y < height ? [x, y] : null;
   }
 }
