@@ -63,11 +63,8 @@ export const SHALLOWS_RING_MIN = 2;
 /** Радиус размытия границ градаций, в ячейках карты. */
 export const VISCOSITY_BLUR = 3;
 
-/** Толщина перегородки, единиц мира. */
-export const PARTITION_THICKNESS = 4;
-
-/** Сколько точек на участок сплайна между контрольными точками. */
-export const PARTITION_SAMPLES = 24;
+/** Толщина перегородки, единиц мира. Той же толщины рисуется стена вокруг чашки. */
+export const PARTITION_THICKNESS = 8;
 
 /** Размер ячейки растеризации перегородок, единиц мира. */
 export const PARTITION_CELL = 4;

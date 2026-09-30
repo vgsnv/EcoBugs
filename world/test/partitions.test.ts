@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LAYOUTS, makeParams } from '../src/core/params.ts';
 import { createWorld } from '../src/core/world.ts';
-import { LAYOUT_PRESETS, buildLayout, distToSegment, freeRegions, isBlocked, type Partition } from '../src/core/partitions.ts';
+import { LAYOUT_PRESETS, buildLayout, densify, freeRegions, isBlocked, type Partition } from '../src/core/partitions.ts';
 import { PASSAGE_MIN, REGION_MIN_SHARE } from '../src/core/constants.ts';
 
 const SIZES: readonly [number, number][] = [[800, 600], [1200, 500], [600, 600]];
@@ -29,14 +29,14 @@ for (const id of LAYOUTS) {
       for (const s of sizes) assert.ok(s / free >= REGION_MIN_SHARE, `часть ${(s / free).toFixed(3)} меньше ${REGION_MIN_SHARE}`);
     });
 
-    test(`${label}: перегородки плавные, без изломов`, () => {
+    test(`${label}: отрезки только горизонтальные и вертикальные`, () => {
       for (const part of layout.partitions) {
-        for (let s = 2; s < part.points.length; s++) {
-          const [a, b, c] = [part.points[s - 2], part.points[s - 1], part.points[s]];
-          const a1 = Math.atan2(b[1] - a[1], b[0] - a[0]);
-          const a2 = Math.atan2(c[1] - b[1], c[0] - b[0]);
-          const turn = Math.abs(((a2 - a1 + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
-          assert.ok(turn < (25 * Math.PI) / 180, `излом ${((turn * 180) / Math.PI).toFixed(1)}°`);
+        assert.ok(part.points.length >= 2);
+        for (let s = 1; s < part.points.length; s++) {
+          const [a, b] = [part.points[s - 1], part.points[s]];
+          const horizontal = Math.abs(a[1] - b[1]) < 1e-9;
+          const vertical = Math.abs(a[0] - b[0]) < 1e-9;
+          assert.ok(horizontal !== vertical, `отрезок ${s}: (${a}) → (${b})`);
         }
       }
     });
@@ -63,17 +63,15 @@ for (const id of LAYOUTS) {
       const zone = PASSAGE_MIN * 2;
       const nearAnchor = (x: number, y: number) => anchors.some(([ax, ay]) => Math.hypot(x - ax, y - ay) < zone);
       layout.partitions.forEach((part, pi) => {
-        for (const [x, y] of part.points) {
+        for (const [x, y] of densify(part.points, 2)) {
           if (nearAnchor(x, y)) continue;
           const wall = Math.min(x, y, w - x, h - y);
           assert.ok(wall >= PASSAGE_MIN, `перегородка ${pi} в ${wall.toFixed(1)} от стенки`);
           layout.partitions.forEach((other, oi) => {
             if (oi === pi) return;
-            for (let s = 1; s < other.points.length; s++) {
-              const [ax, ay] = other.points[s - 1];
-              const [bx, by] = other.points[s];
-              if (nearAnchor(ax, ay) && nearAnchor(bx, by)) continue;
-              const d = distToSegment(x, y, ax, ay, bx, by);
+            for (const [ox, oy] of densify(other.points, 2)) {
+              if (nearAnchor(ox, oy)) continue;
+              const d = Math.hypot(x - ox, y - oy);
               assert.ok(d >= PASSAGE_MIN, `перегородки ${pi} и ${oi} сближаются до ${d.toFixed(1)}`);
             }
           });

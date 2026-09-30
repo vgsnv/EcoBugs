@@ -1,25 +1,25 @@
 /**
- * Перегородки (спецификация, раздел «Перегородки»): неподвижные тонкие изогнутые
- * стенки внутри чашки. Планировка — одна из готовых заготовок; при создании мира
- * не генерируется. Заготовка — данные: перегородки как плавные сплайны по
- * контрольным точкам в долях размера чашки. Точка может ссылаться на место
- * другой перегородки — так перегородка «упирается» в неё.
+ * Перегородки (спецификация, раздел «Перегородки»): неподвижные тонкие стенки
+ * внутри чашки — ломаные из горизонтальных и вертикальных отрезков, стыкующихся
+ * под прямым углом. Планировка — одна из готовых заготовок; при создании мира
+ * не генерируется. Заготовка — данные: вершины ломаных в долях размера чашки.
+ * Конец перегородки прикреплён, если лежит на стенке или на другой перегородке.
  */
-import { PARTITION_CELL, PARTITION_SAMPLES, PARTITION_THICKNESS } from './constants.ts';
+import { PARTITION_CELL, PARTITION_THICKNESS } from './constants.ts';
 import type { LayoutId } from './params.ts';
 
-/** Контрольная точка: доли ширины и высоты чашки или место на другой перегородке. */
-export type ControlPoint = readonly [number, number] | { readonly on: number; readonly t: number };
+/** Вершина ломаной в долях ширины и высоты чашки. */
+export type Vertex = readonly [number, number];
 
 export interface LayoutPreset {
   readonly id: LayoutId;
   readonly name: string;
   /** Сколько замкнутых частей образует планировка (1 — чашка не разделена). */
   readonly regions: number;
-  readonly partitions: readonly (readonly ControlPoint[])[];
+  readonly partitions: readonly (readonly Vertex[])[];
 }
 
-/** Готовые заготовки. Порядок перегородок важен: ссылка — только на предыдущие. */
+/** Готовые заготовки. Соседние вершины совпадают по x или по y. */
 export const LAYOUT_PRESETS: Readonly<Record<LayoutId, LayoutPreset>> = {
   open: { id: 'open', name: 'Открытая чашка', regions: 1, partitions: [] },
   lagoons: {
@@ -27,9 +27,9 @@ export const LAYOUT_PRESETS: Readonly<Record<LayoutId, LayoutPreset>> = {
     name: 'Лагуны',
     regions: 1,
     partitions: [
-      [[0, 0.3], [0.12, 0.33], [0.2, 0.24], [0.2, 0.08]],
-      [[0.55, 1], [0.55, 0.82], [0.65, 0.74], [0.75, 0.8], [0.77, 0.92]],
-      [[1, 0.33], [0.88, 0.31], [0.83, 0.42], [0.86, 0.54], [0.93, 0.57]],
+      [[0, 0.3], [0.18, 0.3], [0.18, 0.08]],
+      [[0.55, 1], [0.55, 0.78], [0.75, 0.78], [0.75, 0.92]],
+      [[1, 0.35], [0.84, 0.35], [0.84, 0.55], [0.93, 0.55]],
     ],
   },
   corridors: {
@@ -37,8 +37,8 @@ export const LAYOUT_PRESETS: Readonly<Record<LayoutId, LayoutPreset>> = {
     name: 'Коридоры',
     regions: 1,
     partitions: [
-      [[0.33, 0], [0.3, 0.35], [0.36, 0.6], [0.33, 0.9]],
-      [[0.67, 1], [0.7, 0.65], [0.63, 0.4], [0.67, 0.1]],
+      [[0.33, 0], [0.33, 0.45], [0.28, 0.45], [0.28, 0.9]],
+      [[0.67, 1], [0.67, 0.55], [0.72, 0.55], [0.72, 0.1]],
     ],
   },
   compartments: {
@@ -46,8 +46,8 @@ export const LAYOUT_PRESETS: Readonly<Record<LayoutId, LayoutPreset>> = {
     name: 'Отсеки',
     regions: 3,
     partitions: [
-      [[0.3, 0], [0.26, 0.35], [0.34, 0.7], [0.3, 1]],
-      [[1, 0.3], [0.8, 0.27], [0.6, 0.37], { on: 0, t: 0.4 }],
+      [[0.3, 0], [0.3, 0.5], [0.26, 0.5], [0.26, 1]],
+      [[1, 0.3], [0.6, 0.3], [0.6, 0.4], [0.3, 0.4]],
     ],
   },
   mixed: {
@@ -55,15 +55,15 @@ export const LAYOUT_PRESETS: Readonly<Record<LayoutId, LayoutPreset>> = {
     name: 'Отсеки с коридором и лагунами',
     regions: 2,
     partitions: [
-      [[0, 0.45], [0.35, 0.5], [0.65, 0.4], [1, 0.48]],
-      [[0.5, 0], [0.47, 0.18], [0.5, 0.32]],
-      [[0.25, 1], [0.25, 0.8], [0.35, 0.72], [0.45, 0.78], [0.47, 0.9]],
-      [[1, 0.8], [0.86, 0.78], [0.8, 0.86], [0.83, 0.94]],
+      [[0, 0.45], [0.5, 0.45], [0.5, 0.5], [1, 0.5]],
+      [[0.4, 0], [0.4, 0.33]],
+      [[0.25, 1], [0.25, 0.78], [0.45, 0.78], [0.45, 0.9]],
+      [[1, 0.8], [0.82, 0.8], [0.82, 0.93]],
     ],
   },
 };
 
-/** Перегородка в единицах мира: ломаная по сплайну. */
+/** Перегородка в единицах мира: вершины ломаной. */
 export interface Partition {
   readonly points: readonly (readonly [number, number])[];
   /** Прикреплён ли конец к стенке или другой перегородке (начало, конец). */
@@ -81,51 +81,7 @@ export interface PartitionLayout {
   readonly blocked: Uint8Array;
 }
 
-/** Катмулл–Ром через точки; концы продолжаются по направлению крайнего участка. */
-function spline(points: readonly (readonly [number, number])[], samples: number): [number, number][] {
-  if (points.length < 2) return points.map((p) => [p[0], p[1]]);
-  const ext = [
-    [2 * points[0][0] - points[1][0], 2 * points[0][1] - points[1][1]],
-    ...points,
-    [2 * points[points.length - 1][0] - points[points.length - 2][0], 2 * points[points.length - 1][1] - points[points.length - 2][1]],
-  ];
-  const out: [number, number][] = [];
-  for (let s = 1; s < ext.length - 2; s++) {
-    const [p0, p1, p2, p3] = [ext[s - 1], ext[s], ext[s + 1], ext[s + 2]];
-    for (let k = 0; k < samples; k++) {
-      const t = k / samples;
-      const t2 = t * t;
-      const t3 = t2 * t;
-      const f = (a: number, b: number, c: number, d: number) =>
-        0.5 * (2 * b + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
-      out.push([f(p0[0], p1[0], p2[0], p3[0]), f(p0[1], p1[1], p2[1], p3[1])]);
-    }
-  }
-  const last = points[points.length - 1];
-  out.push([last[0], last[1]]);
-  return out;
-}
-
-/** Точка на ломаной по доле её длины. */
-export function pointAlong(points: readonly (readonly [number, number])[], t: number): [number, number] {
-  let total = 0;
-  for (let i = 1; i < points.length; i++) total += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
-  let target = total * Math.min(1, Math.max(0, t));
-  for (let i = 1; i < points.length; i++) {
-    const len = Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
-    if (target <= len || i === points.length - 1) {
-      const u = len > 0 ? Math.min(1, target / len) : 0;
-      return [points[i - 1][0] + (points[i][0] - points[i - 1][0]) * u, points[i - 1][1] + (points[i][1] - points[i - 1][1]) * u];
-    }
-    target -= len;
-  }
-  return [points[0][0], points[0][1]];
-}
-
-function onWall(p: readonly [number, number], width: number, height: number): boolean {
-  const eps = 1e-6;
-  return p[0] <= eps || p[1] <= eps || p[0] >= width - eps || p[1] >= height - eps;
-}
+const EPS = 1e-6;
 
 /** Расстояние от точки до отрезка. */
 export function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
@@ -136,51 +92,68 @@ export function distToSegment(px: number, py: number, ax: number, ay: number, bx
   return Math.hypot(px - (ax + dx * u), py - (ay + dy * u));
 }
 
+function onWall(p: readonly [number, number], width: number, height: number): boolean {
+  return p[0] <= EPS || p[1] <= EPS || p[0] >= width - EPS || p[1] >= height - EPS;
+}
+
+function onPolyline(p: readonly [number, number], points: readonly (readonly [number, number])[]): boolean {
+  for (let s = 1; s < points.length; s++) {
+    if (distToSegment(p[0], p[1], points[s - 1][0], points[s - 1][1], points[s][0], points[s][1]) <= EPS) return true;
+  }
+  return false;
+}
+
+/** Точки вдоль ломаной с шагом не больше `step` — для проверок и растеризации. */
+export function densify(points: readonly (readonly [number, number])[], step: number): [number, number][] {
+  const out: [number, number][] = [];
+  for (let s = 1; s < points.length; s++) {
+    const [ax, ay] = points[s - 1];
+    const [bx, by] = points[s];
+    const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / step));
+    for (let k = 0; k < n; k++) out.push([ax + ((bx - ax) * k) / n, ay + ((by - ay) * k) / n]);
+  }
+  if (points.length > 0) out.push([points[points.length - 1][0], points[points.length - 1][1]]);
+  return out;
+}
+
 export function buildLayout(id: LayoutId, width: number, height: number): PartitionLayout {
   const preset = LAYOUT_PRESETS[id];
-  const partitions: Partition[] = [];
-  for (const controls of preset.partitions) {
-    const resolved: [number, number][] = [];
-    const refs: boolean[] = [];
-    for (const c of controls) {
-      if (Array.isArray(c)) {
-        const [u, v] = c as readonly [number, number];
-        resolved.push([u * width, v * height]);
-        refs.push(false);
-      } else {
-        const ref = c as { on: number; t: number };
-        if (ref.on >= partitions.length) throw new Error(`Заготовка ${id}: ссылка на ещё не построенную перегородку ${ref.on}`);
-        resolved.push(pointAlong(partitions[ref.on].points, ref.t));
-        refs.push(true);
-      }
-    }
-    const points = spline(resolved, PARTITION_SAMPLES);
-    const first = resolved[0];
-    const last = resolved[resolved.length - 1];
-    partitions.push({
-      points,
-      attached: [refs[0] || onWall(first, width, height), refs[refs.length - 1] || onWall(last, width, height)],
-    });
-  }
-
+  // Вершины выравниваются по сетке растра (стенки чашки — точно по краю):
+  // тогда растр перегородок совпадает с их геометрией без зазоров.
   const cell = PARTITION_CELL;
+  const snap = (f: number, size: number) => (f <= 0 ? 0 : f >= 1 ? size : Math.min(size, Math.round((f * size) / cell) * cell));
+  const polylines = preset.partitions.map((verts) => verts.map(([u, v]) => [snap(u, width), snap(v, height)] as [number, number]));
+  polylines.forEach((pts, pi) => {
+    for (let s = 1; s < pts.length; s++) {
+      const horizontal = Math.abs(pts[s][1] - pts[s - 1][1]) <= EPS;
+      const vertical = Math.abs(pts[s][0] - pts[s - 1][0]) <= EPS;
+      if (horizontal === vertical) throw new Error(`Заготовка ${id}: отрезок ${s} перегородки ${pi} не горизонтальный и не вертикальный`);
+    }
+  });
+  const partitions: Partition[] = polylines.map((pts, pi) => {
+    const others = polylines.filter((_, k) => k !== pi);
+    const attachedEnd = (p: readonly [number, number]) => onWall(p, width, height) || others.some((o) => onPolyline(p, o));
+    return { points: pts, attached: [attachedEnd(pts[0]), attachedEnd(pts[pts.length - 1])] };
+  });
+
   const cols = Math.ceil(width / cell);
   const rows = Math.ceil(height / cell);
   const blocked = new Uint8Array(cols * rows);
-  const reach = PARTITION_THICKNESS / 2 + cell * Math.SQRT1_2;
+  const reach = PARTITION_THICKNESS / 2;
   for (const part of partitions) {
     for (let s = 1; s < part.points.length; s++) {
+      // Отрезок с квадратными концами: прямоугольник толщиной `thickness`.
       const [ax, ay] = part.points[s - 1];
       const [bx, by] = part.points[s];
-      const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - reach) / cell));
-      const i1 = Math.min(cols - 1, Math.floor((Math.max(ax, bx) + reach) / cell));
-      const j0 = Math.max(0, Math.floor((Math.min(ay, by) - reach) / cell));
-      const j1 = Math.min(rows - 1, Math.floor((Math.max(ay, by) + reach) / cell));
-      for (let j = j0; j <= j1; j++) {
-        for (let i = i0; i <= i1; i++) {
-          if (distToSegment((i + 0.5) * cell, (j + 0.5) * cell, ax, ay, bx, by) <= reach) blocked[j * cols + i] = 1;
-        }
-      }
+      const x0 = Math.min(ax, bx) - reach;
+      const x1 = Math.max(ax, bx) + reach;
+      const y0 = Math.min(ay, by) - reach;
+      const y1 = Math.max(ay, by) + reach;
+      const i0 = Math.max(0, Math.floor(x0 / cell));
+      const i1 = Math.min(cols - 1, Math.ceil(x1 / cell) - 1);
+      const j0 = Math.max(0, Math.floor(y0 / cell));
+      const j1 = Math.min(rows - 1, Math.ceil(y1 / cell) - 1);
+      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) blocked[j * cols + i] = 1;
     }
   }
   return { preset, partitions, thickness: PARTITION_THICKNESS, cols, rows, cell, blocked };
@@ -218,7 +191,7 @@ export function freeRegions(layout: PartitionLayout): { labels: Int32Array; size
   return { labels, sizes };
 }
 
-/** Занята ли точка чашки перегородкой (по растру). */
+/** Занята ли точка чашки перегородкой (по растру); за пределами чашки — стена. */
 export function isBlocked(layout: PartitionLayout, x: number, y: number): boolean {
   const i = Math.floor(x / layout.cell);
   const j = Math.floor(y / layout.cell);
