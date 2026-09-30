@@ -330,3 +330,48 @@ export function dishCoverage(map: LightMap, width: number, height: number, t: nu
 export function mapCoverage(map: LightMap, t: number): number {
   return coverage(map.spots, map.mapWidth, map.mapHeight, t);
 }
+
+/**
+ * Контуры пятен для векторной отрисовки: для каждого эллипса (и его копий у
+ * сомкнутых краёв карты), видимого в чашке, — замкнутый многоугольник в
+ * координатах чашки, плоским массивом [x0, y0, x1, y1, …]. Контур проходит
+ * по середине размытого края; мягкость края отрисовка добавляет размытием.
+ */
+export function spotOutlines(map: LightMap, t: number, dishW: number, dishH: number, segments = 48): Float64Array[] {
+  const [ox, oy] = lightOffset(map, t);
+  const W = map.mapWidth;
+  const H = map.mapHeight;
+  const out: Float64Array[] = [];
+  const middle = 1 + SPOT_EDGE / 2;
+  for (const s of map.spots) {
+    for (const b of s.blobs) {
+      const [mx, my] = blobCenter(s, b, t, W, H);
+      const reach = blobReach(b, t);
+      const cx0 = wrap(mx + ox, W);
+      const cy0 = wrap(my + oy, H);
+      const r = blobRadius(b, t);
+      const k = Math.sqrt(b.aspect);
+      const angle = b.a0 + b.wa * t;
+      const c = Math.cos(angle);
+      const sn = Math.sin(angle);
+      for (const cx of [cx0, cx0 - W]) {
+        if (cx + reach < 0 || cx - reach > dishW) continue;
+        for (const cy of [cy0, cy0 - H]) {
+          if (cy + reach < 0 || cy - reach > dishH) continue;
+          const poly = new Float64Array(segments * 2);
+          for (let i = 0; i < segments; i++) {
+            const phi = (i / segments) * TAU;
+            const bound = (1 + b.e3 * Math.sin(3 * phi + b.p3 + b.w3 * t) + b.e5 * Math.sin(5 * phi + b.p5 + b.w5 * t)) * middle;
+            // Точка в нормированных осях эллипса → повернуть и растянуть в мир.
+            const u = bound * Math.cos(phi) * r * k;
+            const v = (bound * Math.sin(phi) * r) / k;
+            poly[i * 2] = cx + u * c - v * sn;
+            poly[i * 2 + 1] = cy + u * sn + v * c;
+          }
+          out.push(poly);
+        }
+      }
+    }
+  }
+  return out;
+}

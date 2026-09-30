@@ -1,5 +1,5 @@
 /**
- * Песочница неживой природы: мир, панель параметров, время, слои.
+ * Песочница неживой природы: мир, панель параметров, время.
  * Скорость показа — дело приложения; мир знает только номер шага.
  */
 import {
@@ -7,7 +7,7 @@ import {
   parseWorldFile, resistanceAt, serializeWorld, stepWorld, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
 import { Panel } from './panel.ts';
-import { WorldRenderer, type Layer } from './render.ts';
+import { WorldRenderer } from './render.ts';
 
 /** Шагов в секунду при скорости ×1. */
 const BASE_STEPS_PER_SECOND = 30;
@@ -19,8 +19,6 @@ const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
 const renderer = new WorldRenderer(canvas);
 
 let world: World = createWorld(makeParams({ seed: 1 }));
-let layer: Layer = 'light';
-let showPartitions = true;
 let paused = false;
 let speed = 1;
 let carry = 0;
@@ -32,8 +30,6 @@ const panel = new Panel(document.querySelector<HTMLElement>('#panel')!, world.pa
   onTogglePause: () => { paused = !paused; },
   onStepOnce: () => { stepWorld(world); },
   onSpeed: (s) => { speed = s; carry = 0; },
-  onLayer: (l) => { layer = l; },
-  onPartitions: (show) => { showPartitions = show; },
   onSave: () => saveWorld(),
   onLoad: (file) => { void loadWorld(file); },
 });
@@ -101,7 +97,7 @@ function frame(now: number): void {
     carry -= n;
     for (let i = 0; i < n; i++) stepWorld(world);
   }
-  renderer.draw(layer, showPartitions);
+  renderer.draw();
   panel.setTime(world.step, paused, speed, stepsPerSecond);
   probe();
   requestAnimationFrame(frame);

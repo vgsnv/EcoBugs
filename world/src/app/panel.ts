@@ -4,7 +4,7 @@
  * и применяются кнопкой «Создать мир».
  */
 import { LAYOUTS, LAYOUT_PRESETS, makeParams, validateParams, type WorldParams } from '../core/index.ts';
-import { LAYER_NAMES, type Layer } from './render.ts';
+import { DEEP_WATER, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render.ts';
 
 export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
 
@@ -13,8 +13,6 @@ export interface PanelHandlers {
   onTogglePause(): void;
   onStepOnce(): void;
   onSpeed(speed: number): void;
-  onLayer(layer: Layer): void;
-  onPartitions(show: boolean): void;
   onSave(): void;
   onLoad(file: File): void;
 }
@@ -98,7 +96,7 @@ export class Panel {
       this.createButton,
       el('span', { className: 'row' }, this.revertButton, this.defaultsButton),
       this.timeSection(),
-      this.layerSection(),
+      this.legendSection(),
       this.fileSection(),
       el('section', {}, el('h3', { textContent: 'Под курсором' }), this.probeBox),
     );
@@ -220,18 +218,24 @@ export class Panel {
     );
   }
 
-  private layerSection(): HTMLElement {
-    const radios = (Object.keys(LAYER_NAMES) as Layer[]).map((layer, k) => {
-      const input = el('input', { type: 'radio', name: 'layer', value: layer, checked: k === 0 });
-      input.addEventListener('change', () => this.handlers.onLayer(layer));
-      return el('label', { className: 'inline' }, input, LAYER_NAMES[layer]);
-    });
-    const parts = el('input', { type: 'checkbox', checked: true });
-    parts.addEventListener('change', () => this.handlers.onPartitions(parts.checked));
+  /** Легенда: что каким способом показано на единой картинке чашки. */
+  private legendSection(): HTMLElement {
+    const swatch = (c: Rgb | string) => {
+      const sw = el('span', { className: 'swatch' });
+      sw.style.background = typeof c === 'string' ? c : `rgb(${c.join(',')})`;
+      return sw;
+    };
+    const css = (c: Rgb) => `rgb(${c.map(Math.round).join(',')})`;
+    const item = (sw: HTMLElement, text: string) => el('div', { className: 'legend-item' }, sw, text);
     return el('section', {},
-      el('h3', { textContent: 'Слой' }),
-      ...radios,
-      el('label', { className: 'inline' }, parts, 'Перегородки'),
+      el('h3', { textContent: 'Обозначения' }),
+      item(swatch(css(DEEP_WATER)), 'Вода'),
+      item(swatch(css(SHALLOWS_SAMPLE)), 'Отмель: камень под водой'),
+      item(swatch(css(STONE_SAMPLE)), 'Суша: тёмный камень'),
+      item(swatch(css(SUN_COLOR)), 'Свет: освещённые пятна'),
+      item(swatch(css(DEEP_WATER.map((c, i) => Math.round((c * SHADE_COLOR[i]) / 255)) as unknown as Rgb)), 'Тень: вне пятен темнее'),
+      item(swatch('rgb(255, 170, 70)'), 'Нагрев: освещённые места теплее'),
+      item(swatch('rgba(150, 190, 222, 0.6)'), 'Стекло: стенки и перегородки'),
     );
   }
 
