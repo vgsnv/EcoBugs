@@ -24,6 +24,8 @@ type NumberKey = 'sun' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'base
 interface SliderSpec {
   key: NumberKey;
   label: string;
+  /** Пояснение под ползунком: что задаёт параметр. */
+  hint: string;
   min: number;
   max: number;
   step: number;
@@ -33,24 +35,24 @@ const GROUPS: readonly { title: string; sliders: readonly SliderSpec[] }[] = [
   {
     title: 'Свет',
     sliders: [
-      { key: 'sun', label: 'Солнце', min: 0.1, max: 3, step: 0.1 },
-      { key: 'backgroundLevel', label: 'Яркость фона', min: 0.02, max: 0.9, step: 0.01 },
-      { key: 'illumination', label: 'Освещённость', min: 0.05, max: 0.8, step: 0.01 },
-      { key: 'spotSize', label: 'Размер пятен', min: 15, max: 200, step: 1 },
+      { key: 'sun', label: 'Солнце', hint: 'Яркость света в пятнах.', min: 0.1, max: 3, step: 0.1 },
+      { key: 'backgroundLevel', label: 'Яркость фона', hint: 'Свет между пятнами — доля от света в пятне.', min: 0.02, max: 0.9, step: 0.01 },
+      { key: 'illumination', label: 'Освещённость', hint: 'Какую часть карты света в среднем занимают пятна.', min: 0.05, max: 0.8, step: 0.01 },
+      { key: 'spotSize', label: 'Размер пятен', hint: 'Средний размер пятна; отдельные бывают мельче и крупнее.', min: 15, max: 200, step: 1 },
     ],
   },
   {
     title: 'Температура',
     sliders: [
-      { key: 'baseTemperature', label: 'Базовая', min: 0.1, max: 3, step: 0.05 },
-      { key: 'spotHeat', label: 'Нагрев в пятнах', min: 0, max: 3, step: 0.05 },
+      { key: 'baseTemperature', label: 'Базовая', hint: 'Температура на фоне; задаёт общий уровень мутаций.', min: 0.1, max: 3, step: 0.05 },
+      { key: 'spotHeat', label: 'Нагрев в пятнах', hint: 'Насколько в пятне теплее, чем на фоне. В тепле мутации сильнее.', min: 0, max: 3, step: 0.05 },
     ],
   },
   {
     title: 'Вязкость',
     sliders: [
-      { key: 'baseViscosity', label: 'Базовая', min: 0.1, max: 5, step: 0.1 },
-      { key: 'viscosityZoneSize', label: 'Размер зон', min: 30, max: 300, step: 5 },
+      { key: 'baseViscosity', label: 'Базовая', hint: 'Общее сопротивление движению; градации умножают его.', min: 0.1, max: 5, step: 0.1 },
+      { key: 'viscosityZoneSize', label: 'Размер зон', hint: 'Средний размер зон воды, отмели и суши.', min: 30, max: 300, step: 5 },
     ],
   },
 ];
@@ -60,6 +62,8 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLEl
   node.append(...children);
   return node;
 }
+
+const hint = (text: string) => el('small', { className: 'hint', textContent: text });
 
 const fmt = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(2));
 
@@ -150,9 +154,9 @@ export class Panel {
     });
     return el('section', {},
       el('h3', { textContent: 'Мир' }),
-      el('label', {}, 'Сид', el('span', { className: 'row' }, seed, random)),
-      el('label', {}, 'Планировка', layout),
-      el('label', {}, 'Размер чашки', size),
+      el('label', {}, 'Сид', el('span', { className: 'row' }, seed, random), hint('Из него строится вся случайность мира: один сид — один и тот же мир.')),
+      el('label', {}, 'Планировка', layout, hint('Готовая заготовка перегородок внутри чашки.')),
+      el('label', {}, 'Размер чашки', size, hint('Ширина и высота чашки в единицах мира.')),
     );
   }
 
@@ -168,11 +172,11 @@ export class Panel {
       input.value = String(this.draft[spec.key]);
       value.textContent = fmt(this.draft[spec.key]);
     });
-    return el('label', {}, el('span', { className: 'row' }, spec.label, value), input);
+    return el('label', {}, el('span', { className: 'row' }, spec.label, value), input, hint(spec.hint));
   }
 
   private sharesRows(): HTMLElement[] {
-    const make = (key: 'land' | 'shallows', label: string) => {
+    const make = (key: 'land' | 'shallows', label: string, text: string) => {
       const input = el('input', { type: 'range', min: '0', max: '0.6', step: '0.01' });
       const value = el('span', { className: 'value' });
       input.addEventListener('input', () => {
@@ -185,12 +189,12 @@ export class Panel {
         input.value = String(this.draft.viscosityShares[key]);
         value.textContent = fmt(this.draft.viscosityShares[key]);
       });
-      return el('label', {}, el('span', { className: 'row' }, label, value), input);
+      return el('label', {}, el('span', { className: 'row' }, label, value), input, hint(text));
     };
     return [
-      make('land', 'Доля суши'),
-      make('shallows', 'Доля отмели'),
-      el('label', {}, el('span', { className: 'row' }, 'Доля воды', this.waterValue)),
+      make('land', 'Доля суши', 'Высокая вязкость: двигаться дороже всего, свет усваивается лучше всего.'),
+      make('shallows', 'Доля отмели', 'Средняя вязкость. Суша всегда отделена от воды отмелью.'),
+      el('label', {}, el('span', { className: 'row' }, 'Доля воды', this.waterValue), hint('Остаток чашки. Низкая вязкость: двигаться дешевле всего, свет усваивается хуже всего.')),
     ];
   }
 
