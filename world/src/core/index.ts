@@ -11,4 +11,5 @@ export * from './noise.ts';
 export * from './params.ts';
 export * from './constants.ts';
 export * from './light.ts';
+export * from './temperature.ts';
 export * from './world.ts';

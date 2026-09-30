@@ -32,7 +32,7 @@ export interface WorldParams {
   illumination: number;
   /** Средний радиус пятна света в единицах мира. */
   spotSize: number;
-  /** Температура на фоне — общий уровень мутаций. */
+  /** Температура на фоне — общий уровень мутаций; строго больше нуля. */
   baseTemperature: number;
   /** Насколько в пятне теплее, чем на фоне. */
   spotHeat: number;
@@ -98,7 +98,8 @@ export function validateParams(p: WorldParams): string[] {
   inRange('backgroundLevel', p.backgroundLevel, 0, 1, true);
   inRange('illumination', p.illumination, 0, 1, true);
   inRange('spotSize', p.spotSize, 1, 10000);
-  inRange('baseTemperature', p.baseTemperature, 0, 100);
+  // Строго больше нуля: сила мутаций «не до нуля» даже на фоне.
+  inRange('baseTemperature', p.baseTemperature, 0, 100, true);
   inRange('spotHeat', p.spotHeat, 0, 100);
   inRange('baseViscosity', p.baseViscosity, 0, 100, true);
   inRange('viscosityZoneSize', p.viscosityZoneSize, 1, 10000);
