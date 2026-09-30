@@ -13,4 +13,5 @@ export * from './constants.ts';
 export * from './light.ts';
 export * from './temperature.ts';
 export * from './viscosity.ts';
+export * from './partitions.ts';
 export * from './world.ts';

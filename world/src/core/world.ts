@@ -5,6 +5,7 @@ import { mix32 } from './prng.ts';
 import { type WorldParams, validateParams } from './params.ts';
 import { type LightMap, createLightMap } from './light.ts';
 import { type ViscosityMap, createViscosityMap } from './viscosity.ts';
+import { type PartitionLayout, buildLayout } from './partitions.ts';
 
 export interface World {
   readonly params: Readonly<WorldParams>;
@@ -14,6 +15,8 @@ export interface World {
   readonly light: LightMap;
   /** Карта вязкости; строится из сида и не меняется. */
   readonly viscosity: ViscosityMap;
+  /** Перегородки по выбранной заготовке; не меняются. */
+  readonly partitions: PartitionLayout;
 }
 
 export class InvalidParamsError extends Error {
@@ -28,7 +31,7 @@ export function createWorld(params: WorldParams): World {
   const errors = validateParams(params);
   if (errors.length > 0) throw new InvalidParamsError(errors);
   const own = structuredClone(params);
-  return { params: own, step: 0, light: createLightMap(own), viscosity: createViscosityMap(own) };
+  return { params: own, step: 0, light: createLightMap(own), viscosity: createViscosityMap(own), partitions: buildLayout(own.layout, own.width, own.height) };
 }
 
 /**

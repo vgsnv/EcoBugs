@@ -1,5 +1,6 @@
 import {
-  WORLD_FORMAT_VERSION, createWorld, lightFromIntensity, makeParams, rasterizeSpotIntensity, rasterizeTemperature, smoothLevelAt,
+  LAYOUTS, LAYOUT_PRESETS, WORLD_FORMAT_VERSION, createWorld, lightFromIntensity, makeParams, rasterizeSpotIntensity,
+  rasterizeTemperature, smoothLevelAt, type World,
 } from '../core/index.ts';
 
 const VISC_COLORS: readonly (readonly [number, number, number])[] = [[25, 70, 150], [60, 160, 165], [170, 135, 80]];
@@ -7,23 +8,25 @@ const VISC_COLORS: readonly (readonly [number, number, number])[] = [[25, 70, 15
 const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
 const status = document.querySelector<HTMLDivElement>('#status')!;
 
-// Временная проверка этапов 2–4: свет (L), температура (T), вязкость (V)
-// с сильным ускорением времени. Полноценная песочница — этап 6.
-const world = createWorld(makeParams({ seed: 1 }));
+// Временная проверка этапов 2–5: свет (L), температура (T), вязкость (V),
+// заготовка перегородок (P) с сильным ускорением времени. Полноценная песочница — этап 6.
+let world: World = createWorld(makeParams({ seed: 1 }));
 const { width, height } = world.params;
 const CELL = 4;
 const cols = Math.ceil(width / CELL);
 const rows = Math.ceil(height / CELL);
 const STEPS_PER_FRAME = 1500;
 
-canvas.width = cols;
-canvas.height = rows;
-canvas.style.width = `${width}px`;
-canvas.style.height = `${height}px`;
-canvas.style.imageRendering = 'pixelated';
-
+// Поля рисуются в малый буфер и растягиваются, перегородки — поверх в полном разрешении.
+canvas.width = width;
+canvas.height = height;
+const buffer = document.createElement('canvas');
+buffer.width = cols;
+buffer.height = rows;
+const bctx = buffer.getContext('2d')!;
 const ctx = canvas.getContext('2d')!;
-const image = ctx.createImageData(cols, rows);
+ctx.imageSmoothingEnabled = false;
+const image = bctx.createImageData(cols, rows);
 let intensity: Float32Array = new Float32Array(cols * rows);
 let temperature: Float32Array = new Float32Array(cols * rows);
 type Layer = 'light' | 'temperature' | 'viscosity';
@@ -32,8 +35,15 @@ const LAYER_KEYS: Record<string, Layer> = { l: 'light', д: 'light', t: 'tempera
 const LAYER_NAMES: Record<Layer, string> = { light: 'свет', temperature: 'температура', viscosity: 'вязкость' };
 
 window.addEventListener('keydown', (e) => {
-  const next = LAYER_KEYS[e.key.toLowerCase()];
+  const key = e.key.toLowerCase();
+  const next = LAYER_KEYS[key];
   if (next) layer = next;
+  if (key === 'p' || key === 'з') {
+    const idx = (LAYOUTS.indexOf(world.params.layout) + 1) % LAYOUTS.length;
+    const step = world.step;
+    world = createWorld(makeParams({ ...world.params, layout: LAYOUTS[idx] }));
+    world.step = step;
+  }
 });
 
 function draw(): void {
@@ -67,8 +77,18 @@ function draw(): void {
     }
     image.data[i + 3] = 255;
   }
-  ctx.putImageData(image, 0, 0);
-  status.textContent = `Песочница мира · формат v${WORLD_FORMAT_VERSION} · сид ${p.seed} · шаг ${world.step.toLocaleString('ru')} · ×${STEPS_PER_FRAME} за кадр · слой: ${LAYER_NAMES[layer]} (L / T / V)`;
+  bctx.putImageData(image, 0, 0);
+  ctx.drawImage(buffer, 0, 0, width, height);
+  ctx.strokeStyle = '#111';
+  ctx.lineWidth = world.partitions.thickness;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (const part of world.partitions.partitions) {
+    ctx.beginPath();
+    part.points.forEach(([x, y], k) => (k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+    ctx.stroke();
+  }
+  status.textContent = `Песочница мира · формат v${WORLD_FORMAT_VERSION} · сид ${p.seed} · шаг ${world.step.toLocaleString('ru')} · ×${STEPS_PER_FRAME} за кадр · слой: ${LAYER_NAMES[layer]} (L / T / V) · ${LAYOUT_PRESETS[p.layout].name} (P)`;
 }
 
 function frame(): void {

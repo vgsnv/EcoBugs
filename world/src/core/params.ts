@@ -4,8 +4,8 @@
  * глядя на мир в песочнице.
  */
 
-/** Заготовки планировки перегородок. Набор растёт на этапе 5. */
-export const LAYOUTS = ['open'] as const;
+/** Заготовки планировки перегородок (данные — в partitions.ts). */
+export const LAYOUTS = ['open', 'lagoons', 'corridors', 'compartments', 'mixed'] as const;
 export type LayoutId = (typeof LAYOUTS)[number];
 
 /** Доли чашки под каждой градацией вязкости; в сумме 1. */
