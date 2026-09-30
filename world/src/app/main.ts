@@ -3,7 +3,7 @@
  * Скорость показа — дело приложения; мир знает только номер шага.
  */
 import {
-  LAYOUT_PRESETS, WorldFileError, absorptionAt, createWorld, gradationAt, isBlocked, lightAt, makeParams, mutationStrength,
+  WorldFileError, absorptionAt, createWorld, gradationAt, isBlocked, lightAt, makeParams, mutationStrength,
   parseWorldFile, resistanceAt, serializeWorld, stepWorld, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
@@ -47,7 +47,7 @@ function saveWorld(): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `ecobugs-world-${world.params.seed}-${world.params.layout}-step-${world.step}.json`;
+  a.download = `ecobugs-world-${world.params.seed}-step-${world.step}.json`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   panel.setFileStatus([`Сохранён мир на шаге ${world.step.toLocaleString('ru')}`], false);
@@ -68,7 +68,7 @@ function setWorld(next: World): void {
   world = next;
   renderer.setWorld(world);
   panel.setCurrent(world.params);
-  document.title = `Песочница мира · ${LAYOUT_PRESETS[world.params.layout].name}`;
+  document.title = `Песочница мира · сид ${world.params.seed}`;
 }
 
 /** Один шаг: ставит на паузу, если время шло. */

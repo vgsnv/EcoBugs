@@ -5,8 +5,6 @@
  */
 
 /** Заготовки планировки перегородок (данные — в partitions.ts). */
-export const LAYOUTS = ['open', 'lagoons', 'corridors', 'compartments', 'mixed'] as const;
-export type LayoutId = (typeof LAYOUTS)[number];
 
 /** Доли чашки под каждой градацией вязкости; в сумме 1. */
 export interface ViscosityShares {
@@ -18,8 +16,6 @@ export interface ViscosityShares {
 export interface WorldParams {
   /** Вся случайность мира. */
   seed: number;
-  /** Заготовка перегородок. */
-  layout: LayoutId;
   /** Яркость света в пятнах. */
   sun: number;
   /** Свет фона как доля от света в пятнах, (0, 1). */
@@ -42,7 +38,6 @@ export interface WorldParams {
 
 export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
   seed: 1,
-  layout: 'open',
   sun: 1,
   backgroundLevel: 0.2,
   illumination: 0.3,
@@ -66,7 +61,6 @@ export function makeParams(overrides: Partial<WorldParams> = {}): WorldParams {
 /** Названия параметров для сообщений об ошибках. */
 export const PARAM_LABELS: Readonly<Record<string, string>> = {
   'seed': 'Сид',
-  'layout': 'Планировка',
   'sun': 'Солнце',
   'backgroundLevel': 'Яркость фона',
   'illumination': 'Освещённость',
@@ -103,7 +97,6 @@ export function validateParams(p: WorldParams): string[] {
   if (!Number.isInteger(p.seed) || p.seed < 0 || p.seed > 0xffffffff) {
     errors.push(`Сид: ожидается целое от 0 до ${0xffffffff}`);
   }
-  if (!LAYOUTS.includes(p.layout)) errors.push(`Планировка: неизвестная заготовка «${String(p.layout)}»`);
   inRange('sun', p.sun, 0, 100, true);
   inRange('backgroundLevel', p.backgroundLevel, 0, 1, true);
   inRange('illumination', p.illumination, 0, 1, true);

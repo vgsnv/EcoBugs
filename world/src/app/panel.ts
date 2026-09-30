@@ -4,7 +4,7 @@
  * они задаются при сотворении, поэтому правки копятся в черновике и
  * применяются кнопкой «Создать мир».
  */
-import { LAYOUTS, LAYOUT_PRESETS, makeParams, validateParams, type WorldParams } from '../core/index.ts';
+import { LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type WorldParams } from '../core/index.ts';
 import { DEEP_WATER, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render.ts';
 
 export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
@@ -104,6 +104,8 @@ export class Panel {
   private readonly defaultsButton = el('button', { textContent: 'По умолчанию' });
   /** Синхронизация полей с черновиком; флаг — отличается ли поле от текущего мира. */
   private readonly inputs: (() => void)[] = [];
+  private readonly layoutLabel = el('span', { className: 'value' });
+  private readonly layoutPreview = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   private readonly marks: { node: HTMLElement; changed: () => boolean }[] = [];
 
   constructor(roots: PanelRoots, initial: WorldParams, handlers: PanelHandlers) {
@@ -222,7 +224,6 @@ export class Panel {
   private worldFields(): HTMLElement[] {
     const seed = el('input', { type: 'number', min: '0', max: String(0xffffffff), step: '1' });
     const random = el('button', { textContent: 'Случайный' });
-    const layout = el('select', {}, ...LAYOUTS.map((id) => el('option', { value: id, textContent: LAYOUT_PRESETS[id].name })));
 
     seed.addEventListener('input', () => { this.draft.seed = Number(seed.value); this.refresh(); });
     random.addEventListener('click', () => {
@@ -230,16 +231,15 @@ export class Panel {
       seed.value = String(this.draft.seed);
       this.refresh();
     });
-    layout.addEventListener('change', () => { this.draft.layout = layout.value as WorldParams['layout']; this.refresh(); });
     this.inputs.push(() => {
       seed.value = String(this.draft.seed);
-      layout.value = this.draft.layout;
     });
     return [
       this.mark(el('label', {}, this.caption('Сид', 'Из него строится вся случайность мира: один сид — один и тот же мир.'), el('span', { className: 'row' }, seed, random)),
         () => this.draft.seed !== this.current.seed),
-      this.mark(el('label', {}, this.caption('Планировка', 'Готовая заготовка перегородок внутри чашки.'), layout),
-        () => this.draft.layout !== this.current.layout),
+      el('div', { className: 'layout' },
+        this.caption('Планировка', 'Перегородки внутри чашки — одна из готовых планировок; какая, решает сид. Из перегородок получаются отсеки, коридоры и лагуны.', this.layoutLabel),
+        this.layoutPreview),
     ];
   }
 
@@ -337,7 +337,33 @@ export class Panel {
     tip.style.top = `${Math.max(0, y)}px`;
   }
 
+  /** Схема планировки, которую даст сид из черновика. */
+  private showLayout(): void {
+    const seed = this.draft.seed;
+    const svg = this.layoutPreview;
+    const W = 160, H = 120;
+    svg.setAttribute('viewBox', `-3 -3 ${W + 6} ${H + 6}`);
+    if (!Number.isInteger(seed) || seed < 0 || seed > 0xffffffff) {
+      this.layoutLabel.textContent = '—';
+      svg.replaceChildren();
+      return;
+    }
+    const preset = layoutForSeed(seed);
+    this.layoutLabel.textContent = `${preset.number} из ${LAYOUT_PRESETS.length}`;
+    const ns = 'http://www.w3.org/2000/svg';
+    const make = (tag: string, attrs: Record<string, string | number>) => {
+      const node = document.createElementNS(ns, tag);
+      for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+      return node;
+    };
+    svg.replaceChildren(
+      make('rect', { x: 0, y: 0, width: W, height: H, class: 'dish' }),
+      ...preset.partitions.map((verts) => make('polyline', { points: verts.map(([u, v]) => `${u * W},${v * H}`).join(' '), class: 'wall' })),
+    );
+  }
+
   private refresh(): void {
+    this.showLayout();
     const s = this.draft.viscosityShares;
     s.water = Math.round((1 - s.land - s.shallows) * 100) / 100;
     this.waterValue.textContent = fmt(s.water);

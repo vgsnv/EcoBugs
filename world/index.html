@@ -54,6 +54,10 @@
       .info { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--border); color: var(--muted); font-size: 10px; cursor: help; margin-left: 4px; }
       .value { color: var(--muted); font-variant-numeric: tabular-nums; }
       .changed .value { color: var(--accent); font-weight: 600; }
+      .layout { display: flex; flex-direction: column; gap: 4px; }
+      .layout svg { width: 100%; max-width: 200px; height: auto; align-self: center; }
+      .layout .dish { fill: #2f5ea8; stroke: #9fbfe0; stroke-width: 3; }
+      .layout .wall { fill: none; stroke: #d6e6f5; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; }
       .note { color: var(--muted); font-size: 12px; }
       .note:empty, .errors:empty { display: none; }
       .errors { color: var(--danger); font-size: 12px; }
