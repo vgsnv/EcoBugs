@@ -11,7 +11,7 @@ import { Drift } from './drift.ts';
 import { MINERAL_CELL, MINERAL_PERIOD, TERRAIN_PERIOD } from './constants.ts';
 import { createTerrain, levelFromGround, type TerrainState } from './terrain.ts';
 import { applyLevels } from './viscosity.ts';
-import { createMineral, transparencyAt, updateMineral, type MineralState } from './mineral.ts';
+import { createMineral, transparencyAt, updateMineral, volcanoNumbers, type MineralState } from './mineral.ts';
 
 export interface World {
   readonly params: Readonly<WorldParams>;
@@ -104,7 +104,7 @@ export function worldHash(world: World): number {
     p.seed, DISH_WIDTH, DISH_HEIGHT, p.sun, p.lightDrift, p.sunRhythm, p.sunPeriod, p.backgroundLevel, p.illumination, p.spotSize,
     p.baseTemperature, p.spotHeat, p.baseViscosity,
     p.viscosityShares.water, p.viscosityShares.shallows, p.viscosityShares.land,
-    p.viscosityZoneSize, p.driftStrength, p.driftLength, p.mineralStock, p.volcanoCount, p.terrainSpeed, p.quakeInterval,
+    p.viscosityZoneSize, p.driftStrength, p.driftLength, p.mineralStock, p.terrainSpeed, p.quakeInterval,
     world.step,
     world.mineral.depths,
     ...world.terrain.ground,
@@ -113,7 +113,8 @@ export function worldHash(world: World): number {
     world.terrain.nextMove, world.terrain.nextMoveStep, world.terrain.nextQuake, world.terrain.nextQuakeStep,
     ...world.terrain.active.flatMap((m) => [m.n, m.quake ? 1 : 0, m.start]),
     world.mineral.threshold, world.mineral.eruptions, world.mineral.genesis ? 1 : 0,
-    ...world.mineral.volcanoes.flatMap((v) => [v.k, v.active ? 1 : 0, v.begin, v.until, v.total, v.left, v.rate]),
+    world.mineral.births, world.mineral.volcanoes.length,
+    ...world.mineral.volcanoes.flatMap(volcanoNumbers),
     ...world.mineral.field,
   ]);
 }

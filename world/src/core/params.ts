@@ -50,8 +50,6 @@ export interface WorldParams {
   terrainSpeed: number;
   /** Средний промежуток между толчками, шагов. */
   quakeInterval: number;
-  /** Число вулканов; на деле не меньше числа отсеков. */
-  volcanoCount: number;
 }
 
 export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
@@ -71,7 +69,6 @@ export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
   driftStrength: 0.3,
   driftLength: 480,
   mineralStock: 1,
-  volcanoCount: 6,
   terrainSpeed: 1,
   quakeInterval: 400000,
 });
@@ -102,7 +99,6 @@ export const PARAM_LABELS: Readonly<Record<string, string>> = {
   'sunRhythm': 'Размах ритма солнца',
   'sunPeriod': 'Период ритма солнца',
   'mineralStock': 'Запас минерала',
-  'volcanoCount': 'Число вулканов',
   'terrainSpeed': 'Скорость местности',
   'quakeInterval': 'Промежуток между толчками',
   'viscosityShares': 'Доли вязкости',
@@ -148,10 +144,8 @@ export function validateParams(p: WorldParams): string[] {
   inRange('sunRhythm', p.sunRhythm, 0, 0.9);
   inRange('sunPeriod', p.sunPeriod, 1000, 100_000_000);
   inRange('mineralStock', p.mineralStock, 0, 100, true);
-  inRange('volcanoCount', p.volcanoCount, 1, 50);
   inRange('terrainSpeed', p.terrainSpeed, 0, 100);
   inRange('quakeInterval', p.quakeInterval, 1000, 1e9);
-  if (Number.isFinite(p.volcanoCount) && !Number.isInteger(p.volcanoCount)) errors.push('Число вулканов: ожидается целое');
 
   const s = p.viscosityShares;
   if (typeof s !== 'object' || s === null) {

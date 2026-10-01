@@ -6,7 +6,7 @@
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
-import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, hash3, isBlocked, periodicFbm, smoothLevelAt, spotAnchors, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, type World } from '../core/index.ts';
+import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, eruptionReach, hash3, isBlocked, periodicFbm, smoothLevelAt, spotAnchors, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, VOLCANO_BIRTH, VOLCANO_POWER, type Volcano, type World } from '../core/index.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
@@ -186,11 +186,43 @@ const MINERAL_FULL = 6;
 const MINERAL_ALPHA = 0.5;
 /** Насколько мягче показывать затемнение от мутности, чем по модели (1 — как есть). */
 const MURK_STRENGTH = 0.8;
-/** Кольца идущего извержения: сколько секунд расходится одно, сколько колец сразу. */
-const ERUPTION_RING_S = 1.6;
-const ERUPTION_RINGS = 3;
-const ERUPTION_RING_COLOR = 'rgb(240, 225, 255)';
-const ERUPTION_RING_MIN_CSS = 36;
+/**
+ * Извержение — только для показа. Начало: вспышка у жерла и ударная волна
+ * до радиуса выброса (докуда модель кладёт минерал); за волной летит залп
+ * клубов и ложится так же, как первый выброс минерала. Пока идёт: свечение
+ * жерла и клубы из жерла — сильнее всего сразу, дальше всё слабее и ближе к
+ * жерлу, как и выброс в модели. Дальше клубы несёт течение модели (на столько шагов мира, сколько
+ * прошло), в сильном течении они вытягиваются в шлейф и рассеиваются, в
+ * спокойной воде оседают — сжимаются, темнеют до цвета залежей и гаснут.
+ */
+const ERUPTION_LIGHT: Rgb = [244, 232, 255];
+const ERUPTION_FLASH_S = 0.6;
+const ERUPTION_SHOCK_S = 1.4;
+/** Свечение жерла: радиус (в размахах), не меньше стольких CSS px. */
+const VENT_GLOW = 0.7;
+const VENT_GLOW_MIN_CSS = 14;
+/** Клубы: сколько в секунду на пике у самого большого извержения, залп за волной, предел числа. */
+const PLUME_RATE = 90;
+const PLUME_BURST = 110;
+const PLUME_MAX = 2000;
+/** Жизнь клуба после выброса, с — от и до; начальная скорость из жерла (размахов в секунду); торможение, 1/с. */
+const PLUME_LIFE: readonly [number, number] = [2.5, 5];
+const PLUME_SPEED: readonly [number, number] = [0.6, 2.2];
+const PLUME_DRAG = 1.8;
+/** Течение за кадр сдвигает клуб не дальше стольких CSS px — на большом ускорении он не телепортируется. */
+const PLUME_MAX_HOP_CSS = 12;
+/** Оседание: в стоячей воде клуб гаснет во столько раз быстрее; как быстро клуб «чувствует» смену течения, 1/с. */
+const PLUME_SETTLE = 1.5;
+const PLUME_CALM_RATE = 3;
+/** Вытягивание шлейфа в сильном течении к концу жизни (1 — вдвое длиннее). */
+const PLUME_STRETCH = 1.6;
+/** Размер клуба (в размахах) в начале и в конце жизни; не меньше стольких CSS px. */
+const PLUME_SIZE: readonly [number, number] = [0.22, 0.6];
+const PLUME_MIN_CSS = 3;
+const PLUME_ALPHA = 0.5;
+/** Размах клубов (их размер и разлёт из жерла) — доля радиуса выброса; на экране не меньше стольких CSS px. */
+const PLUME_REACH = 1 / 3;
+const ERUPTION_MIN_CSS = 40;
 
 /** Блёстки кристаллов: с какой густоты залежей, скорость мерцания, порог вспышки (доля времени ярко — малая). */
 const SPARKLE_DEPOSIT = 2;
@@ -201,9 +233,18 @@ const FOAM_ALPHA = 0.4;
 const FOAM_RIPPLE_SIZE = 60;
 const FOAM_BASE = 0.35;
 const FOAM_REBUILD_MS = 300;
-/** Дыхание вулканов: с какого давления недр (доля порога) и период пульса, с. */
-const BREATH_FROM = 0.6;
-const BREATH_PERIOD_S = 2.6;
+/**
+ * Жерло: радиус в единицах мира у слабого и сильного вулкана; на экране не
+ * меньше (CSS px); цвета отверстия и пепла потухшего; период пульса
+ * созревшего, с. Цвета недр и «выходит» — те же, что у полосы минерала.
+ */
+const VENT_SIZE: readonly [number, number] = [9, 15];
+const VENT_MIN_CSS: readonly [number, number] = [6, 9];
+const VENT_HOLE: Rgb = [26, 16, 40];
+const VENT_ASH: Rgb = [110, 108, 122];
+const VENT_PULSE_S = 1.8;
+const BAR_DEPTHS: Rgb = [61, 42, 92];
+const BAR_OUT: Rgb = [226, 200, 255];
 
 /** Перерисовывать изменившуюся местность не чаще, мс. */
 const TERRAIN_REDRAW_MS = 1000;
@@ -303,6 +344,45 @@ function renderTerrain(sample: ReturnType<typeof terrainSampler>, x0: number, y0
   return c;
 }
 
+/**
+ * Клуб извержения в буфере: x, y, скорость выброса (vx, vy, единиц в секунду
+ * показа), возраст, жизнь (с), размах (единиц мира), спокойствие воды вокруг
+ * (0…1, сглаженно), радиус полёта за волной (0 — не летит), направление полёта,
+ * направление течения.
+ */
+const PLUME_STRIDE = 11;
+
+/**
+ * Случайное расстояние от жерла (доля радиуса выброса) — так же, как модель
+ * кладёт первый выброс: доля клетки 1 − (d/r)², то есть по радиусу ∝ u(1 − u²).
+ */
+function ventDistance(): number {
+  for (;;) {
+    const u = Math.random();
+    if (Math.random() * 0.385 < u * (1 - u * u)) return Math.max(0.02, u);
+  }
+}
+
+/** Мягкое круглое пятно цвета `c` — спрайт клуба и свечения (кеш по цвету). */
+const puffSprites = new Map<string, HTMLCanvasElement>();
+function puffSprite(c: Rgb): HTMLCanvasElement {
+  const key = c.join(',');
+  let sprite = puffSprites.get(key);
+  if (sprite) return sprite;
+  const size = 64;
+  sprite = document.createElement('canvas');
+  sprite.width = sprite.height = size;
+  const g = sprite.getContext('2d')!;
+  const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, rgb(c, 1));
+  grad.addColorStop(0.4, rgb(c, 0.55));
+  grad.addColorStop(1, rgb(c, 0));
+  g.fillStyle = grad;
+  g.fillRect(0, 0, size, size);
+  puffSprites.set(key, sprite);
+  return sprite;
+}
+
 export class WorldRenderer {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
@@ -328,6 +408,18 @@ export class WorldRenderer {
   /** Затемнение от мутности (серый для умножения), той же сетки. */
   private readonly murkCanvas = document.createElement('canvas');
   private mineralVersion = -1;
+  /** Клубы извержений: x, y, vx, vy, возраст, жизнь, размах в единицах мира (по PLUME_STRIDE чисел). */
+  private plume = new Float32Array(PLUME_MAX * PLUME_STRIDE);
+  private plumeCount = 0;
+  /** Вспышки начала извержений: вулкан, время начала (анимации), размах. */
+  private shocks: { x: number; y: number; t: number; scale: number; radius: number }[] = [];
+  /** Сколько раз извергался каждый вулкан на прошлом кадре; время прошлого кадра анимации. */
+  private seenEruptions = new Map<number, number>();
+  private plumeTime = -1;
+  /** Шаг мира на прошлом кадре — клубы несёт течение на прошедшие шаги. */
+  private plumeStep = 0;
+  /** Остаток «недовыпущенных» клубов по вулканам — чтобы темп не терялся на округлении. */
+  private plumeCarry = new Map<number, number>();
   /** Контуры пятен последнего кадра — для мини-карты. */
   private lastSpots = new Path2D();
   private world!: World;
@@ -390,6 +482,12 @@ export class WorldRenderer {
     this.drawnDeposit = Float32Array.from(world.terrain.deposits, (d) => d / per);
     this.buildSparkles();
     this.foamStep = -1;
+    this.plumeCount = 0;
+    this.shocks = [];
+    this.seenEruptions = new Map(world.mineral.volcanoes.map((v) => [v.id, v.k]));
+    this.plumeCarry.clear();
+    this.plumeTime = -1;
+    this.plumeStep = world.step;
     this.resize();
     this.fit();
   }
@@ -762,54 +860,270 @@ export class WorldRenderer {
     ctx.drawImage(this.mineralCanvas, 0, 0, m.cols * m.cell, m.rows * m.cell);
     ctx.restore();
 
-    // Идущие извержения: кольца расходятся от вулкана, пока он извергается;
-    // ярче на пике извержения (выброс за шаг относительно пикового).
+    this.drawEruptions(animTime);
+    this.drawVents(animTime);
+  }
+
+  /**
+   * Извержения: вспышки начала, свечение жерла и клубы. Живут во времени
+   * анимации (стоят на паузе) и не зависят от скорости мира; извержение,
+   * начавшееся и кончившееся между кадрами, тоже даёт вспышку и залп клубов.
+   */
+  private drawEruptions(animTime: number): void {
+    const w = this.world;
+    const m = w.mineral;
+    const ctx = this.ctx;
+    const dt = this.plumeTime < 0 ? 0 : Math.min(0.1, Math.max(0, animTime - this.plumeTime));
+    this.plumeTime = animTime;
+    const steps = Math.max(0, w.step - this.plumeStep);
+    this.plumeStep = w.step;
+    // Размах клубов: доля радиуса выброса самого большого извержения, но на
+    // экране не меньше ERUPTION_MIN_CSS — видно и на всей чашке; у меньших
+    // извержений — во столько раз меньше, во сколько меньше их радиус.
+    const R = Math.max(ERUPTION_RADIUS * PLUME_REACH, this.px(ERUPTION_MIN_CSS));
+    const scaleOf = (v: Volcano) => v.radius / ERUPTION_RADIUS;
+
+    // Новые извержения с прошлого кадра — вспышка, волна и залп за ней.
     for (const v of m.volcanoes) {
-      if (!v.active) continue;
-      const peak = (2 * v.total) / Math.max(1, v.until - v.begin);
-      const strength = 0.25 + 0.75 * Math.min(1, v.rate / Math.max(1e-12, peak));
-      for (let n = 0; n < ERUPTION_RINGS; n++) {
-        const f = (animTime / ERUPTION_RING_S + n / ERUPTION_RINGS) % 1;
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.globalAlpha = (1 - f) * strength;
-        ctx.strokeStyle = ERUPTION_RING_COLOR;
-        ctx.lineWidth = this.px(2);
+      if (v.k === (this.seenEruptions.get(v.id) ?? 0)) continue;
+      this.seenEruptions.set(v.id, v.k);
+      const scale = scaleOf(v);
+      this.shocks.push({ x: v.x, y: v.y, t: animTime, scale, radius: v.radius });
+      for (let n = 0; n < PLUME_BURST * scale; n++) this.emitPlume(v, R * scale, v.radius * ventDistance());
+    }
+    for (const id of this.seenEruptions.keys()) if (!m.volcanoes.some((v) => v.id === id)) this.seenEruptions.delete(id);
+    this.shocks = this.shocks.filter((s) => animTime - s.t < Math.max(ERUPTION_FLASH_S, ERUPTION_SHOCK_S));
+
+    // Идущие извержения выпускают клубы — тем чаще, чем сильнее выброс сейчас.
+    for (const v of m.volcanoes) {
+      if (v.stage !== 'erupting') { this.plumeCarry.delete(v.id); continue; }
+      const scale = scaleOf(v);
+      let carry = (this.plumeCarry.get(v.id) ?? 0) + PLUME_RATE * scale * this.ventStrength(v) * dt;
+      // Клубы летят туда же, куда модель кладёт минерал сейчас: к концу — всё ближе к жерлу.
+      const reach = eruptionReach(this.eruptionPhase(v));
+      for (; carry >= 1; carry--) this.emitPlume(v, R * scale * reach, 0);
+      this.plumeCarry.set(v.id, carry);
+    }
+
+    // Движение клубов: полёт за волной, выброс с торможением, снос течением модели.
+    const p = this.plume;
+    const sMax = Math.max(1e-9, w.params.driftStrength * sunAt(w.light, w.step));
+    const drift: [number, number] = [0, 0];
+    const drag = Math.exp(-PLUME_DRAG * dt);
+    const maxHop = this.px(PLUME_MAX_HOP_CSS);
+    const calmRate = Math.min(1, PLUME_CALM_RATE * dt);
+    let n = 0;
+    for (let k = 0; k < this.plumeCount; k++) {
+      const o = k * PLUME_STRIDE;
+      let x = p[o], y = p[o + 1];
+      w.drift.at(x, y, w.step, drift);
+      const flow = Math.hypot(drift[0], drift[1]);
+      const calm = p[o + 7] + (1 - Math.min(1, flow / sMax) - p[o + 7]) * calmRate;
+      const ride = p[o + 8];
+      let age = p[o + 4];
+      if (ride > 0) {
+        // За волной: по той же кривой, что и фронт, от жерла до своего радиуса.
+        age += dt;
+        const f = Math.min(1, age / ERUPTION_SHOCK_S);
+        const r0 = ride * (1 - (1 - (age - dt) / ERUPTION_SHOCK_S) ** 3);
+        const r1 = ride * (1 - (1 - f) ** 3);
+        const nx = x + Math.cos(p[o + 9]) * (r1 - Math.max(0, r0));
+        const ny = y + Math.sin(p[o + 9]) * (r1 - Math.max(0, r0));
+        if (isBlocked(w.partitions, nx, ny)) p[o + 8] = 0;
+        else { x = nx; y = ny; }
+        if (f >= 1) { p[o + 8] = 0; age = 0; }
+      } else {
+        age += dt * (1 + PLUME_SETTLE * calm);
+        if (age >= p[o + 5]) continue;
+        let dx = p[o + 2] * dt + drift[0] * steps;
+        let dy = p[o + 3] * dt + drift[1] * steps;
+        const hop = Math.hypot(dx, dy);
+        if (hop > maxHop) { dx *= maxHop / hop; dy *= maxHop / hop; }
+        if (!isBlocked(w.partitions, x + dx, y + dy) && !isBlocked(w.partitions, x + dx / 2, y + dy / 2)) { x += dx; y += dy; }
+        else { p[o + 2] = 0; p[o + 3] = 0; }
+      }
+      const t = n * PLUME_STRIDE;
+      p[t] = x; p[t + 1] = y;
+      p[t + 2] = p[o + 2] * drag; p[t + 3] = p[o + 3] * drag;
+      p[t + 4] = age; p[t + 5] = p[o + 5]; p[t + 6] = p[o + 6];
+      p[t + 7] = calm; p[t + 8] = p[o + 8]; p[t + 9] = p[o + 9];
+      p[t + 10] = flow > 0 ? Math.atan2(drift[1], drift[0]) : p[o + 10];
+      n++;
+    }
+    this.plumeCount = n;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, DISH_WIDTH, DISH_HEIGHT);
+    ctx.clip();
+    ctx.globalCompositeOperation = 'source-over';
+
+    // Клубы: светлое ядро в начале жизни, дальше — цвет минерала (в течении,
+    // вытягиваясь в шлейф) или цвет залежей (оседая в спокойной воде).
+    const light = puffSprite(ERUPTION_LIGHT);
+    const tint = puffSprite(MINERAL_COLOR);
+    const settled = puffSprite(DEPOSIT_COLOR);
+    const minSize = this.px(PLUME_MIN_CSS);
+    const view = this.view();
+    for (let k = 0; k < this.plumeCount; k++) {
+      const o = k * PLUME_STRIDE;
+      const riding = p[o + 8] > 0;
+      const f = riding ? 0 : p[o + 4] / p[o + 5];
+      const calm = p[o + 7];
+      // За волной клуб растёт от точки до начального размера.
+      const grow = riding
+        ? PLUME_SIZE[0] * Math.min(1, 0.3 + p[o + 4] / ERUPTION_SHOCK_S)
+        : PLUME_SIZE[0] + (PLUME_SIZE[1] - PLUME_SIZE[0]) * Math.sqrt(f);
+      const size = Math.max(minSize, p[o + 6] * grow * (1 - 0.5 * calm * f));
+      const alpha = PLUME_ALPHA * (riding ? Math.min(1, p[o + 4] * 10) : (1 - f) ** 1.5);
+      const young = riding ? 1 : Math.max(0, 1 - f * 2.5);
+      const stretch = 1 + PLUME_STRETCH * (1 - calm) * f;
+      ctx.setTransform(...view);
+      ctx.translate(p[o], p[o + 1]);
+      if (stretch > 1.05) { ctx.rotate(p[o + 10]); ctx.scale(stretch, 1 / Math.sqrt(stretch)); }
+      if (young > 0) {
+        ctx.globalAlpha = alpha * young;
+        ctx.drawImage(light, -size, -size, size * 2, size * 2);
+      }
+      if (young < 1) {
+        const settle = calm * f;
+        ctx.globalAlpha = alpha * (1 - young) * (1 - settle);
+        ctx.drawImage(tint, -size, -size, size * 2, size * 2);
+        ctx.globalAlpha = alpha * (1 - young) * settle * 1.5;
+        ctx.drawImage(settled, -size, -size, size * 2, size * 2);
+      }
+    }
+    ctx.setTransform(...view);
+
+    // Свечение жерла идущего извержения: пульсирует, ярче на пике выброса.
+    ctx.globalCompositeOperation = 'screen';
+    m.volcanoes.forEach((v) => {
+      if (v.stage !== 'erupting') return;
+      const scale = scaleOf(v);
+      const i = v.id;
+      const flicker = 0.8 + 0.12 * Math.sin(animTime * 11 + i * 1.7) + 0.08 * Math.sin(animTime * 23.3 + i);
+      const r = Math.max(this.px(VENT_GLOW_MIN_CSS), R * VENT_GLOW * scale) * (0.85 + 0.15 * flicker);
+      ctx.globalAlpha = Math.min(1, (0.3 + 0.7 * this.ventStrength(v)) * flicker);
+      ctx.drawImage(light, v.x - r, v.y - r, r * 2, r * 2);
+    });
+
+    // Вспышка и ударная волна начала извержения.
+    for (const s of this.shocks) {
+      const v = s;
+      const age = animTime - s.t;
+      if (age < ERUPTION_FLASH_S) {
+        const f = age / ERUPTION_FLASH_S;
+        const r = Math.max(this.px(VENT_GLOW_MIN_CSS * 2), R * 1.2 * s.scale) * (0.6 + 0.6 * f);
+        ctx.globalAlpha = (1 - f) ** 2;
+        ctx.drawImage(light, v.x - r, v.y - r, r * 2, r * 2);
+      }
+      if (age < ERUPTION_SHOCK_S) {
+        const f = age / ERUPTION_SHOCK_S;
+        const reach = s.radius;
+        ctx.globalAlpha = 0.8 * (1 - f) ** 2;
+        ctx.strokeStyle = rgb(ERUPTION_LIGHT);
+        ctx.lineWidth = this.px(1 + 3 * (1 - f));
         ctx.beginPath();
-        // Не меньше ERUPTION_RING_MIN_CSS на экране — чтобы было видно и на всей чашке.
-        ctx.arc(v.x, v.y, Math.max(ERUPTION_RADIUS, this.px(ERUPTION_RING_MIN_CSS)) * (0.15 + 0.85 * f), 0, Math.PI * 2);
+        ctx.arc(v.x, v.y, reach * (1 - (1 - f) ** 3), 0, Math.PI * 2);
         ctx.stroke();
       }
     }
-    // Дыхание спящих вулканов: когда давление недр близко к порогу, вокруг
-    // медленно пульсирует кольцо — ярче у сильных и ближе к извержению.
-    const pressure = m.depths / m.threshold;
-    if (pressure > BREATH_FROM) {
-      const near = smoothstep(BREATH_FROM, 1, pressure);
-      for (const v of m.volcanoes) {
-        if (v.active) continue;
-        const pulse = (Math.sin((animTime * 2 * Math.PI) / BREATH_PERIOD_S + v.x * 0.013) + 1) / 2;
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.globalAlpha = near * (0.35 + 0.65 * (v.power - 0.6) / 0.8) * (0.25 + 0.55 * (1 - pulse));
-        ctx.strokeStyle = rgb(MINERAL_COLOR);
-        ctx.lineWidth = this.px(1.5);
-        ctx.beginPath();
-        ctx.arc(v.x, v.y, this.px(9 + 12 * pulse), 0, Math.PI * 2);
-        ctx.stroke();
+    ctx.restore();
+  }
+
+  /**
+   * Жерла по стадиям — плоские мягкие пятна без резких краёв, крупнее у
+   * сильных вулканов:
+   * - зарождается — бледное пятно проступает из дна и густеет цветом недр по
+   *   мере созревания и роста давления; созревший слегка пульсирует;
+   * - извергается — светлое пятно (цвет «выходит» с полосы минерала);
+   * - спит — тусклое тёмное отверстие;
+   * - потух — сереет, сжимается и растворяется к исчезновению.
+   */
+  private drawVents(animTime: number): void {
+    const m = this.world.mineral;
+    const step = this.world.step;
+    const ctx = this.ctx;
+    const pressure = Math.max(0, Math.min(1, (m.depths / m.threshold - VOLCANO_BIRTH) / (1 - VOLCANO_BIRTH)));
+    ctx.globalCompositeOperation = 'source-over';
+    for (const v of m.volcanoes) {
+      const power = (v.power - VOLCANO_POWER[0]) / (VOLCANO_POWER[1] - VOLCANO_POWER[0]);
+      const r = Math.max(this.px(VENT_MIN_CSS[0] + (VENT_MIN_CSS[1] - VENT_MIN_CSS[0]) * power), VENT_SIZE[0] + (VENT_SIZE[1] - VENT_SIZE[0]) * power);
+      const phase = Math.max(0, Math.min(1, (step - v.stageAt) / Math.max(1, v.stageUntil - v.stageAt)));
+      const pulse = (Math.sin((animTime * 2 * Math.PI) / VENT_PULSE_S + v.id) + 1) / 2;
+      if (v.stage === 'preparing') {
+        // Новорождённый проступает из ничего, проснувшийся — из вида спящего.
+        const grown = v.fresh ? smoothstep(0, 1, phase) : 1;
+        const fill = grown * (0.35 + 0.65 * pressure);
+        const ready = phase >= 1 ? smoothstep(0.8, 1, pressure) : 0;
+        this.softSpot(v.x, v.y, r * (0.7 + 0.9 * fill) * (1 + 0.12 * ready * pulse), [
+          [0, BAR_DEPTHS, 0.95 * fill], [0.45, BAR_DEPTHS, 0.6 * fill], [1, BAR_DEPTHS, 0]]);
+        this.softSpot(v.x, v.y, r * 0.55 * grown, [[0, VENT_HOLE, 0.9 * grown], [0.7, VENT_HOLE, 0.6 * grown], [1, VENT_HOLE, 0]]);
+        if (ready > 0) this.softSpot(v.x, v.y, r * 1.6, [[0.4, MINERAL_COLOR, 0], [0.7, MINERAL_COLOR, 0.35 * ready * pulse], [1, MINERAL_COLOR, 0]]);
+      } else if (v.stage === 'erupting') {
+        this.softSpot(v.x, v.y, r * 1.6, [[0, BAR_OUT, 1], [0.45, BAR_OUT, 0.8], [0.75, MINERAL_COLOR, 0.35], [1, MINERAL_COLOR, 0]]);
+      } else if (v.stage === 'dormant') {
+        this.softSpot(v.x, v.y, r * 1.3, [[0, BAR_DEPTHS, 0.55], [1, BAR_DEPTHS, 0]]);
+        this.softSpot(v.x, v.y, r * 0.55, [[0, VENT_HOLE, 0.85], [0.7, VENT_HOLE, 0.5], [1, VENT_HOLE, 0]]);
+      } else {
+        const fade = 1 - phase;
+        const c = mix(VENT_HOLE, VENT_ASH, phase);
+        this.softSpot(v.x, v.y, r * (0.5 + 0.5 * fade), [[0, c, 0.8 * fade], [0.6, c, 0.45 * fade], [1, c, 0]]);
       }
     }
     ctx.globalAlpha = 1;
-    // Вулканы: тёмный кружок с фиолетовой каймой; извергающийся — светлый.
-    const r = this.px(5);
-    for (const v of m.volcanoes) {
-      ctx.beginPath();
-      ctx.arc(v.x, v.y, v.active ? r * 1.3 : r, 0, Math.PI * 2);
-      ctx.fillStyle = v.active ? ERUPTION_RING_COLOR : 'rgba(30, 18, 40, 0.9)';
-      ctx.fill();
-      ctx.lineWidth = this.px(2);
-      ctx.strokeStyle = rgb(MINERAL_COLOR);
-      ctx.stroke();
-    }
   }
+
+  /** Мягкое круглое пятно: стопы — (доля радиуса, цвет, непрозрачность). */
+  private softSpot(x: number, y: number, radius: number, stops: [number, Rgb, number][]): void {
+    if (radius <= 0) return;
+    const ctx = this.ctx;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, radius);
+    for (const [at, c, a] of stops) g.addColorStop(at, rgb(c, Math.max(0, Math.min(1, a))));
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /** Доля времени идущего извержения, 0…1 — плавно по шагам (темп в модели обновляется реже). */
+  private eruptionPhase(v: Volcano): number {
+    return Math.min(1, Math.max(0, (this.world.step - v.begin) / Math.max(1, v.until - v.begin)));
+  }
+
+  /** Сила выброса сейчас относительно начала извержения, 0…1 — как в модели: темп ∝ (1 − u)². */
+  private ventStrength(v: Volcano): number {
+    return (1 - this.eruptionPhase(v)) ** 2;
+  }
+
+
+
+  /**
+   * Выпустить клуб из жерла: случайное направление; `reach` — размах (единиц
+   * мира); `ride` > 0 — клуб летит за ударной волной на такой радиус, иначе
+   * вырывается из жерла и тормозит.
+   */
+  private emitPlume(v: Volcano, reach: number, ride: number): void {
+    if (this.plumeCount >= PLUME_MAX) return;
+    const o = this.plumeCount++ * PLUME_STRIDE;
+    const a = Math.random() * Math.PI * 2;
+    const sp = ride > 0 ? 0 : reach * (PLUME_SPEED[0] + (PLUME_SPEED[1] - PLUME_SPEED[0]) * Math.random());
+    const p = this.plume;
+    p[o] = v.x + Math.cos(a) * reach * 0.05;
+    p[o + 1] = v.y + Math.sin(a) * reach * 0.05;
+    p[o + 2] = Math.cos(a) * sp;
+    p[o + 3] = Math.sin(a) * sp;
+    p[o + 4] = 0;
+    p[o + 5] = PLUME_LIFE[0] + (PLUME_LIFE[1] - PLUME_LIFE[0]) * Math.random();
+    p[o + 6] = reach * (0.7 + 0.6 * Math.random());
+    p[o + 7] = 0;
+    p[o + 8] = ride;
+    p[o + 9] = a;
+    p[o + 10] = a;
+  }
+
+
 
   /**
    * Блёстки кристаллов залежей: точки на плотных неглубоких залежах коротко

@@ -12,7 +12,10 @@
       /* Раскладка: слева управление, чашка и легенда; справа параметры нового мира. */
       .app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 320px; grid-template-rows: auto minmax(0, 1fr) auto; }
       #toolbar { grid-column: 1; grid-row: 1; }
-      .stage { grid-column: 1; grid-row: 2; position: relative; display: flex; align-items: center; justify-content: center; margin: 0 16px; min-height: 0; overflow: hidden; }
+      /* Поле: чашка в пропорциях чашки со стеной и сводка минерала сразу под ней, той же ширины. */
+      .field { grid-column: 1; grid-row: 2; margin: 0 16px; min-height: 0; container-type: size; display: flex; align-items: center; justify-content: center; }
+      .field-inner { --stats-h: 52px; width: min(100cqw, calc((100cqh - var(--stats-h)) * 1632 / 1232)); }
+      .stage { position: relative; width: 100%; aspect-ratio: 1632 / 1232; overflow: hidden; }
       #legend { grid-column: 1; grid-row: 3; }
       #params { grid-column: 2; grid-row: 1 / 4; }
       canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
@@ -23,8 +26,22 @@
       .light-drift { position: absolute; left: 10px; top: 10px; display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 4px; background: rgba(255, 255, 255, 0.85); border: 1px solid var(--border); border-radius: 14px; font-size: 11.5px; color: var(--muted); z-index: 1; user-select: none; }
       .light-drift svg { width: 20px; height: 20px; }
       .sun-rhythm { margin-left: 6px; padding-left: 8px; border-left: 1px solid var(--border); color: #a76d0d; font-variant-numeric: tabular-nums; }
-      .mineral-stats { position: absolute; left: 10px; top: 42px; padding: 3px 9px; background: rgba(255, 255, 255, 0.85); border: 1px solid var(--border); border-radius: 14px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; z-index: 1; user-select: none; }
       .mineral-stats b { color: #8a4fd0; font-weight: 600; }
+      /* Под чашкой: полоса минерала во всю ширину (недра, «в пути» — выходит извержением, залежи, среда; риска — порог давления недр), подписи второй строкой. */
+      .mineral-stats { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; user-select: none; }
+      .mineral-keys { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 14px; }
+      .mineral-keys .volcanoes { margin-left: auto; }
+      .mineral-bar { position: relative; display: block; width: 100%; height: 18px; background: #ece6f5; border: 1px solid #cbbde3; overflow: hidden; cursor: help; }
+      .mineral-bar i { position: absolute; top: 0; bottom: 0; transition: left 0.25s linear, width 0.25s linear; }
+      .mineral-stats .depths { background: #3d2a5c; }
+      .mineral-stats .out { background: #e2c8ff; animation: mineral-out 0.8s ease-in-out infinite alternate; }
+      .mineral-stats .medium { background: #b783f5; }
+      /* Залежи — с фактурой: косая штриховка и светлые крупинки, как кристаллы на дне. */
+      .mineral-stats .deposits { background-color: #6a3fa6; background-image: radial-gradient(circle at 2px 2px, rgba(255, 240, 255, 0.85) 0.9px, transparent 1.4px), repeating-linear-gradient(135deg, rgba(30, 10, 60, 0.45) 0 2px, transparent 2px 5px); background-size: 6px 6px, auto; }
+      .mineral-bar .threshold { width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 0 1px #d23c7a; }
+      @keyframes mineral-out { from { opacity: 1; } to { opacity: 0.45; } }
+      .key { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+      .key i { display: inline-block; width: 12px; height: 12px; }
       .light-drift circle { fill: #fff; stroke: var(--border); }
       .light-drift path { fill: none; stroke: #c98a1c; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
@@ -86,7 +103,7 @@
       /* Узкий экран: параметры — выдвижная панель по кнопке. */
       @media (max-width: 900px) {
         .app { grid-template-columns: minmax(0, 1fr); }
-        .stage { margin: 0 8px; }
+        .field { margin: 0 8px; }
         #toolbar, #legend { padding-left: 8px; padding-right: 8px; }
         #params { position: fixed; top: 0; right: 0; bottom: 0; width: min(340px, 90vw); z-index: 10; transform: translateX(100%); transition: transform 0.2s; visibility: hidden; }
         .app.params-open #params { transform: none; visibility: visible; box-shadow: -8px 0 24px rgba(31, 35, 40, 0.2); }
@@ -99,13 +116,15 @@
   <body>
     <div class="app">
       <header id="toolbar"></header>
+      <div class="field"><div class="field-inner">
       <div class="stage">
         <canvas id="world"></canvas>
         <div class="tip" hidden></div>
         <div class="light-drift" title="Куда сдвигается карта света. Сдвиг очень медленный — заметен на ускорении."><svg viewBox="-12 -12 24 24"><circle r="11" /><path d="M -6 0 H 6 M 2 -4 L 6 0 L 2 4" /></svg><span>дрейф света</span><span class="sun-rhythm" title="Ритм солнца: множитель силы солнца сейчас и куда он идёт. Ярче — больше энергии и сильнее течения."></span></div>
-        <div class="mineral-stats" title="Где сейчас минерал мира. Сумма постоянна."></div>
         <canvas class="minimap" hidden title="Вся чашка. Клик — перейти сюда"></canvas>
       </div>
+      <div class="mineral-stats" title="Где сейчас минерал мира. Сумма постоянна."></div>
+      </div></div>
       <footer id="legend"></footer>
       <aside id="params"></aside>
       <div id="scrim"></div>

@@ -12,10 +12,10 @@
  * назначения; в перегородки не попадает.
  */
 import {
-  DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_SHARE,
-  MAX_ACTIVE_ERUPTIONS, MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_LAYER, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
+  DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_SHRINK,
+  MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_LAYER, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
   DEPOSIT_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
-  VOLCANO_MIN_GAP, VOLCANO_POWER,
+  VOLCANO_MIN_GAP, VOLCANO_POWER, VOLCANO_BIRTH, VOLCANO_MATURE, VOLCANO_EXTINCT_CHANCE, VOLCANO_WAKE_CHANCE, VOLCANO_DORMANT_LIFE, VOLCANO_FADE, VOLCANO_DEPOSIT_AVOID,
 } from './constants.ts';
 import type { Drift } from './drift.ts';
 import { sunAt, type LightMap } from './light.ts';
@@ -24,26 +24,59 @@ import type { WorldParams } from './params.ts';
 import { freeRegions, isBlocked, type PartitionLayout } from './partitions.ts';
 import { Rng, deriveSeed, hash3 } from './prng.ts';
 
+/**
+ * Стадия вулкана: готовится к выбросу (родился или проснулся), извергается,
+ * спит (может проснуться снова), потух (тускнеет и исчезает).
+ */
+export type VolcanoStage = 'preparing' | 'erupting' | 'dormant' | 'extinct';
+export const VOLCANO_STAGES: readonly VolcanoStage[] = ['preparing', 'erupting', 'dormant', 'extinct'];
+
 export interface Volcano {
+  /** Номер рождения — постоянный, чтобы показ узнавал вулкан. */
+  readonly id: number;
   readonly x: number;
   readonly y: number;
-  /** Отсек (связная свободная часть чашки), в котором стоит вулкан. */
-  readonly region: number;
-  /** Мощность — постоянная, из сида: множитель доли выброса. */
+  /** Мощность — случайная при рождении: множитель доли выброса. */
   readonly power: number;
-  /** Клетки круга выброса (в своём отсеке) и их доли; сумма долей — 1. */
-  readonly cells: Int32Array;
-  readonly weights: Float64Array;
+  stage: VolcanoStage;
+  /**
+   * С какого шага идёт стадия и до какого: подготовка — до созревания,
+   * сон — до потухания, потух — до исчезновения; у извержения — begin/until.
+   */
+  stageAt: number;
+  stageUntil: number;
+  /** Готовится впервые (только родился), а не проснулся. */
+  fresh: boolean;
+  /** Радиус выброса идущего (или последнего) извержения; клетки круга выброса и их расстояния до вулкана. */
+  radius: number;
+  cells: Int32Array;
+  dists: Float64Array;
   /** Сколько раз извергался (включая идущее). */
   k: number;
-  /** Идёт ли извержение; с какого и до какого шага; сколько выбросит всего и сколько ещё осталось. */
-  active: boolean;
+  /** Идущее извержение: с какого и до какого шага; сколько выбросит всего и сколько ещё осталось. */
   begin: number;
   until: number;
   total: number;
   left: number;
   /** Выброс за шаг сейчас — для показа. */
   rate: number;
+}
+
+/** Числа вулкана — для файла мира и контрольной суммы (без клеток круга — они выводятся). */
+export function volcanoNumbers(v: Volcano): number[] {
+  return [v.id, v.x, v.y, v.power, VOLCANO_STAGES.indexOf(v.stage), v.stageAt, v.stageUntil, v.fresh ? 1 : 0, v.k, v.begin, v.until, v.total, v.left, v.rate];
+}
+
+/** Вулкан из чисел volcanoNumbers; null — числа негодные. */
+export function volcanoFromNumbers(m: MineralState, params: WorldParams, n: unknown): Volcano | null {
+  if (!Array.isArray(n) || n.length !== 14 || !n.every((x) => typeof x === 'number' && Number.isFinite(x))) return null;
+  const [id, x, y, power, stage, stageAt, stageUntil, fresh, k, begin, until, total, left, rate] = n as number[];
+  if (!Number.isSafeInteger(id) || !Number.isInteger(stage) || stage < 0 || stage > 3 || (fresh !== 0 && fresh !== 1) || !Number.isSafeInteger(k)) return null;
+  if (x < 0 || y < 0 || x > DISH_WIDTH || y > DISH_HEIGHT || power <= 0 || total < 0 || left < 0) return null;
+  const v: Volcano = { id, x, y, power, stage: VOLCANO_STAGES[stage], stageAt, stageUntil, fresh: fresh === 1, radius: 0, cells: new Int32Array(0), dists: new Float64Array(0), k, begin, until, total, left, rate };
+  // Круг выброса не хранится — выводится из объёма идущего извержения.
+  if (v.stage === 'erupting') aimEruption(m, v, eruptionRadius(m, params, v.total));
+  return v;
 }
 
 export interface MineralState {
@@ -59,7 +92,9 @@ export interface MineralState {
   eruptions: number;
   /** Идёт стартовая серия извержений: с сотворения, пока давление недр впервые не упадёт ниже порога. */
   genesis: boolean;
-  readonly volcanoes: readonly Volcano[];
+  /** Живые вулканы (и потухшие, пока не исчезли); сколько раз выбирали следующий вулкан — счётчик случайности. */
+  volcanoes: Volcano[];
+  births: number;
   /** Растёт при каждом обновлении — чтобы показ знал, что пора перерисовать. */
   version: number;
   /** Неизменное: занятые клетки и отсек клетки (-1 — занята). */
@@ -117,41 +152,8 @@ export function createMineral(params: WorldParams, partitions: PartitionLayout):
   // минерал приходит в среду только извержениями.
   const field = new Float64Array(n);
 
-  const volcanoes = placeVolcanoes(params, blocked, region);
   const threshold = total * ERUPTION_PRESSURE * (0.5 + hash3(deriveSeed(params.seed, 'eruptions'), -1, 4) / 4294967296);
-  return { cols: COLS, rows: ROWS, cell, field, depths: total, threshold, eruptions: 0, genesis: true, volcanoes, version: 0, blocked, nearWall: nearWalls(blocked), region, freeArea };
-}
-
-/** Вулканы: хотя бы один в каждом отсеке, остальные — где угодно; не теснее VOLCANO_MIN_GAP, если есть место. */
-function placeVolcanoes(params: WorldParams, blocked: Uint8Array, region: Int32Array): Volcano[] {
-  const rng = new Rng(deriveSeed(params.seed, 'volcanoes'));
-  const regions = Math.max(0, ...region) + 1;
-  const count = Math.max(params.volcanoCount, regions);
-  const out: Volcano[] = [];
-  const tooClose = (x: number, y: number) => out.some((v) => Math.hypot(v.x - x, v.y - y) < VOLCANO_MIN_GAP);
-  const pick = (want: number | null): [number, number, number] => {
-    let fallback: [number, number, number] | null = null;
-    for (let tries = 0; tries < 5000; tries++) {
-      const k = rng.int(COLS * ROWS);
-      if (blocked[k] || (want !== null && region[k] !== want)) continue;
-      const i = k % COLS, j = (k - i) / COLS;
-      const x = (i + 0.5) * MINERAL_CELL, y = (j + 0.5) * MINERAL_CELL;
-      fallback ??= [x, y, region[k]];
-      if (!tooClose(x, y)) return [x, y, region[k]];
-    }
-    if (fallback) return fallback;
-    // Отсек слишком мал для случайной выборки — берём первую его клетку.
-    const k = region.findIndex((r) => want === null || r === want);
-    const i = k % COLS, j = (k - i) / COLS;
-    return [(i + 0.5) * MINERAL_CELL, (j + 0.5) * MINERAL_CELL, region[k]];
-  };
-  for (let v = 0; v < count; v++) {
-    const [x, y, r] = pick(v < regions ? v : null);
-    const power = VOLCANO_POWER[0] + (VOLCANO_POWER[1] - VOLCANO_POWER[0]) * rng.next();
-    const { cells, weights } = ventCells(x, y, r, blocked, region);
-    out.push({ x, y, region: r, power, cells, weights, k: 0, active: false, begin: 0, until: 0, total: 0, left: 0, rate: 0 });
-  }
-  return out;
+  return { cols: COLS, rows: ROWS, cell, field, depths: total, threshold, eruptions: 0, genesis: true, volcanoes: [], births: 0, version: 0, blocked, nearWall: nearWalls(blocked), region, freeArea };
 }
 
 /**
@@ -293,45 +295,39 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
   // топит залежи в недра.
   m.depths += moveGround(terrain, params, m.depths, step - P, step, cols, rows, cell, blocked);
 
-  // 3. Извержения — от давления недр: идущее выбрасывает свою долю (разгорается
-  // и затихает); когда недр накопилось больше порога и никто не извергается,
-  // начинается новое — тем сильнее и дольше, чем больше накопилось.
+  // 3. Вулканы и извержения — от давления недр. Когда давление доходит до
+  // доли порога и никто не готовится и не извергается, следующий вулкан
+  // начинает готовиться: просыпается спящий или рождается новый. Созревший
+  // извергается, как только давление дошло до порога, — тем сильнее и дольше,
+  // чем больше накопилось; начинается с начала промежутка, поэтому первый
+  // выброс выходит сразу. Извержение выбрасывает больше всего в начале, дальше
+  // всё меньше и всё ближе к вулкану. После — случай: потух или уснул.
   const timing = deriveSeed(params.seed, 'eruptions');
-  for (const vol of m.volcanoes) {
-    if (!vol.active) continue;
-    const d = vol.until - vol.begin;
-    const due = vol.total * (eruptionProfile((step - vol.begin) / d) - eruptionProfile((step - P - vol.begin) / d));
-    const out = step >= vol.until ? vol.left : Math.min(vol.left, Math.max(0, due));
-    release(m, vol, out);
-    vol.left -= out;
-    vol.rate = out / P;
-    if (step >= vol.until) {
-      vol.active = false;
-      vol.left = 0;
-      vol.rate = 0;
-    }
-  }
   if (m.depths < m.threshold) m.genesis = false;
-  if (m.depths >= m.threshold && m.volcanoes.filter((v) => v.active).length < MAX_ACTIVE_ERUPTIONS) {
+  for (const v of m.volcanoes) if (v.stage === 'dormant' && step >= v.stageUntil) extinguish(v, params, step);
+  m.volcanoes = m.volcanoes.filter((v) => !(v.stage === 'extinct' && step >= v.stageUntil));
+  if (m.depths >= VOLCANO_BIRTH * m.threshold && !m.volcanoes.some((v) => v.stage === 'preparing' || v.stage === 'erupting')) {
+    prepareVolcano(m, params, terrain, step);
+  }
+  const ready = m.volcanoes.find((v) => v.stage === 'preparing' && step >= v.stageUntil);
+  if (ready && m.depths >= m.threshold) {
     const n = m.eruptions;
     const u = (k: number) => hash3(timing, n, k) / 4294967296;
-    // Какой вулкан — случай, сильные чаще.
-    const powers = m.volcanoes.map((v) => (v.active ? 0 : v.power));
-    let pick = u(1) * powers.reduce((a, b) => a + b, 0);
-    let index = powers.findIndex((pw) => (pick -= pw) < 0);
-    if (index < 0) index = powers.findIndex((pw) => pw > 0);
-    const vol = m.volcanoes[index];
+    const vol = ready;
     const logSpan = (r: readonly [number, number], t: number) => r[0] * (r[1] / r[0]) ** t;
     const stock = params.mineralStock * m.freeArea;
     // Доля недр, но не больше предела: при полных недрах выходит серия извержений, а не одно.
     const amount = Math.min(ERUPTION_MAX * stock, m.depths * Math.min(0.95, logSpan(ERUPTION_SHARE, u(2)) * vol.power));
     // В стартовой серии извержения идут в GENESIS_SPEEDUP раз быстрее.
-    const duration = Math.round(Math.min(ERUPTION_DURATION[1], Math.max(ERUPTION_DURATION[0],
-      ERUPTION_DURATION_SCALE * Math.sqrt(amount / stock) * (0.6 + u(3)))) / (m.genesis ? GENESIS_SPEEDUP : 1));
+    const duration = Math.max(1, Math.round(Math.min(ERUPTION_DURATION[1], Math.max(ERUPTION_DURATION[0],
+      ERUPTION_DURATION_SCALE * Math.sqrt(amount / stock) * (0.6 + u(3)))) / (m.genesis ? GENESIS_SPEEDUP : 1)));
     m.depths -= amount;
-    vol.active = true;
-    vol.begin = step;
-    vol.until = step + duration;
+    aimEruption(m, vol, eruptionRadius(m, params, amount));
+    vol.stage = 'erupting';
+    vol.begin = Math.max(step - P, vol.stageUntil);
+    vol.until = vol.begin + duration;
+    vol.stageAt = vol.begin;
+    vol.stageUntil = vol.until;
     vol.total = amount;
     vol.left = amount;
     vol.rate = 0;
@@ -339,6 +335,28 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     m.eruptions++;
     // Следующий порог — случайно вокруг среднего.
     m.threshold = stock * ERUPTION_PRESSURE * (0.5 + u(4));
+  }
+  for (const vol of m.volcanoes) {
+    if (vol.stage !== 'erupting') continue;
+    const d = vol.until - vol.begin;
+    const u0 = (step - P - vol.begin) / d, u1 = (step - vol.begin) / d;
+    const due = vol.total * (eruptionProfile(u1) - eruptionProfile(u0));
+    const out = step >= vol.until ? vol.left : Math.min(vol.left, Math.max(0, due));
+    release(m, vol, out, eruptionReach(Math.min(1, Math.max(0, (u0 + u1) / 2))));
+    vol.left -= out;
+    vol.rate = out / P;
+    if (step >= vol.until) {
+      vol.left = 0;
+      vol.rate = 0;
+      // Потух или уснул — случай.
+      const fate = (k: number) => hash3(deriveSeed(params.seed, 'volcano-fate'), vol.id * 1000 + vol.k, k) / 4294967296;
+      if (fate(1) < VOLCANO_EXTINCT_CHANCE) extinguish(vol, params, step);
+      else {
+        vol.stage = 'dormant';
+        vol.stageAt = step;
+        vol.stageUntil = step + Math.round(lerp(VOLCANO_DORMANT_LIFE, fate(2)));
+      }
+    }
   }
   m.version++;
 }
@@ -378,43 +396,136 @@ function runoff(field: Float64Array, ground: Float64Array, deposits: Float64Arra
   return out;
 }
 
-/** Доля извержения, вышедшая к доле его времени u ∈ [0, 1]: профиль sin² — плавный подъём и спад. */
-function eruptionProfile(u: number): number {
-  const t = Math.min(1, Math.max(0, u));
-  return t - Math.sin(2 * Math.PI * t) / (2 * Math.PI);
+const lerp = (r: readonly [number, number], t: number) => r[0] + (r[1] - r[0]) * t;
+
+/** Вулкан потух: тускнеет и через случайный срок исчезает. */
+function extinguish(v: Volcano, params: WorldParams, step: number): void {
+  v.stage = 'extinct';
+  v.stageAt = step;
+  v.stageUntil = step + Math.round(lerp(VOLCANO_FADE, hash3(deriveSeed(params.seed, 'volcano-fade'), v.id, v.k) / 4294967296));
 }
 
-/** Круг выброса вокруг вулкана — только в своём отсеке; гуще у вулкана. */
-function ventCells(x: number, y: number, region: number, blocked: Uint8Array, regions: Int32Array): { cells: Int32Array; weights: Float64Array } {
-  const r = ERUPTION_RADIUS;
+/**
+ * Следующий вулкан начинает готовиться: с шансом VOLCANO_WAKE_CHANCE
+ * просыпается спящий (сильные чаще), иначе рождается новый — в случайном
+ * месте, но подальше от залежей: чем гуще залежи, тем реже.
+ */
+function prepareVolcano(m: MineralState, params: WorldParams, terrain: TerrainState, step: number): void {
+  const n = m.births++;
+  const seed = deriveSeed(params.seed, 'volcano-births');
+  const u = (k: number) => hash3(seed, n, k) / 4294967296;
+  const mature = Math.max(1, Math.round(VOLCANO_MATURE / (m.genesis ? GENESIS_SPEEDUP : 1)));
+  const sleeping = m.volcanoes.filter((v) => v.stage === 'dormant');
+  if (sleeping.length > 0 && u(1) < VOLCANO_WAKE_CHANCE) {
+    let pick = u(2) * sleeping.reduce((a, v) => a + v.power, 0);
+    const v = sleeping.find((s) => (pick -= s.power) < 0) ?? sleeping[sleeping.length - 1];
+    v.stage = 'preparing';
+    v.stageAt = step;
+    v.stageUntil = step + mature;
+    v.fresh = false;
+    return;
+  }
+  const rng = new Rng(hash3(seed, n, 3));
+  const area = m.cell * m.cell;
+  const perMean = area * params.mineralStock;
+  const living = m.volcanoes.filter((v) => v.stage !== 'extinct');
+  let spot = -1;
+  for (let tries = 0; tries < 4000 && spot < 0; tries++) {
+    const k = rng.int(m.cols * m.rows);
+    if (m.blocked[k]) continue;
+    const i = k % m.cols, j = (k - i) / m.cols;
+    const x = (i + 0.5) * m.cell, y = (j + 0.5) * m.cell;
+    // Не теснее VOLCANO_MIN_GAP к живым вулканам, пока есть из чего выбирать.
+    if (tries < 3000 && living.some((v) => Math.hypot(v.x - x, v.y - y) < VOLCANO_MIN_GAP)) continue;
+    if (rng.next() < Math.exp(-terrain.deposits[k] / perMean / VOLCANO_DEPOSIT_AVOID)) spot = k;
+  }
+  if (spot < 0) spot = m.blocked.indexOf(0);
+  const i = spot % m.cols, j = (spot - i) / m.cols;
+  m.volcanoes.push({
+    id: n, x: (i + 0.5) * m.cell, y: (j + 0.5) * m.cell, power: lerp(VOLCANO_POWER, u(4)),
+    stage: 'preparing', stageAt: step, stageUntil: step + mature, fresh: true,
+    radius: 0, cells: new Int32Array(0), dists: new Float64Array(0), k: 0, begin: 0, until: 0, total: 0, left: 0, rate: 0,
+  });
+}
+
+/**
+ * Доля извержения, вышедшая к доле его времени u ∈ [0, 1]: сильнее всего в
+ * самом начале, дальше всё слабее — темп ∝ (1 − u)².
+ */
+export function eruptionProfile(u: number): number {
+  const t = Math.min(1, Math.max(0, u));
+  return 1 - (1 - t) ** 3;
+}
+
+/** Докуда (доля радиуса выброса) ложится минерал, вышедший к доле времени u: сначала до края волны, к концу — у вулкана. */
+export function eruptionReach(u: number): number {
+  return 1 - ERUPTION_SHRINK * u;
+}
+
+/** Радиус выброса извержения объёма `total`: растёт как √ от доли предела. */
+export function eruptionRadius(m: MineralState, params: WorldParams, total: number): number {
+  const limit = ERUPTION_MAX * params.mineralStock * m.freeArea;
+  return ERUPTION_RADIUS * Math.max(ERUPTION_RADIUS_MIN, Math.sqrt(Math.min(1, total / Math.max(1e-12, limit))));
+}
+
+/** Нацелить извержение: круг выброса радиуса `radius` вокруг вулкана. */
+export function aimEruption(m: MineralState, vol: Volcano, radius: number): void {
+  const { cells, dists } = ventCells(vol.x, vol.y, radius, m.blocked);
+  vol.radius = radius;
+  vol.cells = cells;
+  vol.dists = dists;
+}
+
+/**
+ * Круг выброса: клетки, до которых волна доходит по прямой от вулкана (за
+ * перегородки и стенки не попадает), и их расстояния до вулкана.
+ */
+function ventCells(x: number, y: number, r: number, blocked: Uint8Array): { cells: Int32Array; dists: Float64Array } {
   const cells: number[] = [];
-  const weights: number[] = [];
-  let wsum = 0;
+  const dists: number[] = [];
   const i0 = Math.max(0, Math.floor((x - r) / MINERAL_CELL)), i1 = Math.min(COLS - 1, Math.floor((x + r) / MINERAL_CELL));
   const j0 = Math.max(0, Math.floor((y - r) / MINERAL_CELL)), j1 = Math.min(ROWS - 1, Math.floor((y + r) / MINERAL_CELL));
   for (let j = j0; j <= j1; j++) {
     for (let i = i0; i <= i1; i++) {
       const k = j * COLS + i;
-      if (blocked[k] || regions[k] !== region) continue;
-      const d = Math.hypot((i + 0.5) * MINERAL_CELL - x, (j + 0.5) * MINERAL_CELL - y);
-      if (d > r) continue;
-      const w = 1 - (d / r) ** 2;
+      if (blocked[k]) continue;
+      const cx = (i + 0.5) * MINERAL_CELL, cy = (j + 0.5) * MINERAL_CELL;
+      const d = Math.hypot(cx - x, cy - y);
+      if (d >= r) continue;
+      // Путь от вулкана по прямой — шагами в полклетки, без преград.
+      const probes = Math.ceil(d / (MINERAL_CELL * 0.5));
+      let open = true;
+      for (let p = 1; p < probes && open; p++) {
+        const t = p / probes;
+        const pi = Math.floor((x + (cx - x) * t) / MINERAL_CELL), pj = Math.floor((y + (cy - y) * t) / MINERAL_CELL);
+        if (blocked[pj * COLS + pi]) open = false;
+      }
+      if (!open) continue;
       cells.push(k);
-      weights.push(w);
-      wsum += w;
+      dists.push(d);
     }
   }
-  return { cells: Int32Array.from(cells), weights: Float64Array.from(weights, (w) => w / wsum) };
+  return { cells: Int32Array.from(cells), dists: Float64Array.from(dists) };
 }
 
-/** Выбросить `amount` минерала в круг вулкана. */
-function release(m: MineralState, vol: Volcano, amount: number): void {
-  for (let n = 0; n < vol.cells.length; n++) m.field[vol.cells[n]] += amount * vol.weights[n];
+/**
+ * Выбросить `amount` минерала в круг доли `reach` радиуса выброса: внутри
+ * круга гуще у вулкана — доля клетки 1 − (d/r)². Клетка вулкана всегда в круге.
+ */
+function release(m: MineralState, vol: Volcano, amount: number, reach: number): void {
+  if (amount <= 0) return;
+  const r = Math.max(MINERAL_CELL, vol.radius * reach);
+  let sum = 0;
+  for (let n = 0; n < vol.dists.length; n++) { const q = vol.dists[n] / r; if (q < 1) sum += 1 - q * q; }
+  for (let n = 0; n < vol.cells.length; n++) {
+    const q = vol.dists[n] / r;
+    if (q < 1) m.field[vol.cells[n]] += (amount * (1 - q * q)) / sum;
+  }
 }
 
 /** Минерал, взятый из недр идущими извержениями, но ещё не вышедший, — «в пути»; входит в общий запас. */
 export function mineralInEruptions(m: MineralState): number {
-  return m.volcanoes.reduce((a, v) => a + (v.active ? v.left : 0), 0);
+  return m.volcanoes.reduce((a, v) => a + (v.stage === 'erupting' ? v.left : 0), 0);
 }
 
 /** Растворённый минерал в среде — всего. */

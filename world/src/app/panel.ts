@@ -35,7 +35,7 @@ export const SPEED_KEYS = SPEEDS.map((_, i) => String(i + 1));
 
 const OPEN_GROUPS_KEY = 'ecobugs.params.open';
 
-type NumberKey = 'sun' | 'lightDrift' | 'sunRhythm' | 'sunPeriod' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'baseViscosity' | 'viscosityZoneSize' | 'driftStrength' | 'driftLength' | 'terrainSpeed' | 'quakeInterval' | 'mineralStock' | 'volcanoCount';
+type NumberKey = 'sun' | 'lightDrift' | 'sunRhythm' | 'sunPeriod' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'baseViscosity' | 'viscosityZoneSize' | 'driftStrength' | 'driftLength' | 'terrainSpeed' | 'quakeInterval' | 'mineralStock';
 
 interface SliderSpec {
   key: NumberKey;
@@ -91,8 +91,7 @@ const GROUPS: readonly { title: string; sliders: readonly SliderSpec[] }[] = [
   {
     title: 'Минерал',
     sliders: [
-      { key: 'mineralStock', label: 'Запас минерала', hint: 'Общее количество минерала в мире (в среднем на единицу площади чашки). Оно постоянно: минерал переходит между средой, телами, останками и недрами.', min: 0.2, max: 5, step: 0.1 },
-      { key: 'volcanoCount', label: 'Число вулканов', hint: 'Сколько вулканов в чашке; в каждом отсеке хотя бы один, поэтому на деле их не меньше числа отсеков. Когда извергаться, решают недра: извержение начинается, когда в них накопится достаточно минерала, — а это зависит от течений, света и местности.', min: 1, max: 20, step: 1 },
+      { key: 'mineralStock', label: 'Запас минерала', hint: 'Общее количество минерала в мире (в среднем на единицу площади чашки). Оно постоянно: минерал переходит между средой, телами, останками, залежами и недрами. При сотворении весь он в недрах и выходит извержениями; вулканы рождаются, извергаются, засыпают и гаснут сами — когда и где, решают недра.', min: 0.2, max: 5, step: 0.1 },
     ],
   },
 ];

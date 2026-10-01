@@ -7,10 +7,11 @@
 import { makeParams, validateParams, type WorldParams } from './params.ts';
 import { applyTerrain, createWorld, worldHash, type World } from './world.ts';
 import { movement } from './terrain.ts';
+import { volcanoFromNumbers, volcanoNumbers } from './mineral.ts';
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 14;
+export const WORLD_FORMAT_VERSION = 15;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -27,6 +28,7 @@ const OLD_FORMATS: Record<number, string> = {
   11: 'тогда не было залежей и вулканы работали по расписанию',
   12: 'тогда течения пересчитывались вдвое чаще',
   13: 'тогда минерал при сотворении лежал в среде, а извержения не были ограничены',
+  14: 'тогда вулканы стояли на местах из сида, а извержение выбрасывало минерал в круг постоянного радиуса',
 };
 
 export interface MineralFile {
@@ -36,8 +38,9 @@ export interface MineralFile {
   eruptions: number;
   /** Идёт ли стартовая серия извержений (0/1). */
   genesis: number;
-  /** Для каждого вулкана: сколько раз извергался; идёт ли извержение (0/1), начало, конец, сколько выбросит всего, сколько осталось, выброс за шаг сейчас. */
-  volcanoes: [number, number, number, number, number, number, number][];
+  /** Сколько раз выбирали следующий вулкан; вулканы — числа volcanoNumbers (номер, место, мощность, стадия, её начало и конец, впервые ли готовится, извержений, идущее извержение). */
+  births: number;
+  volcanoes: number[][];
   /** Растворённый минерал по клеткам: Float64, little-endian, base64. */
   field: string;
 }
@@ -91,7 +94,8 @@ export function worldToFile(world: World, savedAt?: Date): WorldFile {
       threshold: world.mineral.threshold,
       eruptions: world.mineral.eruptions,
       genesis: world.mineral.genesis ? 1 : 0,
-      volcanoes: world.mineral.volcanoes.map((v) => [v.k, v.active ? 1 : 0, v.begin, v.until, v.total, v.left, v.rate]),
+      births: world.mineral.births,
+      volcanoes: world.mineral.volcanoes.map(volcanoNumbers),
       field: toBase64(new Uint8Array(world.mineral.field.buffer.slice(0))),
     },
     terrain: {
@@ -152,7 +156,6 @@ function readParams(raw: unknown, problems: string[]): WorldParams | null {
     driftStrength: raw.driftStrength as number,
     driftLength: raw.driftLength as number,
     mineralStock: raw.mineralStock as number,
-    volcanoCount: raw.volcanoCount as number,
     terrainSpeed: raw.terrainSpeed as number,
     quakeInterval: raw.quakeInterval as number,
   };
@@ -213,7 +216,8 @@ function restoreMineral(world: World, raw: unknown): string[] {
   if (!isObject(raw)) return ['Нет состояния минерала'];
   const m = world.mineral;
   if (typeof raw.depths !== 'number' || !Number.isFinite(raw.depths) || raw.depths < 0) return ['Минерал в недрах: ожидается неотрицательное число'];
-  if (!Array.isArray(raw.volcanoes) || raw.volcanoes.length !== m.volcanoes.length) return [`Вулканы: ожидается ${m.volcanoes.length}`];
+  if (!Array.isArray(raw.volcanoes)) return ['Нет вулканов'];
+  if (!Number.isSafeInteger(raw.births) || (raw.births as number) < 0) return ['Счётчик вулканов повреждён'];
   if (typeof raw.field !== 'string') return ['Нет поля минерала'];
   let bytes: Uint8Array;
   try {
@@ -223,16 +227,14 @@ function restoreMineral(world: World, raw: unknown): string[] {
   }
   if (bytes.length !== m.field.length * 8) return ['Поле минерала другого размера'];
   const field = new Float64Array(bytes.buffer, bytes.byteOffset, m.field.length).slice();
+  const volcanoes = [];
   for (const [i, entry] of (raw.volcanoes as unknown[]).entries()) {
-    if (!Array.isArray(entry) || entry.length !== 7 || !entry.every((x) => typeof x === 'number' && Number.isFinite(x) && x >= 0)
-      || ![0, 2, 3].every((n) => Number.isSafeInteger(entry[n])) || (entry[1] !== 0 && entry[1] !== 1)) {
-      return [`Вулкан ${i + 1}: ожидаются семь неотрицательных чисел`];
-    }
-    const v = m.volcanoes[i];
-    v.k = entry[0] as number;
-    v.active = entry[1] === 1;
-    [v.begin, v.until, v.total, v.left, v.rate] = entry.slice(2) as number[];
+    const v = volcanoFromNumbers(m, world.params, entry);
+    if (!v) return [`Вулкан ${i + 1}: ожидаются 14 чисел (номер, место, мощность, стадия…)`];
+    volcanoes.push(v);
   }
+  m.volcanoes = volcanoes;
+  m.births = raw.births as number;
   m.field = field;
   m.depths = raw.depths;
   if (typeof raw.threshold !== 'number' || !(raw.threshold > 0) || !Number.isSafeInteger(raw.eruptions) || (raw.genesis !== 0 && raw.genesis !== 1)) return ['Давление недр повреждено'];
