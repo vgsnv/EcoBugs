@@ -12,7 +12,7 @@
  * назначения; в перегородки не попадает.
  */
 import {
-  DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_SHRINK,
+  DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_SHRINK, ERUPTION_BURST, ERUPTION_FRONT, ERUPTION_PUSH, MINERAL_SPREAD,
   MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_LAYER, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
   DEPOSIT_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
   VOLCANO_MIN_GAP, VOLCANO_POWER, VOLCANO_BIRTH, VOLCANO_MATURE, VOLCANO_EXTINCT_CHANCE, VOLCANO_WAKE_CHANCE, VOLCANO_DORMANT_LIFE, VOLCANO_FADE, VOLCANO_DEPOSIT_AVOID,
@@ -23,6 +23,7 @@ import { moveGround, type TerrainState } from './terrain.ts';
 import type { WorldParams } from './params.ts';
 import { freeRegions, isBlocked, type PartitionLayout } from './partitions.ts';
 import { Rng, deriveSeed, hash3 } from './prng.ts';
+import { multiplierForLevel } from './viscosity.ts';
 
 /**
  * Стадия вулкана: готовится к выбросу (родился или проснулся), извергается,
@@ -47,10 +48,8 @@ export interface Volcano {
   stageUntil: number;
   /** Готовится впервые (только родился), а не проснулся. */
   fresh: boolean;
-  /** Радиус выброса идущего (или последнего) извержения; клетки круга выброса и их расстояния до вулкана. */
+  /** Радиус выброса идущего (или последнего) извержения — в «вязком» расстоянии (см. viscousDistances). */
   radius: number;
-  cells: Int32Array;
-  dists: Float64Array;
   /** Сколько раз извергался (включая идущее). */
   k: number;
   /** Идущее извержение: с какого и до какого шага; сколько выбросит всего и сколько ещё осталось. */
@@ -73,9 +72,9 @@ export function volcanoFromNumbers(m: MineralState, params: WorldParams, n: unkn
   const [id, x, y, power, stage, stageAt, stageUntil, fresh, k, begin, until, total, left, rate] = n as number[];
   if (!Number.isSafeInteger(id) || !Number.isInteger(stage) || stage < 0 || stage > 3 || (fresh !== 0 && fresh !== 1) || !Number.isSafeInteger(k)) return null;
   if (x < 0 || y < 0 || x > DISH_WIDTH || y > DISH_HEIGHT || power <= 0 || total < 0 || left < 0) return null;
-  const v: Volcano = { id, x, y, power, stage: VOLCANO_STAGES[stage], stageAt, stageUntil, fresh: fresh === 1, radius: 0, cells: new Int32Array(0), dists: new Float64Array(0), k, begin, until, total, left, rate };
-  // Круг выброса не хранится — выводится из объёма идущего извержения.
-  if (v.stage === 'erupting') aimEruption(m, v, eruptionRadius(m, params, v.total));
+  const v: Volcano = { id, x, y, power, stage: VOLCANO_STAGES[stage], stageAt, stageUntil, fresh: fresh === 1, radius: 0, k, begin, until, total, left, rate };
+  // Радиус выброса не хранится — выводится из объёма идущего извержения.
+  if (v.stage === 'erupting') v.radius = eruptionRadius(m, params, v.total);
   return v;
 }
 
@@ -224,6 +223,9 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     }
   }
 
+  // 1б. Растекание: от густого к редкому, медленнее там, где вязкость выше.
+  spread(dst, terrain.applied, blocked, cols, rows, MINERAL_SPREAD);
+
   // 2. Местность и залежи.
   const sMax = params.driftStrength * sunAt(light, tMid);
   const settle = (1 - (1 - MINERAL_SETTLE) ** P) * params.terrainSpeed;
@@ -322,7 +324,7 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     const duration = Math.max(1, Math.round(Math.min(ERUPTION_DURATION[1], Math.max(ERUPTION_DURATION[0],
       ERUPTION_DURATION_SCALE * Math.sqrt(amount / stock) * (0.6 + u(3)))) / (m.genesis ? GENESIS_SPEEDUP : 1)));
     m.depths -= amount;
-    aimEruption(m, vol, eruptionRadius(m, params, amount));
+    vol.radius = eruptionRadius(m, params, amount);
     vol.stage = 'erupting';
     vol.begin = Math.max(step - P, vol.stageUntil);
     vol.until = vol.begin + duration;
@@ -340,9 +342,19 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     if (vol.stage !== 'erupting') continue;
     const d = vol.until - vol.begin;
     const u0 = (step - P - vol.begin) / d, u1 = (step - vol.begin) / d;
+    // Выброс выходит в жерло, и давление выброса гонит массу наружу — до
+    // фронта (см. eruptionProfile, eruptionFront, push).
     const due = vol.total * (eruptionProfile(u1) - eruptionProfile(u0));
     const out = step >= vol.until ? vol.left : Math.min(vol.left, Math.max(0, due));
-    release(m, vol, out, eruptionReach(Math.min(1, Math.max(0, (u0 + u1) / 2))));
+    const field = viscousDistances(m, terrain, vol.x, vol.y, vol.radius);
+    m.field[field.cells[0]] += out;
+    // Дальность толчка — по вышедшему за обновление: залп за всё время
+    // доталкивает массу до фронта, хвост за всё извержение — ещё примерно на
+    // полрадиуса (в долгом извержении толчок за обновление мал).
+    const db = (burstProfile(u1) - burstProfile(u0)) / ERUPTION_BURST;
+    const dt = (tailProfile(u1) - tailProfile(u0)) / (1 - ERUPTION_BURST);
+    const limit = vol.radius * eruptionFront(Math.min(1, Math.max(0, u1)));
+    push(m, terrain, field, limit, (limit / m.cell / ERUPTION_PUSH) * (PUSH_BURST * db + PUSH_TAIL * dt));
     vol.left -= out;
     vol.rate = out / P;
     if (step >= vol.until) {
@@ -444,20 +456,43 @@ function prepareVolcano(m: MineralState, params: WorldParams, terrain: TerrainSt
   m.volcanoes.push({
     id: n, x: (i + 0.5) * m.cell, y: (j + 0.5) * m.cell, power: lerp(VOLCANO_POWER, u(4)),
     stage: 'preparing', stageAt: step, stageUntil: step + mature, fresh: true,
-    radius: 0, cells: new Int32Array(0), dists: new Float64Array(0), k: 0, begin: 0, until: 0, total: 0, left: 0, rate: 0,
+    radius: 0, k: 0, begin: 0, until: 0, total: 0, left: 0, rate: 0,
   });
 }
 
 /**
- * Доля извержения, вышедшая к доле его времени u ∈ [0, 1]: сильнее всего в
- * самом начале, дальше всё слабее — темп ∝ (1 − u)².
+ * Извержение — залп и хвост. Залп (доля ERUPTION_BURST) выходит, пока фронт
+ * выброса расходится от жерла (первые ERUPTION_FRONT времени), и ложится
+ * везде, куда фронт уже дошёл. Хвост выходит всё извержение, слабея (темп ∝
+ * 1 − u), и ложится всё ближе к жерлу — его течения тянут шлейфами.
  */
-export function eruptionProfile(u: number): number {
-  const t = Math.min(1, Math.max(0, u));
-  return 1 - (1 - t) ** 3;
+const ease = (t: number) => 1 - (1 - Math.min(1, Math.max(0, t))) ** 2;
+function burstProfile(u: number): number {
+  return ERUPTION_BURST * ease(u / ERUPTION_FRONT);
+}
+function tailProfile(u: number): number {
+  return (1 - ERUPTION_BURST) * ease(u);
 }
 
-/** Докуда (доля радиуса выброса) ложится минерал, вышедший к доле времени u: сначала до края волны, к концу — у вулкана. */
+/** Доля извержения, вышедшая к доле его времени u ∈ [0, 1]. */
+export function eruptionProfile(u: number): number {
+  return burstProfile(u) + tailProfile(u);
+}
+
+/** Темп выброса в доле времени u относительно начального, 0…1 — для показа. */
+export function eruptionRate(u: number): number {
+  const t = Math.min(1, Math.max(0, u));
+  const burst = t < ERUPTION_FRONT ? (ERUPTION_BURST * 2 * (1 - t / ERUPTION_FRONT)) / ERUPTION_FRONT : 0;
+  const tail = (1 - ERUPTION_BURST) * 2 * (1 - t);
+  return (burst + tail) / ((ERUPTION_BURST * 2) / ERUPTION_FRONT + (1 - ERUPTION_BURST) * 2);
+}
+
+/** Докуда (доля радиуса выброса) дошёл фронт к доле времени u: быстро, потом замедляясь. */
+export function eruptionFront(u: number): number {
+  return ease(u / ERUPTION_FRONT);
+}
+
+/** Докуда (доля радиуса выброса) ложится хвост, вышедший к доле времени u: сначала до края, к концу — у жерла. */
 export function eruptionReach(u: number): number {
   return 1 - ERUPTION_SHRINK * u;
 }
@@ -468,59 +503,161 @@ export function eruptionRadius(m: MineralState, params: WorldParams, total: numb
   return ERUPTION_RADIUS * Math.max(ERUPTION_RADIUS_MIN, Math.sqrt(Math.min(1, total / Math.max(1e-12, limit))));
 }
 
-/** Нацелить извержение: круг выброса радиуса `radius` вокруг вулкана. */
-export function aimEruption(m: MineralState, vol: Volcano, radius: number): void {
-  const { cells, dists } = ventCells(vol.x, vol.y, radius, m.blocked);
-  vol.radius = radius;
-  vol.cells = cells;
-  vol.dists = dists;
-}
-
 /**
- * Круг выброса: клетки, до которых волна доходит по прямой от вулкана (за
- * перегородки и стенки не попадает), и их расстояния до вулкана.
+ * «Вязкое» расстояние от точки по сетке минерала: путь по соседним клеткам,
+ * каждая клетка стоит тем дороже, чем выше её вязкость (вода ×1, отмель ×3,
+ * суша ×9); перегородки и стенки непроходимы — их можно только обойти.
+ * Клетки не дальше `limit` и их расстояния.
  */
-function ventCells(x: number, y: number, r: number, blocked: Uint8Array): { cells: Int32Array; dists: Float64Array } {
+export function viscousDistances(m: MineralState, terrain: TerrainState, x: number, y: number, limit: number): { cells: Int32Array; dists: Float64Array } {
+  const { cols, rows, cell, blocked } = m;
+  const start = Math.min(rows - 1, Math.floor(y / cell)) * cols + Math.min(cols - 1, Math.floor(x / cell));
+  const dist = new Map<number, number>([[start, 0]]);
+  const done = new Set<number>();
+  // Двоичная куча по расстоянию.
+  const heap: number[] = [start];
+  const key = (k: number) => dist.get(k)!;
+  const push = (k: number) => {
+    heap.push(k);
+    for (let i = heap.length - 1; i > 0;) {
+      const p = (i - 1) >> 1;
+      if (key(heap[p]) <= key(heap[i])) break;
+      [heap[p], heap[i]] = [heap[i], heap[p]];
+      i = p;
+    }
+  };
+  const pop = () => {
+    const top = heap[0];
+    const last = heap.pop()!;
+    if (heap.length > 0) {
+      heap[0] = last;
+      for (let i = 0; ;) {
+        const l = 2 * i + 1, r = l + 1;
+        let s = i;
+        if (l < heap.length && key(heap[l]) < key(heap[s])) s = l;
+        if (r < heap.length && key(heap[r]) < key(heap[s])) s = r;
+        if (s === i) break;
+        [heap[s], heap[i]] = [heap[i], heap[s]];
+        i = s;
+      }
+    }
+    return top;
+  };
+  const cost = (k: number) => multiplierForLevel(terrain.applied[k]);
   const cells: number[] = [];
   const dists: number[] = [];
-  const i0 = Math.max(0, Math.floor((x - r) / MINERAL_CELL)), i1 = Math.min(COLS - 1, Math.floor((x + r) / MINERAL_CELL));
-  const j0 = Math.max(0, Math.floor((y - r) / MINERAL_CELL)), j1 = Math.min(ROWS - 1, Math.floor((y + r) / MINERAL_CELL));
-  for (let j = j0; j <= j1; j++) {
-    for (let i = i0; i <= i1; i++) {
-      const k = j * COLS + i;
-      if (blocked[k]) continue;
-      const cx = (i + 0.5) * MINERAL_CELL, cy = (j + 0.5) * MINERAL_CELL;
-      const d = Math.hypot(cx - x, cy - y);
-      if (d >= r) continue;
-      // Путь от вулкана по прямой — шагами в полклетки, без преград.
-      const probes = Math.ceil(d / (MINERAL_CELL * 0.5));
-      let open = true;
-      for (let p = 1; p < probes && open; p++) {
-        const t = p / probes;
-        const pi = Math.floor((x + (cx - x) * t) / MINERAL_CELL), pj = Math.floor((y + (cy - y) * t) / MINERAL_CELL);
-        if (blocked[pj * COLS + pi]) open = false;
+  while (heap.length > 0) {
+    const k = pop();
+    if (done.has(k)) continue;
+    done.add(k);
+    const d = dist.get(k)!;
+    cells.push(k);
+    dists.push(d);
+    const i = k % cols, j = (k - i) / cols;
+    for (let dj = -1; dj <= 1; dj++) {
+      for (let di = -1; di <= 1; di++) {
+        if (di === 0 && dj === 0) continue;
+        const a = i + di, b = j + dj;
+        if (a < 0 || b < 0 || a >= cols || b >= rows) continue;
+        const n = b * cols + a;
+        if (blocked[n] || done.has(n)) continue;
+        // По диагонали — только если не срезаем угол преграды.
+        if (di !== 0 && dj !== 0 && (blocked[j * cols + a] || blocked[b * cols + i])) continue;
+        const nd = d + cell * Math.hypot(di, dj) * (cost(k) + cost(n)) / 2;
+        if (nd > limit) continue;
+        if (nd < (dist.get(n) ?? Infinity)) {
+          dist.set(n, nd);
+          push(n);
+        }
       }
-      if (!open) continue;
-      cells.push(k);
-      dists.push(d);
     }
   }
   return { cells: Int32Array.from(cells), dists: Float64Array.from(dists) };
 }
 
+/** Сколько проходов давления даёт весь залп и весь хвост — в долях «доталкивания до фронта». */
+const PUSH_BURST = 0.4;
+const PUSH_TAIL = 0.3;
+
 /**
- * Выбросить `amount` минерала в круг доли `reach` радиуса выброса: внутри
- * круга гуще у вулкана — доля клетки 1 − (d/r)². Клетка вулкана всегда в круге.
+ * Давление выброса гонит массу от жерла: несколько раз за обновление каждая
+ * клетка области отдаёт долю минерала соседям дальше от жерла (по «вязкому»
+ * расстоянию), но не дальше фронта `limit`. Доля тем меньше, чем выше
+ * вязкость клетки; `passes` — сколько проходов (дробная часть — неполный проход).
+ * Толкается весь минерал на пути, не только вышедший. Количество сохраняется.
  */
-function release(m: MineralState, vol: Volcano, amount: number, reach: number): void {
-  if (amount <= 0) return;
-  const r = Math.max(MINERAL_CELL, vol.radius * reach);
-  let sum = 0;
-  for (let n = 0; n < vol.dists.length; n++) { const q = vol.dists[n] / r; if (q < 1) sum += 1 - q * q; }
-  for (let n = 0; n < vol.cells.length; n++) {
-    const q = vol.dists[n] / r;
-    if (q < 1) m.field[vol.cells[n]] += (amount * (1 - q * q)) / sum;
+function push(m: MineralState, terrain: TerrainState, field: { cells: Int32Array; dists: Float64Array }, limit: number, passes: number): void {
+  const { cols, rows } = m;
+  const n = field.cells.length;
+  if (n < 2 || passes <= 0) return;
+  const index = new Map<number, number>();
+  for (let q = 0; q < n; q++) index.set(field.cells[q], q);
+  // Соседи дальше от жерла и в пределах фронта, с весами по приросту расстояния.
+  const out: number[][] = [];
+  const outW: number[][] = [];
+  for (let q = 0; q < n; q++) {
+    const k = field.cells[q], d = field.dists[q];
+    const i = k % cols, j = (k - i) / cols;
+    const to: number[] = [], wt: number[] = [];
+    for (let dj = -1; dj <= 1; dj++) {
+      for (let di = -1; di <= 1; di++) {
+        if (di === 0 && dj === 0) continue;
+        const a = i + di, b = j + dj;
+        if (a < 0 || b < 0 || a >= cols || b >= rows) continue;
+        const r = index.get(b * cols + a);
+        if (r === undefined || field.dists[r] <= d || field.dists[r] > limit) continue;
+        to.push(r);
+        wt.push(field.dists[r] - d);
+      }
+    }
+    const sum = wt.reduce((x, y) => x + y, 0);
+    out.push(to);
+    outW.push(wt.map((x) => x / sum));
   }
+  const mass = new Float64Array(n);
+  for (let q = 0; q < n; q++) mass[q] = m.field[field.cells[q]];
+  const next = new Float64Array(n);
+  for (let p = 0; p < passes; p++) {
+    const part = Math.min(1, passes - p);
+    // Все клетки отдают одновременно (из mass в next) — за проход масса уходит на одну клетку.
+    next.set(mass);
+    for (let q = 0; q < n; q++) {
+      if (out[q].length === 0 || mass[q] === 0) continue;
+      const give = (mass[q] * ERUPTION_PUSH * part) / multiplierForLevel(terrain.applied[field.cells[q]]);
+      next[q] -= give;
+      for (let e = 0; e < out[q].length; e++) next[out[q][e]] += give * outW[q][e];
+    }
+    mass.set(next);
+  }
+  for (let q = 0; q < n; q++) m.field[field.cells[q]] = mass[q];
+}
+
+/**
+ * Растекание за обновление: между соседними клетками переходит доля разницы,
+ * тем меньше, чем выше вязкость обеих (в воде — `rate`); через перегородки нет.
+ * Количество сохраняется.
+ */
+function spread(field: Float64Array, level: Float32Array, blocked: Uint8Array, cols: number, rows: number, rate: number): void {
+  const flow = new Float64Array(field.length);
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) {
+      const k = j * cols + i;
+      if (blocked[k]) continue;
+      const mk = multiplierForLevel(level[k]);
+      // Только вправо и вниз — каждая пара один раз.
+      if (i < cols - 1 && !blocked[k + 1]) {
+        const f = (rate * 2 * (field[k] - field[k + 1])) / (mk + multiplierForLevel(level[k + 1]));
+        flow[k] -= f;
+        flow[k + 1] += f;
+      }
+      if (j < rows - 1 && !blocked[k + cols]) {
+        const f = (rate * 2 * (field[k] - field[k + cols])) / (mk + multiplierForLevel(level[k + cols]));
+        flow[k] -= f;
+        flow[k + cols] += f;
+      }
+    }
+  }
+  for (let k = 0; k < field.length; k++) field[k] += flow[k];
 }
 
 /** Минерал, взятый из недр идущими извержениями, но ещё не вышедший, — «в пути»; входит в общий запас. */

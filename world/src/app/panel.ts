@@ -364,7 +364,7 @@ export class Panel {
       item(css(DEEP_WATER.map((c, i) => (c * SHADE_COLOR[i]) / 255) as unknown as Rgb), 'тень'),
       item('rgb(255, 170, 70)', 'нагрев — теплее'),
       item('rgb(40, 80, 150)', 'течение — бегущий пунктир от пятна до конца течения'),
-      item(css(MINERAL_COLOR), 'растворённый минерал — дымка, где его больше среднего'),
+      item(css(MINERAL_COLOR), 'растворённый минерал — заметнее, где его больше; зёрна текут вместе с ним'),
       item('radial-gradient(circle, rgb(30,18,40) 0 35%, rgb(196,128,255) 36% 55%, transparent 56%)', 'вулкан'),
       item('repeating-linear-gradient(60deg, rgba(255,250,230,0.9) 0 1px, transparent 1px 4px), rgb(84, 144, 210)', 'блики — вода на свету'),
       item('rgba(150, 190, 222, 0.6)', 'стекло — стенки и перегородки'),
