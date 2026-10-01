@@ -11,7 +11,7 @@ import { volcanoFromNumbers, volcanoNumbers } from './mineral.ts';
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 15;
+export const WORLD_FORMAT_VERSION = 16;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -29,6 +29,7 @@ const OLD_FORMATS: Record<number, string> = {
   12: 'тогда течения пересчитывались вдвое чаще',
   13: 'тогда минерал при сотворении лежал в среде, а извержения не были ограничены',
   14: 'тогда вулканы стояли на местах из сида, а извержение выбрасывало минерал в круг постоянного радиуса',
+  15: 'тогда течения были лучами от пятен, с параметрами силы и длины',
 };
 
 export interface MineralFile {
@@ -150,11 +151,8 @@ function readParams(raw: unknown, problems: string[]): WorldParams | null {
     spotSize: raw.spotSize as number,
     baseTemperature: raw.baseTemperature as number,
     spotHeat: raw.spotHeat as number,
-    baseViscosity: raw.baseViscosity as number,
     viscosityShares: { water: shares.water as number, shallows: shares.shallows as number, land: shares.land as number },
     viscosityZoneSize: raw.viscosityZoneSize as number,
-    driftStrength: raw.driftStrength as number,
-    driftLength: raw.driftLength as number,
     mineralStock: raw.mineralStock as number,
     terrainSpeed: raw.terrainSpeed as number,
     quakeInterval: raw.quakeInterval as number,

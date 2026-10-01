@@ -102,9 +102,9 @@ export function worldHash(world: World): number {
   const p = world.params;
   return hashNumbers([
     p.seed, DISH_WIDTH, DISH_HEIGHT, p.sun, p.lightDrift, p.sunRhythm, p.sunPeriod, p.backgroundLevel, p.illumination, p.spotSize,
-    p.baseTemperature, p.spotHeat, p.baseViscosity,
+    p.baseTemperature, p.spotHeat,
     p.viscosityShares.water, p.viscosityShares.shallows, p.viscosityShares.land,
-    p.viscosityZoneSize, p.driftStrength, p.driftLength, p.mineralStock, p.terrainSpeed, p.quakeInterval,
+    p.viscosityZoneSize, p.mineralStock, p.terrainSpeed, p.quakeInterval,
     world.step,
     world.mineral.depths,
     ...world.terrain.ground,

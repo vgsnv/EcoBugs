@@ -6,7 +6,7 @@
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
-import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_FRONT, ERUPTION_RADIUS, MINERAL_LAYER, MINERAL_PERIOD, eruptionFront, eruptionRate, hash3, viscousDistances, isBlocked, periodicFbm, smoothLevelAt, spotAnchors, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, VOLCANO_BIRTH, VOLCANO_POWER, type Volcano, type World } from '../core/index.ts';
+import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_FRONT, ERUPTION_RADIUS, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, DRIFT_REFERENCE, multiplierForLevel, eruptionFront, eruptionRate, hash3, viscousDistances, isBlocked, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, VOLCANO_BIRTH, VOLCANO_POWER, type Volcano, type World } from '../core/index.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
@@ -127,21 +127,29 @@ const GLINT_LAYERS = [
   { size: 210, vx: -3.5, vy: 4 },
 ] as const;
 /**
- * Линии течений: начала — через столько единиц по краю пятна; шаг прокладки
- * и предел длины в шагах (единицы мира); порог слабого течения (доля силы
- * сноса); пунктир и его скорость (CSS px); цвет.
+ * Линии течений — движение среды, светлым тоном воды. Начала — по сетке через
+ * столько единиц мира (со сдвигом из хеша); шаг прокладки и предел длины;
+ * рисуются только течения не слабее такой доли от DRIFT_REFERENCE × солнце;
+ * линия обрывается, войдя в занятую другой линией клетку (размер, ед. мира).
+ * Скорость видна трижды: участки делятся на классы по скорости (границы — доли
+ * от того же мерила), у быстрых — ярче и толще, и пунктир бежит со скоростью
+ * течения (CSS px в секунду на единицу доли). Перестраиваются не чаще, мс.
  */
-const LINE_ANCHOR_SPACING = 60;
+const LINE_SEED_SPACING = 70;
 const LINE_STEP = 4;
-const LINE_MAX_POINTS = 400;
-const LINE_MIN_SHARE = 0.05;
-const LINE_DASH = 5;
-const LINE_GAP = 5;
-const LINE_SPEED_CSS = 14;
-const LINE_COLOR = 'rgba(235, 245, 255, 0.6)';
-/** Наконечник — только у линии не короче стольких CSS px; ниже такого масштаба (CSS px на единицу) линий вдвое меньше. */
-const LINE_HEAD_MIN_CSS = 18;
-const LINE_THIN_BELOW_CSS = 0.8;
+const LINE_MAX_POINTS = 300;
+const LINE_MIN_SHARE = 0.25;
+const LINE_CELL = 20;
+const LINE_CLASSES = [0.6, 1.2] as const;
+const LINE_STYLES = [
+  { color: 'rgba(110, 165, 230, 0.45)', width: 1, speed: 0.4 },
+  { color: 'rgba(135, 190, 245, 0.6)', width: 1.4, speed: 0.9 },
+  { color: 'rgba(170, 215, 255, 0.75)', width: 1.9, speed: 1.6 },
+] as const;
+const LINE_DASH = 6;
+const LINE_GAP = 6;
+const LINE_SPEED_CSS = 22;
+const LINE_RETRACE_MS = 150;
 
 /** Бесшовная текстура ряби: тонкая светлая сетка там, где шум близок к нулю. */
 let rippleTexture: HTMLCanvasElement | null = null;
@@ -183,24 +191,25 @@ function ripple(): HTMLCanvasElement {
  */
 export const MINERAL_COLOR: Rgb = [196, 128, 255];
 const MINERAL_DEEP: Rgb = [164, 112, 236];
-const MINERAL_FROM = 0.9;
+const MINERAL_FROM = 0.3;
 const MINERAL_FULL = 14;
 const MINERAL_ALPHA = 0.5;
 /**
- * Зёрна минерала — только для показа: точки, рассыпанные по массе (гуще, где
- * минерала больше), движутся так же, как минерал в модели: по течению на
- * прошедшие шаги, но густое — медленнее (течение уносит только верхний слой).
- * Сколько зёрен, жизнь (с), размер (CSS px), с какой плотности рождаются и
- * при какой — наверняка, наибольший сдвиг за кадр (CSS px), цвет и яркость.
+ * Зёрна минерала — только для показа: точки там, где минерал движется (гуще,
+ * где больше количество × скорость — видно и тонкие реки), движутся так же,
+ * как минерал в модели: по течению на прошедшие шаги, но густое и в вязком —
+ * медленнее (течение уносит только слой). Сколько зёрен, жизнь (с), размер
+ * (CSS px), с какого потока (плотность от средней × скорость от мерила)
+ * рождаются и при каком — наверняка, наибольший сдвиг за кадр (CSS px), цвет и яркость.
  */
 const GRAIN_COUNT = 1500;
 const GRAIN_LIFE: readonly [number, number] = [2, 5];
 const GRAIN_CSS = 1.1;
-const GRAIN_FROM = 1.2;
-const GRAIN_FULL = 8;
+const GRAIN_FROM = 0.01;
+const GRAIN_FULL = 0.3;
 const GRAIN_MAX_HOP_CSS = 10;
 const GRAIN_COLOR: Rgb = [236, 214, 255];
-const GRAIN_ALPHA = 0.5;
+const GRAIN_ALPHA = 0.6;
 /** Насколько мягче показывать затемнение от мутности, чем по модели (1 — как есть). */
 const MURK_STRENGTH = 0.8;
 /**
@@ -387,8 +396,9 @@ export class WorldRenderer {
   /** Перегородки одним путём (в единицах мира). */
   private parts = new Path2D();
   /** Линии течений и ключ вида, для которого они проведены. */
-  private lines = { body: new Path2D(), heads: new Path2D() };
+  private lines: Path2D[] = [];
   private linesKey = '';
+  private linesTracedAt = 0;
   /** Дымка минерала (клетка поля — пиксель) и версия поля, по которой она построена. */
   private readonly mineralCanvas = document.createElement('canvas');
   /** Затемнение от мутности (серый для умножения), той же сетки. */
@@ -872,31 +882,46 @@ export class WorldRenderer {
     const g = this.grains;
     const v: [number, number] = [0, 0];
     const maxHop = this.px(GRAIN_MAX_HOP_CSS);
-    const layer = MINERAL_LAYER * MINERAL_PERIOD * m.cell * m.cell;
+    const layer = MINERAL_LAYER * MINERAL_MOBILITY * MINERAL_PERIOD * m.cell * m.cell;
     const size = this.px(GRAIN_CSS);
+    const ref = DRIFT_REFERENCE * Math.max(1e-9, sunAt(w.light, w.step));
+    /** Доля минерала клетки, которую течение уносит за обновление (тоньше слой в вязком). */
+    const moving = (x: number, y: number, speed: number) => {
+      const i = Math.min(m.cols - 1, Math.max(0, Math.floor(x / m.cell)));
+      const j = Math.min(m.rows - 1, Math.max(0, Math.floor(y / m.cell)));
+      const amount = m.field[j * m.cols + i];
+      const mob = multiplierForLevel(w.terrain.applied[j * m.cols + i]);
+      return amount > 0 ? Math.min(1, (layer * speed) / (mob * mob) / amount) : 1;
+    };
+    /** Поток минерала в точке: плотность (от средней) × скорость его движения (от мерила). */
+    const flux = (x: number, y: number) => {
+      w.drift.at(x, y, w.step, v);
+      const sp = Math.hypot(v[0], v[1]);
+      return (density(x, y) / perMean) * (sp * moving(x, y, sp)) / ref;
+    };
     ctx.fillStyle = rgb(GRAIN_COLOR);
     for (let n = 0; n < GRAIN_COUNT; n++) {
       const o = n * 4;
       g[o + 2] += dt;
       if (g[o + 3] === 0 || g[o + 2] >= g[o + 3]) {
-        // Новое зерно — в случайной клетке, тем вероятнее, чем гуще там минерал.
+        // Новое зерно — в случайной клетке, тем вероятнее, чем больше там
+        // минерала движется (количество × скорость): видно и тонкие реки.
         // Не прижилось — попробует в следующем кадре.
         const x = Math.random() * DISH_WIDTH, y = Math.random() * DISH_HEIGHT;
-        const d = density(x, y) / perMean;
         g[o + 3] = 1;
         g[o + 2] = 1;
-        if (d <= GRAIN_FROM || Math.random() >= (d - GRAIN_FROM) / (GRAIN_FULL - GRAIN_FROM)) continue;
+        const f = flux(x, y);
+        if (f <= GRAIN_FROM || Math.random() >= (f - GRAIN_FROM) / (GRAIN_FULL - GRAIN_FROM)) continue;
         g[o] = x;
         g[o + 1] = y;
         g[o + 2] = 0;
         g[o + 3] = GRAIN_LIFE[0] + (GRAIN_LIFE[1] - GRAIN_LIFE[0]) * Math.random();
       }
       // Сдвиг, как у минерала: по течению на прошедшие шаги; из густой клетки
-      // за обновление уходит лишь слой — во столько же раз медленнее.
+      // за обновление уходит лишь слой (тоньше в вязком) — во столько же раз медленнее.
       if (steps > 0) {
         w.drift.at(g[o], g[o + 1], w.step, v);
-        const amount = density(g[o], g[o + 1]);
-        const share = amount > 0 ? Math.min(1, (layer * Math.hypot(v[0], v[1])) / amount) : 1;
+        const share = moving(g[o], g[o + 1], Math.hypot(v[0], v[1]));
         let dx = v[0] * steps * share, dy = v[1] * steps * share;
         const hop = Math.hypot(dx, dy);
         if (hop > maxHop) { dx *= maxHop / hop; dy *= maxHop / hop; }
@@ -905,8 +930,7 @@ export class WorldRenderer {
         g[o + 1] += dy;
       }
       const f = g[o + 2] / g[o + 3];
-      const d = density(g[o], g[o + 1]) / perMean;
-      ctx.globalAlpha = Math.min(1, f * 6, (1 - f) * 3) * Math.min(1, d / GRAIN_FULL + 0.2) * GRAIN_ALPHA;
+      ctx.globalAlpha = Math.min(1, f * 6, (1 - f) * 3) * GRAIN_ALPHA;
       ctx.fillRect(g[o] - size / 2, g[o + 1] - size / 2, size, size);
     }
     ctx.globalAlpha = 1;
@@ -1201,7 +1225,7 @@ export class WorldRenderer {
     const { a, b, u } = w.drift.nodes(w.step);
     const same = a.cols === m.cols && a.rows === m.rows;
     const level = w.terrain.applied;
-    const sMax = Math.max(1e-9, w.params.driftStrength * sunAt(w.light, w.step));
+    const sMax = Math.max(1e-9, DRIFT_REFERENCE * sunAt(w.light, w.step));
     for (let j = 1; j < m.rows - 1; j++) {
       for (let i = 1; i < m.cols - 1; i++) {
         const k = j * m.cols + i;
@@ -1264,71 +1288,73 @@ export class WorldRenderer {
    */
   private drawDriftLines(animTime: number): void {
     const w = this.world;
-    const strength = w.params.driftStrength;
-    if (strength <= 0) return;
-    const key = `${this.zoom.toFixed(4)}:${this.cx.toFixed(1)}:${this.cy.toFixed(1)}:${w.step}:${this.canvas.width}x${this.canvas.height}`;
-    if (key !== this.linesKey) {
-      this.linesKey = key;
-      this.lines = this.traceDriftLines();
+    const sun = sunAt(w.light, w.step);
+    if (sun <= 0) return;
+    // Вид изменился — перестроить сразу; шагнул мир — не чаще LINE_RETRACE_MS.
+    const view = `${this.zoom.toFixed(4)}:${this.cx.toFixed(1)}:${this.cy.toFixed(1)}:${this.canvas.width}x${this.canvas.height}`;
+    const now = performance.now();
+    if (view !== this.linesKey || now - this.linesTracedAt >= LINE_RETRACE_MS) {
+      this.linesKey = view;
+      this.linesTracedAt = now;
+      this.lines = this.traceDriftLines(sun);
     }
     const ctx = this.ctx;
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.lineWidth = this.px(1.2);
-    ctx.strokeStyle = LINE_COLOR;
     ctx.setLineDash([this.px(LINE_DASH), this.px(LINE_GAP)]);
-    // Пунктир бежит вдоль течения; быстрее при большей силе сноса.
-    ctx.lineDashOffset = -this.px(animTime * LINE_SPEED_CSS * Math.min(2, strength / 0.3));
-    ctx.stroke(this.lines.body);
+    LINE_STYLES.forEach((st, c) => {
+      ctx.lineWidth = this.px(st.width);
+      ctx.strokeStyle = st.color;
+      // Пунктир бежит со скоростью течения своего класса.
+      ctx.lineDashOffset = -this.px(animTime * LINE_SPEED_CSS * st.speed * sun);
+      ctx.stroke(this.lines[c]);
+    });
     ctx.setLineDash([]);
-    ctx.fillStyle = LINE_COLOR;
-    ctx.fill(this.lines.heads);
   }
 
-  private traceDriftLines(): { body: Path2D; heads: Path2D } {
+  /** Линии течений по классам скорости — по сетке начал, без наложения. */
+  private traceDriftLines(sun: number): Path2D[] {
     const w = this.world;
-    const minSpeed = w.params.driftStrength * LINE_MIN_SHARE;
-    const body = new Path2D();
-    const heads = new Path2D();
-    // Только пятна рядом с видимой частью: линия уходит от края не дальше, чем течение.
+    const ref = DRIFT_REFERENCE * sun;
+    const minSpeed = ref * LINE_MIN_SHARE;
+    const paths = LINE_STYLES.map(() => new Path2D());
     const [vx0, vy0] = this.screenToWorld(0, 0);
     const [vx1, vy1] = this.screenToWorld(this.canvas.width, this.canvas.height);
-    const pad = LINE_STEP * LINE_MAX_POINTS;
-    const anchors = spotAnchors(w.light, w.step, DISH_WIDTH, DISH_HEIGHT, LINE_ANCHOR_SPACING);
+    // На мелком масштабе начала реже, иначе линии сливаются в рябь.
+    const spacing = LINE_SEED_SPACING * Math.max(1, 0.8 / (this.zoom / this.dpr));
+    const gc = Math.ceil(DISH_WIDTH / LINE_CELL), gr = Math.ceil(DISH_HEIGHT / LINE_CELL);
+    const taken = new Int32Array(gc * gr).fill(-1);
     const v: [number, number] = [0, 0];
-    const minLen = this.px(LINE_HEAD_MIN_CSS);
-    // На мелком масштабе — каждая вторая точка: иначе линии сливаются в рябь.
-    const stride = (this.zoom / this.dpr) < LINE_THIN_BELOW_CSS ? 4 : 2;
-    for (let a = 0; a < anchors.length; a += stride) {
-      let x = anchors[a], y = anchors[a + 1];
-      if (x < vx0 - pad || x > vx1 + pad || y < vy0 - pad || y > vy1 + pad) continue;
-      if (x < 0 || y < 0 || x >= DISH_WIDTH || y >= DISH_HEIGHT || isBlocked(w.partitions, x, y)) continue;
-      let px = 0, py = 0, len = 0, started = false;
-      for (let n = 0; n < LINE_MAX_POINTS; n++) {
-        w.drift.at(x, y, w.step, v);
-        const s = Math.hypot(v[0], v[1]);
-        if (s < minSpeed) break;
-        const ux = v[0] / s, uy = v[1] / s;
-        // Разворот — место встречи течений: там конец.
-        if (n > 0 && ux * px + uy * py < 0.2) break;
-        const nx = x + ux * LINE_STEP, ny = y + uy * LINE_STEP;
-        if (nx < 0 || ny < 0 || nx >= DISH_WIDTH || ny >= DISH_HEIGHT || isBlocked(w.partitions, nx, ny)) break;
-        if (!started) { body.moveTo(x, y); started = true; }
-        body.lineTo(nx, ny);
-        x = nx; y = ny; px = ux; py = uy; len += LINE_STEP;
+    let id = 0;
+    for (let sy = spacing / 2; sy < DISH_HEIGHT; sy += spacing) {
+      for (let sx = spacing / 2; sx < DISH_WIDTH; sx += spacing) {
+        let x = sx + (hash3(0x11ae, Math.round(sx), Math.round(sy)) / 4294967296 - 0.5) * spacing * 0.8;
+        let y = sy + (hash3(0x22be, Math.round(sx), Math.round(sy)) / 4294967296 - 0.5) * spacing * 0.8;
+        if (x < vx0 - spacing || x > vx1 + spacing || y < vy0 - spacing || y > vy1 + spacing) continue;
+        if (x < 0 || y < 0 || x >= DISH_WIDTH || y >= DISH_HEIGHT || isBlocked(w.partitions, x, y)) continue;
+        id++;
+        let last = -1;
+        for (let n = 0; n < LINE_MAX_POINTS; n++) {
+          const cell = Math.floor(y / LINE_CELL) * gc + Math.floor(x / LINE_CELL);
+          if (taken[cell] >= 0 && taken[cell] !== id) break;
+          taken[cell] = id;
+          w.drift.at(x, y, w.step, v);
+          const sp = Math.hypot(v[0], v[1]);
+          if (sp < minSpeed) break;
+          const nx = x + (v[0] / sp) * LINE_STEP, ny = y + (v[1] / sp) * LINE_STEP;
+          if (nx < 0 || ny < 0 || nx >= DISH_WIDTH || ny >= DISH_HEIGHT || isBlocked(w.partitions, nx, ny)) break;
+          const c = sp < ref * LINE_CLASSES[0] ? 0 : sp < ref * LINE_CLASSES[1] ? 1 : 2;
+          if (c !== last) { paths[c].moveTo(x, y); last = c; }
+          paths[c].lineTo(nx, ny);
+          x = nx; y = ny;
+        }
       }
-      // Наконечник — только у заметной линии, по направлению последнего шага.
-      if (len < minLen) continue;
-      const h = this.px(4.5), hw = this.px(2.6);
-      heads.moveTo(x + px * h * 0.4, y + py * h * 0.4);
-      heads.lineTo(x - px * h - py * hw, y - py * h + px * hw);
-      heads.lineTo(x - px * h + py * hw, y - py * h - px * hw);
-      heads.closePath();
     }
-    return { body, heads };
+    return paths;
   }
+
 
   /** Мини-карта при приближении: вся чашка, пятна света, перегородки и рамка вида; скрыта, когда видна вся чашка. */
   drawMinimap(mini: HTMLCanvasElement): void {

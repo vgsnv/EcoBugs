@@ -1,20 +1,24 @@
 /**
- * Снос (спецификация, раздел «Снос»): течения начинаются на краю пятен света
- * с силой, ослабленной средой в месте старта, и идут наружу, по самой дешёвой
- * дороге; длина пути — параметр (в воде), в вязкой среде путь тратится быстрее
- * пропорционально сопротивлению; сила убывает до нуля к концу пути; кончаются, где сила иссякла или встретились течения
- * от разных пятен. Смещение за шаг равно силе течения в точке.
+ * Снос (спецификация, раздел «Снос»): поток среды от света к тени. Где
+ * светлее среднего по своему отсеку, среда выталкивается, где темнее —
+ * уходит; сумма — ноль. Среда пропускает поток тем хуже, чем выше её
+ * сопротивление движению (проводимость = 1 ÷ множитель градации), перегородки
+ * не пропускают вовсе. Поток сохраняется: в узком месте течение быстрее,
+ * потоки складываются, острова обтекаются. Дрейфующие пятна увлекают среду за
+ * собой — отсюда круговороты. Смещение за шаг — плотность потока.
  *
- * Расчёт — «расстояние с ценой» от краёв пятен на грубой сетке (Дейкстра),
- * перегородки непроходимы. Направление — прочь от пятна вдоль этого поля.
- * Поле пересчитывается раз в DRIFT_PERIOD шагов, между пересчётами — плавный
- * переход, поэтому снос — функция номера шага.
+ * Расчёт: давление p из баланса потоков в каждой клетке — Σ проводимость
+ * грани × (p − p соседа + увлечение вдоль грани) = источник. Решается каскадом от грубой сетки к
+ * тонкой (Гаусс — Зейдель с верхней релаксацией), всегда с одного и того же
+ * начального приближения — поэтому снос — функция номера шага. Поле
+ * пересчитывается раз в DRIFT_PERIOD шагов, между пересчётами — плавный
+ * переход.
  */
-import { DISH_HEIGHT, DISH_WIDTH, DRIFT_CELL, DRIFT_PERIOD, DRIFT_SOURCE, LAND_FLOW_BLOCK, MERGE_MAX } from './constants.ts';
-import { rasterizeSpotIntensity, sunAt, type LightMap } from './light.ts';
+import { DISH_HEIGHT, DISH_WIDTH, DRIFT_CELL, DRIFT_DRAG, DRIFT_MAX, DRIFT_PERIOD, DRIFT_SPEED, LIGHT_DRIFT_SPEED } from './constants.ts';
+import { lightDriftVelocity, rasterizeSpotIntensity, sunAt, type LightMap } from './light.ts';
 import type { WorldParams } from './params.ts';
 import { isBlocked, type PartitionLayout } from './partitions.ts';
-import { resistanceAt, smoothLevelAt, type ViscosityMap } from './viscosity.ts';
+import { multiplierForLevel, smoothLevelAt, type ViscosityMap } from './viscosity.ts';
 
 /** Течения в один момент: вектор сноса в центре каждой клетки. */
 export interface DriftField {
@@ -32,207 +36,210 @@ interface Sources {
   readonly partitions: PartitionLayout;
 }
 
-/** Минимальная двоичная куча по стоимости (индексы клеток). */
-class Heap {
-  private keys = new Float64Array(1024);
-  private vals = new Int32Array(1024);
-  size = 0;
-
-  push(key: number, val: number): void {
-    if (this.size === this.keys.length) {
-      const k = new Float64Array(this.size * 2); k.set(this.keys); this.keys = k;
-      const v = new Int32Array(this.size * 2); v.set(this.vals); this.vals = v;
-    }
-    let i = this.size++;
-    while (i > 0) {
-      const p = (i - 1) >> 1;
-      if (this.keys[p] <= key) break;
-      this.keys[i] = this.keys[p];
-      this.vals[i] = this.vals[p];
-      i = p;
-    }
-    this.keys[i] = key;
-    this.vals[i] = val;
-  }
-
-  /** Снять минимум; возвращает индекс клетки, стоимость — в `lastKey`. */
-  pop(): number {
-    const top = this.vals[0];
-    this.lastKey = this.keys[0];
-    const key = this.keys[--this.size];
-    const val = this.vals[this.size];
-    let i = 0;
-    for (;;) {
-      let c = 2 * i + 1;
-      if (c >= this.size) break;
-      if (c + 1 < this.size && this.keys[c + 1] < this.keys[c]) c++;
-      if (this.keys[c] >= key) break;
-      this.keys[i] = this.keys[c];
-      this.vals[i] = this.vals[c];
-      i = c;
-    }
-    this.keys[i] = key;
-    this.vals[i] = val;
-    return top;
-  }
-
-  lastKey = 0;
+/** Один уровень сетки для решения: проводимость клеток, проводимость граней (вправо и вниз), источник. */
+interface Level {
+  readonly cols: number;
+  readonly rows: number;
+  readonly cond: Float64Array;
+  readonly east: Float64Array;
+  readonly south: Float64Array;
+  readonly source: Float64Array;
 }
 
-/** Восемь соседей: смещения и длина шага (отдельными массивами — без разбора кортежей в горячих циклах). */
-const NDI = Int8Array.of(1, -1, 0, 0, 1, 1, -1, -1);
-const NDJ = Int8Array.of(0, 0, 1, -1, 1, -1, 1, -1);
-const NLEN = Float64Array.of(1, 1, 1, 1, Math.SQRT2, Math.SQRT2, Math.SQRT2, Math.SQRT2);
-
-/** Неизменное на сетке течений: преграды, сопротивление движению и цена пути течения. */
+/** Неизменное на сетке течений: преграды, проводимость, отсек каждой клетки (−1 — преграда). */
 interface Ground {
   readonly blocked: Uint8Array;
-  readonly resistance: Float32Array;
-  /** Цена пути: сопротивление, а на суше — во много раз выше (течения её огибают). */
-  readonly cost: Float32Array;
+  readonly cond: Float64Array;
+  readonly region: Int32Array;
+  readonly regions: number;
 }
 
 function groundOf(world: Sources, cols: number, rows: number, cell: number): Ground {
-  const blocked = new Uint8Array(cols * rows);
-  const resistance = new Float32Array(cols * rows);
-  const cost = new Float32Array(cols * rows);
+  const n = cols * rows;
+  const blocked = new Uint8Array(n);
+  const cond = new Float64Array(n);
   for (let j = 0; j < rows; j++) {
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
-      const x = (i + 0.5) * cell;
-      const y = (j + 0.5) * cell;
+      const x = (i + 0.5) * cell, y = (j + 0.5) * cell;
       blocked[k] = isBlocked(world.partitions, x, y) ? 1 : 0;
-      resistance[k] = resistanceAt(world.params, world.viscosity, x, y);
-      const u = Math.min(1, Math.max(0, (smoothLevelAt(world.viscosity, x, y) - 1.3) / 0.4));
-      cost[k] = resistance[k] * (1 + LAND_FLOW_BLOCK * u * u * (3 - 2 * u));
+      cond[k] = blocked[k] ? 0 : 1 / multiplierForLevel(smoothLevelAt(world.viscosity, x, y));
     }
   }
-  return { blocked, resistance, cost };
+  // Отсеки — связные части без преград: в каждом свой баланс света и тени.
+  const region = new Int32Array(n).fill(-1);
+  let regions = 0;
+  const stack: number[] = [];
+  for (let k0 = 0; k0 < n; k0++) {
+    if (blocked[k0] || region[k0] >= 0) continue;
+    region[k0] = regions;
+    stack.push(k0);
+    while (stack.length > 0) {
+      const k = stack.pop()!;
+      const i = k % cols, j = (k - i) / cols;
+      for (const m of [i > 0 ? k - 1 : -1, i < cols - 1 ? k + 1 : -1, j > 0 ? k - cols : -1, j < rows - 1 ? k + cols : -1]) {
+        if (m >= 0 && !blocked[m] && region[m] < 0) { region[m] = regions; stack.push(m); }
+      }
+    }
+    regions++;
+  }
+  return { blocked, cond, region, regions };
 }
+
+/** Проводимость грани между клетками — среднее гармоническое (0, если хоть одна — преграда). */
+const face = (a: number, b: number) => (a > 0 && b > 0 ? (2 * a * b) / (a + b) : 0);
+
+function levelOf(cols: number, rows: number, cond: Float64Array, source: Float64Array): Level {
+  const east = new Float64Array(cols * rows);
+  const south = new Float64Array(cols * rows);
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) {
+      const k = j * cols + i;
+      if (i < cols - 1) east[k] = face(cond[k], cond[k + 1]);
+      if (j < rows - 1) south[k] = face(cond[k], cond[k + cols]);
+    }
+  }
+  return { cols, rows, cond, east, south, source };
+}
+
+/** Вдвое грубее: проводимость — средняя по четырём клеткам, источник — сумма. */
+function coarsen(l: Level): Level {
+  const cols = Math.ceil(l.cols / 2), rows = Math.ceil(l.rows / 2);
+  const cond = new Float64Array(cols * rows);
+  const source = new Float64Array(cols * rows);
+  for (let j = 0; j < l.rows; j++) {
+    for (let i = 0; i < l.cols; i++) {
+      const k = j * l.cols + i, c = (j >> 1) * cols + (i >> 1);
+      cond[c] += l.cond[k] / 4;
+      source[c] += l.source[k];
+    }
+  }
+  return levelOf(cols, rows, cond, source);
+}
+
+/**
+ * Итерации Гаусса — Зейделя с верхней релаксацией. Давление `p` — с рамкой в
+ * строку сверху и снизу (индекс клетки + cols), чтобы соседи читались без
+ * проверок: у краёв и преград коэффициент грани — 0.
+ */
+function relax(l: Level, p: Float64Array, iterations: number): void {
+  const { cols, rows, east, south, source } = l;
+  const n = cols * rows;
+  const cw = new Float64Array(n), ce = new Float64Array(n), cn = new Float64Array(n), cs = new Float64Array(n), inv = new Float64Array(n);
+  for (let k = 0; k < n; k++) {
+    const i = k % cols;
+    cw[k] = i > 0 ? east[k - 1] : 0;
+    ce[k] = east[k];
+    cn[k] = k >= cols ? south[k - cols] : 0;
+    cs[k] = south[k];
+    const sum = cw[k] + ce[k] + cn[k] + cs[k];
+    inv[k] = sum > 0 ? 1 / sum : 0;
+  }
+  for (let it = 0; it < iterations; it++) {
+    for (let k = 0; k < n; k++) {
+      if (inv[k] === 0) continue;
+      const q = k + cols;
+      const target = (source[k] + cw[k] * p[q - 1] + ce[k] * p[q + 1] + cn[k] * p[q - cols] + cs[k] * p[q + cols]) * inv[k];
+      p[q] += DRIFT_OMEGA * (target - p[q]);
+    }
+  }
+}
+
+/** Решение каскадом: точно на самой грубой сетке, дальше — перенос на вдвое более тонкую и сглаживание. Давление — с рамкой (см. relax). */
+function solve(fine: Level): Float64Array {
+  const levels = [fine];
+  while (levels[levels.length - 1].cols > DRIFT_COARSEST) levels.push(coarsen(levels[levels.length - 1]));
+  const last = levels[levels.length - 1];
+  let p = new Float64Array((last.rows + 2) * last.cols + 2);
+  relax(last, p, DRIFT_COARSE_ITERATIONS);
+  for (let d = levels.length - 2; d >= 0; d--) {
+    const l = levels[d], c = levels[d + 1];
+    const q = new Float64Array((l.rows + 2) * l.cols + 2);
+    for (let j = 0; j < l.rows; j++) for (let i = 0; i < l.cols; i++) q[(j + 1) * l.cols + i] = p[((j >> 1) + 1) * c.cols + (i >> 1)];
+    relax(l, q, DRIFT_FINE_ITERATIONS);
+    p = q;
+  }
+  return p.subarray(fine.cols, fine.cols + fine.cols * fine.rows);
+}
+
+/** Самая грубая сетка — не шире стольких клеток; итераций на ней и на каждом более тонком уровне; релаксация. */
+const DRIFT_COARSEST = 26;
+const DRIFT_COARSE_ITERATIONS = 600;
+const DRIFT_FINE_ITERATIONS = 30;
+const DRIFT_OMEGA = 1.7;
 
 const COLS = Math.ceil(DISH_WIDTH / DRIFT_CELL);
 const ROWS = Math.ceil(DISH_HEIGHT / DRIFT_CELL);
 
 /** Течения в шаге t. */
 export function computeDriftField(world: Sources, t: number, ground: Ground = groundOf(world, COLS, ROWS, DRIFT_CELL)): DriftField {
-  const cell = DRIFT_CELL;
-  const cols = COLS;
-  const rows = ROWS;
-  const n = cols * rows;
-  // Сила на старте (в воде) — сила сноса × сила солнца: ярче — течения быстрее.
-  // Длина от силы не зависит: путь меряется в долях длины течений.
-  const strength = world.params.driftStrength * sunAt(world.light, t);
-  const length = world.params.driftLength;
+  const cell = DRIFT_CELL, cols = COLS, rows = ROWS, n = cols * rows;
   const vx = new Float32Array(n);
   const vy = new Float32Array(n);
-  if (strength <= 0 || length <= 0) return { cols, rows, cell, vx, vy };
-  const budget = 1;
-
+  const sun = sunAt(world.light, t);
+  if (sun <= 0) return { cols, rows, cell, vx, vy };
+  // Свет места: фон + пятна; источник — отклонение от среднего по отсеку.
+  const bg = world.params.backgroundLevel;
   const intensity = rasterizeSpotIntensity(world.light, t, cols, rows, cell);
-  const { blocked, resistance, cost: pathCost } = ground;
-  /** Порядок, в котором клетки получили окончательный путь (от пятен наружу), и геометрическая длина пути в клетках. */
-  const order = new Int32Array(n);
-  let ordered = 0;
-  const dist = new Float32Array(n);
-
-  // Израсходованная доля пути (0…1): на краях пятен — сколько отняла среда на
-  // старте, дальше растёт с пройденным путём × сопротивление; Infinity — не дошло.
-  // Двойная точность: те же числа, что в очереди, — иначе округление ломает
-  // проверку «уже лучше» и клетки проталкиваются заново.
-  const spent = new Float64Array(n).fill(Infinity);
-  const source = new Uint8Array(n);
-  const baseViscosity = world.params.baseViscosity;
-  const heap = new Heap();
+  const { blocked, cond, region, regions } = ground;
+  const sum = new Float64Array(regions), count = new Float64Array(regions);
+  const light = new Float64Array(n);
   for (let k = 0; k < n; k++) {
-    if (!blocked[k] && intensity[k] >= DRIFT_SOURCE) {
-      // На старте течение ослаблено средой: сила = сила сноса / множитель
-      // градации (вода — полная, отмель — втрое, суша — вдевятеро слабее);
-      // путь укорочен так же.
-      source[k] = 1;
-      spent[k] = budget * (1 - baseViscosity / resistance[k]);
-      heap.push(spent[k], k);
-    }
+    if (blocked[k]) continue;
+    light[k] = sun * (bg + (1 - bg) * intensity[k]);
+    sum[region[k]] += light[k];
+    count[region[k]]++;
   }
-  while (heap.size > 0) {
-    const k = heap.pop();
-    const cost = heap.lastKey;
-    if (cost > spent[k] || cost >= budget) continue;
-    order[ordered++] = k;
-    const i = k % cols;
-    const j = (k - i) / cols;
-    for (let q = 0; q < 8; q++) {
-      const di = NDI[q], dj = NDJ[q], len = NLEN[q];
-      const a = i + di, b = j + dj;
-      if (a < 0 || b < 0 || a >= cols || b >= rows) continue;
-      const m = b * cols + a;
-      if (blocked[m]) continue;
-      // По диагонали — только если не срезаем угол преграды.
-      if (di !== 0 && dj !== 0 && (blocked[j * cols + a] || blocked[b * cols + i])) continue;
-      const next = cost + (len * cell * 0.5 * (pathCost[k] + pathCost[m])) / length;
-      if (next < spent[m]) {
-        spent[m] = next;
-        dist[m] = dist[k] + len;
-        heap.push(next, m);
-      }
-    }
+  // Увлечение: дрейфующие пятна тянут среду за собой — сила по направлению
+  // дрейфа света, тем больше, чем ярче место и быстрее дрейф (на гранях — среднее).
+  const [dvx, dvy] = lightDriftVelocity(world.light, t);
+  const fx = new Float64Array(n), fy = new Float64Array(n);
+  for (let k = 0; k < n; k++) {
+    if (blocked[k]) continue;
+    const pull = DRIFT_DRAG * sun * intensity[k] / LIGHT_DRIFT_SPEED;
+    fx[k] = pull * dvx;
+    fy[k] = pull * dvy;
   }
-
-  // Вектор: направление — прочь от пятна (по росту израсходованного пути),
-  // величина — сила × оставшаяся доля пути. Где встречаются течения, рост с разных сторон гасит друг
-  // друга — там течение кончается.
-  const reached = (k: number) => !blocked[k] && spent[k] < budget;
+  const level0 = levelOf(cols, rows, cond, new Float64Array(n));
+  const { east, south } = level0;
+  const fEast = new Float64Array(n), fSouth = new Float64Array(n);
   for (let j = 0; j < rows; j++) {
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
-      if (!reached(k) || source[k]) continue;
-      const here = spent[k];
-      // Разности в обе стороны: наружу — положительные, к пятну — отрицательные.
-      const r = i < cols - 1 && reached(k + 1) ? spent[k + 1] - here : 0;
-      const l = i > 0 && reached(k - 1) ? spent[k - 1] - here : 0;
-      const d = j < rows - 1 && reached(k + cols) ? spent[k + cols] - here : 0;
-      const u = j > 0 && reached(k - cols) ? spent[k - cols] - here : 0;
-      const ex = r - l;
-      const ey = d - u;
-      const g = Math.hypot(ex, ey);
-      if (g === 0) continue;
-      // Ожидаемый рост за две клетки при здешнем сопротивлении: на гребне, где
-      // встречаются течения, разность мала, и сила гаснет.
-      const expected = (2 * cell * pathCost[k]) / length;
-      const coherence = Math.min(1, g / expected);
-      const s = strength * (budget - here) * coherence;
-      vx[k] = (ex / g) * s;
-      vy[k] = (ey / g) * s;
+      if (east[k]) fEast[k] = (fx[k] + fx[k + 1]) / 2;
+      if (south[k]) fSouth[k] = (fy[k] + fy[k + cols]) / 2;
     }
   }
-
-  // Слияние: каждая клетка передаёт свой расход соседу вниз по течению (от
-  // пятен наружу — уже готовый порядок). Где сходятся пути, расход больше, чем
-  // длина пути, — там течение сильнее (не больше MERGE_MAX).
-  const flux = new Float32Array(n);
-  for (let o = 0; o < ordered; o++) {
-    const k = order[o];
-    if (source[k] || (vx[k] === 0 && vy[k] === 0)) continue;
-    flux[k] += 1;
-    const i = k % cols, j = (k - i) / cols;
-    const sv = Math.sqrt(vx[k] * vx[k] + vy[k] * vy[k]);
-    let best = -1, bestDot = 0;
-    for (let q = 0; q < 8; q++) {
-      const di = NDI[q], dj = NDJ[q], len = NLEN[q];
-      const a = i + di, b = j + dj;
-      if (a < 0 || b < 0 || a >= cols || b >= rows) continue;
-      const m = b * cols + a;
-      if (!reached(m) || spent[m] <= spent[k]) continue;
-      const dot = (di * vx[k] + dj * vy[k]) / (len * sv);
-      if (dot > bestDot) { bestDot = dot; best = m; }
+  // Источник: отклонение света от среднего по отсеку, минус то, что
+  // увлечение само выносит из клетки, — баланс потоков сохраняется.
+  const source = new Float64Array(n);
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) {
+      const k = j * cols + i;
+      if (blocked[k]) continue;
+      let s = light[k] - sum[region[k]] / count[region[k]];
+      s -= east[k] * fEast[k] + south[k] * fSouth[k];
+      if (i > 0) s += east[k - 1] * fEast[k - 1];
+      if (j > 0) s += south[k - cols] * fSouth[k - cols];
+      source[k] = s;
     }
-    if (best >= 0) flux[best] += flux[k];
   }
-  for (let o = 0; o < ordered; o++) {
-    const k = order[o];
-    if (vx[k] === 0 && vy[k] === 0) continue;
-    const f = Math.min(MERGE_MAX, Math.max(1, Math.sqrt(flux[k] / Math.max(1, dist[k]))));
-    vx[k] *= f;
-    vy[k] *= f;
+  const p = solve(levelOf(cols, rows, cond, source));
+  // Плотность потока в клетке — среднее потоков через её грани (давление + увлечение).
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) {
+      const k = j * cols + i;
+      if (blocked[k]) continue;
+      const fw = i > 0 ? east[k - 1] * (p[k - 1] - p[k] + fEast[k - 1]) : 0;
+      const fe = i < cols - 1 ? east[k] * (p[k] - p[k + 1] + fEast[k]) : 0;
+      const fn = j > 0 ? south[k - cols] * (p[k - cols] - p[k] + fSouth[k - cols]) : 0;
+      const fs = j < rows - 1 ? south[k] * (p[k] - p[k + cols] + fSouth[k]) : 0;
+      let x = DRIFT_SPEED * (fw + fe) / 2, y = DRIFT_SPEED * (fn + fs) / 2;
+      const v = Math.hypot(x, y);
+      if (v > DRIFT_MAX) { x *= DRIFT_MAX / v; y *= DRIFT_MAX / v; }
+      vx[k] = x;
+      vy[k] = y;
+    }
   }
   return { cols, rows, cell, vx, vy };
 }

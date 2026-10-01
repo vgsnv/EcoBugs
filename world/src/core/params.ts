@@ -34,16 +34,10 @@ export interface WorldParams {
   baseTemperature: number;
   /** Насколько в пятне теплее, чем на фоне. */
   spotHeat: number;
-  /** Общее сопротивление движению. */
-  baseViscosity: number;
   /** Какую часть чашки занимают вода, отмель и суша. */
   viscosityShares: ViscosityShares;
   /** Средний размер зон вязкости в единицах мира. */
   viscosityZoneSize: number;
-  /** Сила сноса: смещение за шаг в начале течения, единиц мира. */
-  driftStrength: number;
-  /** Длина течений: путь течения в воде (сопротивление 1), единиц мира; в вязкой среде короче. */
-  driftLength: number;
   /** Запас минерала: общее количество в мире — в среднем на единицу свободной площади чашки. */
   mineralStock: number;
   /** Скорость местности: множитель намыва, размыва, подвижек и толчков; 0 — местность неподвижна. */
@@ -63,11 +57,8 @@ export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
   spotSize: 60,
   baseTemperature: 1,
   spotHeat: 1,
-  baseViscosity: 1,
   viscosityShares: Object.freeze({ water: 0.6, shallows: 0.25, land: 0.15 }),
   viscosityZoneSize: 120,
-  driftStrength: 0.3,
-  driftLength: 480,
   mineralStock: 1,
   terrainSpeed: 1,
   quakeInterval: 400000,
@@ -91,10 +82,7 @@ export const PARAM_LABELS: Readonly<Record<string, string>> = {
   'spotSize': 'Размер пятен',
   'baseTemperature': 'Базовая температура',
   'spotHeat': 'Нагрев в пятнах',
-  'baseViscosity': 'Базовая вязкость',
   'viscosityZoneSize': 'Размер зон вязкости',
-  'driftStrength': 'Сила сноса',
-  'driftLength': 'Длина течений',
   'lightDrift': 'Скорость дрейфа света',
   'sunRhythm': 'Размах ритма солнца',
   'sunPeriod': 'Период ритма солнца',
@@ -136,10 +124,7 @@ export function validateParams(p: WorldParams): string[] {
   // Строго больше нуля: сила мутаций «не до нуля» даже на фоне.
   inRange('baseTemperature', p.baseTemperature, 0, 100, true);
   inRange('spotHeat', p.spotHeat, 0, 100);
-  inRange('baseViscosity', p.baseViscosity, 0, 100, true);
   inRange('viscosityZoneSize', p.viscosityZoneSize, 1, 10000);
-  inRange('driftStrength', p.driftStrength, 0, 100);
-  inRange('driftLength', p.driftLength, 10, 10000);
   inRange('lightDrift', p.lightDrift, 0, 100);
   inRange('sunRhythm', p.sunRhythm, 0, 0.9);
   inRange('sunPeriod', p.sunPeriod, 1000, 100_000_000);

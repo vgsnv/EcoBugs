@@ -234,9 +234,9 @@ export function gradationAt(map: ViscosityMap, x: number, y: number): Gradation 
   return map.levels[j * map.cols + i] as Gradation;
 }
 
-/** Сопротивление движению в точке: базовая вязкость × множитель градации. */
-export function resistanceAt(params: Pick<WorldParams, 'baseViscosity'>, map: ViscosityMap, x: number, y: number): number {
-  return params.baseViscosity * interpolate(VISCOSITY_MULTIPLIERS, smoothLevelAt(map, x, y));
+/** Сопротивление движению в точке: множитель градации (постоянные мира), плавно на стыках. */
+export function resistanceAt(map: ViscosityMap, x: number, y: number): number {
+  return interpolate(VISCOSITY_MULTIPLIERS, smoothLevelAt(map, x, y));
 }
 
 /** Доля усваиваемого света в точке. */

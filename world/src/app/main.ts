@@ -208,7 +208,7 @@ function probe(): void {
     `${GRADATION_NAMES[gradationAt(world.viscosity, x, y)]} · уровень ${smoothLevelAt(world.viscosity, x, y).toFixed(2)} · ${where}`,
     `Свет ${worldLightAt(world, x, y).toFixed(3)} · усваивается ${absorptionAt(world.viscosity, x, y).toFixed(2)}`,
     `Температура ${temp.toFixed(2)} · мутации ${mutationStrength(temp).toFixed(2)}`,
-    `Сопротивление движению ${resistanceAt(p, world.viscosity, x, y).toFixed(2)}`,
+    `Сопротивление движению ${resistanceAt(world.viscosity, x, y).toFixed(2)}`,
     `Снос ${Math.hypot(...world.drift.at(x, y, world.step)).toFixed(3)} за шаг`,
     `Минерал ×${mineralDensityAt(world.mineral, p.mineralStock, x, y).toFixed(2)} от среднего · прозрачность ${transparencyAt(world.mineral, x, y).toFixed(2)}`,
     `Залежи ×${depositsAt(world, x, y).toFixed(2)} от среднего запаса`,

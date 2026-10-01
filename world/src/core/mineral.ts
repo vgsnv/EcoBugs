@@ -13,7 +13,7 @@
  */
 import {
   DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_SHRINK, ERUPTION_BURST, ERUPTION_FRONT, ERUPTION_PUSH, MINERAL_SPREAD,
-  MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_LAYER, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
+  MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_SINK_SETTLE, MINERAL_SEEP, MINERAL_LAYER, MINERAL_MOBILITY, DRIFT_REFERENCE, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
   DEPOSIT_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
   VOLCANO_MIN_GAP, VOLCANO_POWER, VOLCANO_BIRTH, VOLCANO_MATURE, VOLCANO_EXTINCT_CHANCE, VOLCANO_WAKE_CHANCE, VOLCANO_DORMANT_LIFE, VOLCANO_FADE, VOLCANO_DEPOSIT_AVOID,
 } from './constants.ts';
@@ -169,8 +169,9 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
   const { a: fa, b: fb, u: fu } = drift.nodes(tMid);
   const sameGrid = fa.cols === cols && fa.rows === rows;
   const v: [number, number] = [0, 0];
-  /** Сила течения в клетке — для намыва и размыва. */
+  /** Сила течения и снос в клетке — для намыва, размыва и оседания там, куда уходит поток. */
   const speed = new Float32Array(src.length);
+  const flowX = new Float32Array(src.length), flowY = new Float32Array(src.length);
 
   // 1. Снос: перенос с сохранением количества.
   for (let j = 0; j < rows; j++) {
@@ -185,13 +186,18 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
         drift.at(x, y, tMid, v);
       }
       speed[k] = Math.sqrt(v[0] * v[0] + v[1] * v[1]);
+      flowX[k] = v[0];
+      flowY[k] = v[1];
       const amount = src[k];
       if (amount === 0) continue;
       let dx = v[0] * P, dy = v[1] * P;
       if (dx === 0 && dy === 0) { dst[k] += amount; continue; }
       // Слоистость: уносится не больше слоя, толщина которого растёт с силой
       // течения; остальное лежит на месте и смывается в следующие разы.
-      const layer = MINERAL_LAYER * speed[k] * P * cell * cell;
+      // Толщина слоя растёт с силой течения и падает с вязкостью: в воде
+      // уносится почти всё, на отмели — тонкий слой, на суше — почти ничего.
+      const mob = multiplierForLevel(terrain.applied[k]);
+      const layer = (MINERAL_LAYER * MINERAL_MOBILITY * speed[k] * P * cell * cell) / (mob * mob);
       const moved = Math.min(amount, layer);
       dst[k] += amount - moved;
       // Не перескакивать перегородки: рядом с ними идём по пути и
@@ -227,7 +233,7 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
   spread(dst, terrain.applied, blocked, cols, rows, MINERAL_SPREAD);
 
   // 2. Местность и залежи.
-  const sMax = params.driftStrength * sunAt(light, tMid);
+  const sMax = DRIFT_REFERENCE * sunAt(light, tMid);
   const settle = (1 - (1 - MINERAL_SETTLE) ** P) * params.terrainSpeed;
   const dissolve = (1 - (1 - DEPOSIT_DISSOLVE) ** P) * params.terrainSpeed;
   const area = cell * cell;
@@ -241,7 +247,14 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     // слабее течение; не выше верха отмели (плавно затихает от 1,2 к 1,4).
     const lvl = (gr[k] + dep[k]) / perLvl;
     const room = Math.min(1, Math.max(0, (1.4 - lvl) / 0.2));
-    const settled = dst[k] * settle * calm * calm * room;
+    // Где поток сходится и уходит (в тени), принесённый им минерал оседает —
+    // тем больше, чем сильнее схождение.
+    const i = k % cols, j = (k - i) / cols;
+    const ux = (n: number) => (blocked[n] ? flowX[k] : flowX[n]), uy = (n: number) => (blocked[n] ? flowY[k] : flowY[n]);
+    const div = ((i < cols - 1 ? ux(k + 1) : flowX[k]) - (i > 0 ? ux(k - 1) : flowX[k])
+      + (j < rows - 1 ? uy(k + cols) : flowY[k]) - (j > 0 ? uy(k - cols) : flowY[k])) / (2 * cell);
+    const sink = Math.min(0.9, Math.max(0, -div) * MINERAL_SINK_SETTLE * P * params.terrainSpeed);
+    const settled = dst[k] * (1 - (1 - settle * calm * calm) * (1 - sink)) * room;
     // Размыв: заметное течение срывает сначала залежи, потом коренной грунт.
     const over = speed[k] - EROSION_THRESHOLD * sMax;
     let erode = over > 0 ? EROSION * over * P * area * params.terrainSpeed : 0;
@@ -292,6 +305,20 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     sunk += g;
   }
   m.depths += sunk;
+
+  // Просачивание: растворённый минерал, застрявший в вязком (отмель, суша),
+  // понемногу уходит в недра — тем быстрее, чем выше вязкость; в воде — нет.
+  const seep = (1 - (1 - MINERAL_SEEP) ** P) * params.terrainSpeed;
+  let seeped = 0;
+  for (let k = 0; k < m.field.length; k++) {
+    if (blocked[k] || m.field[k] === 0) continue;
+    const thick = (multiplierForLevel(terrain.applied[k]) - 1) / 8;
+    if (thick <= 0) continue;
+    const g = m.field[k] * seep * thick;
+    m.field[k] -= g;
+    seeped += g;
+  }
+  m.depths += seeped;
 
   // Подвижки и толчки: подъём — из опускающегося соседа и недр, опускание
   // топит залежи в недра.
