@@ -84,6 +84,22 @@ export function worldLightAt(world: World, x: number, y: number): number {
   return lightAt(world.light, x, y, world.step) * transparencyAt(world.mineral, x, y);
 }
 
+/**
+ * Снос в точке на текущем шаге: течения от света плюс течения от вулканов и
+ * воронок (из жерла и в воронку) — то, что несёт всё в чашке.
+ */
+export function flowAt(world: World, x: number, y: number, out: [number, number] = [0, 0]): [number, number] {
+  world.drift.at(x, y, world.step, out);
+  const m = world.mineral;
+  if (m.flow) {
+    const i = Math.min(m.cols - 1, Math.max(0, Math.floor(x / m.cell)));
+    const j = Math.min(m.rows - 1, Math.max(0, Math.floor(y / m.cell)));
+    out[0] += m.flow.vx[j * m.cols + i];
+    out[1] += m.flow.vy[j * m.cols + i];
+  }
+  return out;
+}
+
 /** Хеш произвольных чисел в порядке перечисления. */
 export function hashNumbers(values: Iterable<number>): number {
   const buf = new Float64Array(1);

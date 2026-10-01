@@ -118,14 +118,30 @@ export const TURBIDITY = 0.11;
  * уносится целиком, густое скопление смывается сверху и оставляет шлейф.
  */
 export const MINERAL_LAYER = 0.05;
+/** Перенос минерала шажками не длиннее клетки — не больше стольких за обновление. */
+export const TRANSPORT_SUBSTEPS = 64;
 /** Подвижность минерала: в воде слой во столько раз толще; по отмели и суше — делится на квадрат множителя вязкости (в 9 и 81 раз меньше). */
 export const MINERAL_MOBILITY = 20;
 
 /**
- * Залежи в глубокой воде (уровень ниже 0,5) затягиваются в недра: доля за шаг
- * на самой большой глубине; к мелководью — меньше, на отмели — нет.
+ * Воронки: скопление — связное место, где залежей не меньше FUNNEL_SHAPE
+ * средних плотностей запаса, с ядром не меньше FUNNEL_DEPOSIT, не меньше
+ * FUNNEL_MIN_CELLS клеток. Одна воронка на ареол — скопление + FUNNEL_REACH
+ * (единиц мира); отверстие — FUNNEL_HOLE_SHARE скопления вокруг самой густой
+ * клетки. Тяга — течение в воронку со всего ареола: забирает за шаг
+ * FUNNEL_DRAW площади его круга; залежи в отверстии поднимаются в среду —
+ * FUNNEL_LIFT за шаг; растворённое в отверстии уходит в недра — FUNNEL_SINK за шаг.
  */
-export const DEPOSIT_SINK = 2e-5;
+export const FUNNEL_DEPOSIT = 4;
+export const FUNNEL_SHAPE = 1.5;
+export const FUNNEL_MIN_CELLS = 20;
+export const FUNNEL_HOLE_SHARE = 0.1;
+/** Тяга воронки считается от стока на грубой сетке через столько клеток (расчёт кешируется). */
+export const FUNNEL_SNAP = 3;
+export const FUNNEL_REACH = 40;
+export const FUNNEL_DRAW = 1e-4;
+export const FUNNEL_LIFT = 1e-5;
+export const FUNNEL_SINK = 1e-4;
 
 /** Залежи понемногу растворяются обратно в среду на месте: доля за шаг (живут сотни тысяч шагов). */
 export const DEPOSIT_DISSOLVE = 3e-6;
@@ -187,11 +203,6 @@ export const QUAKE_RADIUS: readonly [number, number] = [40, 120];
  */
 export const MINERAL_SINK_SETTLE = 0.02;
 
-/**
- * Просачивание в недра: доля растворённого минерала, уходящая за шаг в недра
- * на суше (на отмели — четверть того, в воде — нисколько).
- */
-export const MINERAL_SEEP = 2e-5;
 
 /** Доля растворённого минерала, оседающая за шаг в стоячей воде, — в залежи. */
 export const MINERAL_SETTLE = 4e-5;
@@ -250,16 +261,29 @@ export const VOLCANO_DEPOSIT_AVOID = 0.5;
  */
 export const ERUPTION_RADIUS = 144;
 export const ERUPTION_RADIUS_MIN = 0.35;
-/** Залп: такая доля извержения выходит за первую такую долю его времени. */
+/** Залпы: такая доля вещества извержения (остальное — истечение между залпами). */
 export const ERUPTION_BURST = 0.4;
-export const ERUPTION_FRONT = 0.1;
 /**
- * Импульс извержения: залп впрыскивает в среду круг радиуса выброса, хвост —
- * круг такой доли радиуса. Расталкивание затухает от радиуса выброса до
- * BLAST_FADE радиусов.
+ * Залпы извержения: сколько — случай от 1 до ERUPTION_BURSTS_MAX; первый — в
+ * начале, остальные — в случайный момент не раньше BURST_FROM времени
+ * извержения; каждый длится BURST_WIDTH времени извержения. Бросок вещества
+ * залпом — THROW_RAYS лучей по THROW_SAMPLES запасов дальности.
  */
+export const ERUPTION_BURSTS_MAX = 4;
+export const BURST_FROM = 0.15;
+export const BURST_WIDTH = 0.04;
+export const THROW_RAYS = 96;
+export const THROW_SAMPLES = 6;
+/** Толчок истечения — как от круга такой доли радиуса выброса за всё извержение (залпы — на весь радиус). */
 export const ERUPTION_TAIL_AREA = 0.5;
-export const BLAST_FADE = 1.3;
+/**
+ * Толчок и тяга (вулканы, воронки): дальность в воде — PUSH_LENGTH клеток
+ * (на отмели втрое, на суше вдевятеро короче); расчёт — в окне PUSH_WINDOW
+ * дальностей вокруг источника, PUSH_ITERATIONS итераций.
+ */
+export const PUSH_LENGTH = 20;
+export const PUSH_WINDOW = 2.5;
+export const PUSH_ITERATIONS = 150;
 /**
  * Растекание: доля разницы минерала между соседними клетками воды, которая
  * выравнивается за обновление (по отмели и суше — в 3 и 9 раз меньше).
