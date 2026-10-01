@@ -10,7 +10,7 @@
  * переход, поэтому снос — функция номера шага.
  */
 import { DISH_HEIGHT, DISH_WIDTH, DRIFT_CELL, DRIFT_DECAY, DRIFT_PERIOD, DRIFT_SOURCE } from './constants.ts';
-import { rasterizeSpotIntensity, type LightMap } from './light.ts';
+import { rasterizeSpotIntensity, sunAt, type LightMap } from './light.ts';
 import type { WorldParams } from './params.ts';
 import { isBlocked, type PartitionLayout } from './partitions.ts';
 import { resistanceAt, type ViscosityMap } from './viscosity.ts';
@@ -113,7 +113,8 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
   const cols = COLS;
   const rows = ROWS;
   const n = cols * rows;
-  const budget = world.params.driftStrength;
+  // Запас силы на старте пропорционален силе солнца: ярче — течения сильнее и длиннее.
+  const budget = world.params.driftStrength * sunAt(world.light, t);
   const vx = new Float32Array(n);
   const vy = new Float32Array(n);
   if (budget <= 0) return { cols, rows, cell, vx, vy };

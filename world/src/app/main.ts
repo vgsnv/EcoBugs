@@ -3,7 +3,7 @@
  * Скорость показа — дело приложения; мир знает только номер шага.
  */
 import {
-  WorldFileError, lightDriftVelocity, mineralDensityAt, mineralInEruptions, mineralInMedium, absorptionAt, createWorld, gradationAt, isBlocked, lightAt, makeParams, mutationStrength,
+  WorldFileError, lightDriftVelocity, sunRhythmAt, mineralDensityAt, mineralInEruptions, mineralInMedium, absorptionAt, createWorld, gradationAt, isBlocked, lightAt, makeParams, mutationStrength,
   parseWorldFile, resistanceAt, serializeWorld, stepWorld, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
@@ -25,6 +25,7 @@ const renderer = new WorldRenderer(canvas);
 const minimap = document.querySelector<HTMLCanvasElement>('.minimap')!;
 const driftArrow = document.querySelector<SVGElement>('.light-drift svg')!;
 const mineralStats = document.querySelector<HTMLElement>('.mineral-stats')!;
+const sunLabel = document.querySelector<HTMLElement>('.sun-rhythm')!;
 let mineralStatsVersion = -1;
 /** Время анимации (блики), секунды; стоит на паузе. */
 let animTime = 0;
@@ -222,6 +223,10 @@ function frame(now: number): void {
   renderer.drawMinimap(minimap);
   const [dvx, dvy] = lightDriftVelocity(world.light, world.step);
   driftArrow.style.transform = `rotate(${Math.atan2(dvy, dvx)}rad)`;
+  const rhythm = sunRhythmAt(world.light, world.step);
+  const rising = sunRhythmAt(world.light, world.step + 100) >= rhythm;
+  const sunText = world.params.sunRhythm > 0 ? `солнце ×${rhythm.toFixed(2)} ${rising ? '↑' : '↓'}` : 'солнце ровное';
+  if (sunLabel.textContent !== sunText) sunLabel.textContent = sunText;
   if (world.mineral.version !== mineralStatsVersion) {
     mineralStatsVersion = world.mineral.version;
     const medium = mineralInMedium(world.mineral);

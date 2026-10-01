@@ -60,6 +60,8 @@ export interface LightMap {
   readonly drift: readonly DriftHarmonic[];
   readonly sun: number;
   readonly background: number;
+  /** Ритм солнца: размах, период (шагов) и фаза из сида. */
+  readonly rhythm: { readonly amp: number; readonly period: number; readonly phase: number };
 }
 
 /** Круглая дистанция на сомкнутой оси: результат в [-size/2, size/2). */
@@ -272,6 +274,7 @@ export function createLightMap(params: WorldParams): LightMap {
     drift,
     sun: params.sun,
     background: params.backgroundLevel,
+    rhythm: { amp: params.sunRhythm, period: params.sunPeriod, phase: (deriveSeed(params.seed, 'sun') / 4294967296) * TAU },
   };
 }
 
@@ -311,13 +314,24 @@ export function spotIntensityAt(map: LightMap, x: number, y: number, t: number):
   return spotIntensityAtMap(map, x - ox, y - oy, t);
 }
 
-/** Свет в точке чашки: фон, свет пятна или переход между ними. */
-export function lightFromIntensity(map: LightMap, intensity: number): number {
-  return map.sun * (map.background + (1 - map.background) * intensity);
+/** Множитель ритма солнца в шаге t: плавная волна вокруг 1. */
+export function sunRhythmAt(map: LightMap, t: number): number {
+  const r = map.rhythm;
+  return 1 + r.amp * Math.sin((TAU * t) / r.period + r.phase);
+}
+
+/** Сила солнца в шаге t: параметр «Солнце» × ритм. */
+export function sunAt(map: LightMap, t: number): number {
+  return map.sun * sunRhythmAt(map, t);
+}
+
+/** Свет в точке чашки: фон, свет пятна или переход между ними — при солнце шага t. */
+export function lightFromIntensity(map: LightMap, intensity: number, t: number): number {
+  return sunAt(map, t) * (map.background + (1 - map.background) * intensity);
 }
 
 export function lightAt(map: LightMap, x: number, y: number, t: number): number {
-  return lightFromIntensity(map, spotIntensityAt(map, x, y, t));
+  return lightFromIntensity(map, spotIntensityAt(map, x, y, t), t);
 }
 
 /**

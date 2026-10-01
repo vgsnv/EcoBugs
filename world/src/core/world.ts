@@ -76,7 +76,7 @@ export function hashNumbers(values: Iterable<number>): number {
 export function worldHash(world: World): number {
   const p = world.params;
   return hashNumbers([
-    p.seed, DISH_WIDTH, DISH_HEIGHT, p.sun, p.backgroundLevel, p.illumination, p.spotSize,
+    p.seed, DISH_WIDTH, DISH_HEIGHT, p.sun, p.sunRhythm, p.sunPeriod, p.backgroundLevel, p.illumination, p.spotSize,
     p.baseTemperature, p.spotHeat, p.baseViscosity,
     p.viscosityShares.water, p.viscosityShares.shallows, p.viscosityShares.land,
     p.viscosityZoneSize, p.driftStrength, p.mineralStock, p.volcanoCount, p.eruptionInterval,

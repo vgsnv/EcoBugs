@@ -9,7 +9,7 @@ import { createWorld, worldHash, type World } from './world.ts';
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 6;
+export const WORLD_FORMAT_VERSION = 7;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -18,6 +18,7 @@ const OLD_FORMATS: Record<number, string> = {
   3: 'тогда в мире не было сноса',
   4: 'тогда в мире не было минерала',
   5: 'тогда извержения были мгновенными',
+  6: 'тогда солнце было ровным',
 };
 
 export interface MineralFile {
@@ -95,6 +96,8 @@ function readParams(raw: unknown, problems: string[]): WorldParams | null {
   const params: WorldParams = {
     seed: raw.seed as number,
     sun: raw.sun as number,
+    sunRhythm: raw.sunRhythm as number,
+    sunPeriod: raw.sunPeriod as number,
     backgroundLevel: raw.backgroundLevel as number,
     illumination: raw.illumination as number,
     spotSize: raw.spotSize as number,

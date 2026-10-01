@@ -6,7 +6,7 @@
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
-import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, hash3, isBlocked, periodicFbm, smoothLevelAt, spotAnchors, spotOutlines, SPOT_EDGE, type World } from '../core/index.ts';
+import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, hash3, isBlocked, periodicFbm, smoothLevelAt, spotAnchors, spotOutlines, SPOT_EDGE, sunAt, type World } from '../core/index.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
@@ -477,7 +477,7 @@ export class WorldRenderer {
     sctx.fill(spotsPath, 'nonzero');
 
     // Сила света пятен в абсолютной шкале: 1 при солнце 1.
-    const lit = lightTone(p.sun) / lightTone(1);
+    const lit = lightTone(sunAt(w.light, w.step)) / lightTone(1);
     const penumbra = Math.min(3 * this.dpr, Math.max(0.5, (p.spotSize * SPOT_EDGE * z) / 6));
 
     // Тень: сплошной слой с «дырами» там, где светят пятна (при тусклом солнце
