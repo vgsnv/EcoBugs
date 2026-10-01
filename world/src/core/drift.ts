@@ -79,10 +79,10 @@ class Heap {
   lastKey = 0;
 }
 
-const NEIGHBORS: readonly [number, number, number][] = [
-  [1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
-  [1, 1, Math.SQRT2], [1, -1, Math.SQRT2], [-1, 1, Math.SQRT2], [-1, -1, Math.SQRT2],
-];
+/** Восемь соседей: смещения и длина шага (отдельными массивами — без разбора кортежей в горячих циклах). */
+const NDI = Int8Array.of(1, -1, 0, 0, 1, 1, -1, -1);
+const NDJ = Int8Array.of(0, 0, 1, -1, 1, -1, 1, -1);
+const NLEN = Float64Array.of(1, 1, 1, 1, Math.SQRT2, Math.SQRT2, Math.SQRT2, Math.SQRT2);
 
 /** Неизменное на сетке течений: преграды, сопротивление движению и цена пути течения. */
 interface Ground {
@@ -160,7 +160,8 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
     order[ordered++] = k;
     const i = k % cols;
     const j = (k - i) / cols;
-    for (const [di, dj, len] of NEIGHBORS) {
+    for (let q = 0; q < 8; q++) {
+      const di = NDI[q], dj = NDJ[q], len = NLEN[q];
       const a = i + di, b = j + dj;
       if (a < 0 || b < 0 || a >= cols || b >= rows) continue;
       const m = b * cols + a;
@@ -185,10 +186,13 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
       const k = j * cols + i;
       if (!reached(k) || source[k]) continue;
       const here = spent[k];
-      const side = (m: number, ok: boolean) => (ok && reached(m) ? spent[m] - here : 0);
       // Разности в обе стороны: наружу — положительные, к пятну — отрицательные.
-      const ex = side(k + 1, i < cols - 1) - side(k - 1, i > 0);
-      const ey = side(k + cols, j < rows - 1) - side(k - cols, j > 0);
+      const r = i < cols - 1 && reached(k + 1) ? spent[k + 1] - here : 0;
+      const l = i > 0 && reached(k - 1) ? spent[k - 1] - here : 0;
+      const d = j < rows - 1 && reached(k + cols) ? spent[k + cols] - here : 0;
+      const u = j > 0 && reached(k - cols) ? spent[k - cols] - here : 0;
+      const ex = r - l;
+      const ey = d - u;
       const g = Math.hypot(ex, ey);
       if (g === 0) continue;
       // Ожидаемый рост за две клетки при здешнем сопротивлении: на гребне, где
@@ -212,7 +216,8 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
     const i = k % cols, j = (k - i) / cols;
     const sv = Math.sqrt(vx[k] * vx[k] + vy[k] * vy[k]);
     let best = -1, bestDot = 0;
-    for (const [di, dj, len] of NEIGHBORS) {
+    for (let q = 0; q < 8; q++) {
+      const di = NDI[q], dj = NDJ[q], len = NLEN[q];
       const a = i + di, b = j + dj;
       if (a < 0 || b < 0 || a >= cols || b >= rows) continue;
       const m = b * cols + a;

@@ -194,6 +194,20 @@ const ERUPTION_RING_MIN_CSS = 36;
 
 /** Перерисовывать изменившуюся местность не чаще, мс. */
 const TERRAIN_REDRAW_MS = 1000;
+/**
+ * Перерисовка местности блоками REDRAW_BLOCK единиц мира — только там, где
+ * уровень изменился больше REDRAW_LEVEL или залежи (в средних плотностях)
+ * больше REDRAW_DEPOSIT с прошлой отрисовки.
+ */
+const REDRAW_BLOCK = 64;
+const REDRAW_LEVEL = 0.02;
+const REDRAW_DEPOSIT = 0.3;
+/** Сколько мс кадра можно тратить на дорисовку подложки. */
+const REDRAW_BUDGET_MS = 4;
+/** Шаг маски воды для бликов, единиц мира. */
+const WATER_MASK_STEP = 4;
+/** Дымку минерала пересобирать не чаще, мс. */
+const HAZE_REDRAW_MS = 250;
 
 /** Сторона плитки местности, пикселей. */
 const TILE = 256;
@@ -309,6 +323,13 @@ export class WorldRenderer {
   /** Версия карты вязкости, по которой нарисована местность, и когда перерисована. */
   private terrainVersion = -1;
   private terrainDrawnAt = 0;
+  /** Уровень и залежи, по которым нарисована местность (на сетке минерала). */
+  private drawnLevel = new Float32Array(0);
+  private drawnDeposit = new Float32Array(0);
+  private hazeDrawnAt = 0;
+  /** Блоки подложки, ждущие перерисовки, и сколько блоков в строке. */
+  private readonly redrawQueue = new Set<number>();
+  private redrawCols = 1;
   /** Местность целиком в самом мелком масштабе — подложка, пока нет плиток. */
   private base!: HTMLCanvasElement;
   private sample!: ReturnType<typeof terrainSampler>;
@@ -345,6 +366,10 @@ export class WorldRenderer {
     this.parts = this.buildParts();
     this.waterMask = this.buildWaterMask();
     this.terrainVersion = world.viscosity.version;
+    this.redrawQueue.clear();
+    this.drawnLevel = Float32Array.from(world.terrain.applied);
+    const per = world.mineral.cell * world.mineral.cell * world.params.mineralStock;
+    this.drawnDeposit = Float32Array.from(world.terrain.deposits, (d) => d / per);
     this.resize();
     this.fit();
   }
@@ -358,6 +383,22 @@ export class WorldRenderer {
    * воды и сбросить плитки. Не чаще раза в TERRAIN_REDRAW_MS: на ускорении
    * пересборки идут часто, а картинка нужна плавная.
    */
+  /** Дорисовать часть очереди изменившихся блоков подложки — в пределах REDRAW_BUDGET_MS. */
+  private drainRedraw(): void {
+    if (this.redrawQueue.size === 0) return;
+    const start = performance.now();
+    const bctx = this.base.getContext('2d')!;
+    const wctx = this.waterMask.getContext('2d')!;
+    for (const b of this.redrawQueue) {
+      this.redrawQueue.delete(b);
+      const x0 = (b % this.redrawCols) * REDRAW_BLOCK, y0 = Math.floor(b / this.redrawCols) * REDRAW_BLOCK;
+      const px = REDRAW_BLOCK * TILE_SCALE_MIN;
+      bctx.drawImage(renderTerrain(this.sample, x0, y0, px, px, TILE_SCALE_MIN), x0 * TILE_SCALE_MIN, y0 * TILE_SCALE_MIN);
+      wctx.putImageData(this.waterMaskBlock(x0, y0), x0 / WATER_MASK_STEP, y0 / WATER_MASK_STEP);
+      if (performance.now() - start > REDRAW_BUDGET_MS) break;
+    }
+  }
+
   private refreshTerrain(): void {
     const v = this.world.viscosity.version;
     if (v === this.terrainVersion) return;
@@ -365,10 +406,47 @@ export class WorldRenderer {
     if (now - this.terrainDrawnAt < TERRAIN_REDRAW_MS) return;
     this.terrainVersion = v;
     this.terrainDrawnAt = now;
-    this.base = renderTerrain(this.sample, 0, 0, DISH_WIDTH * TILE_SCALE_MIN, DISH_HEIGHT * TILE_SCALE_MIN, TILE_SCALE_MIN);
-    this.waterMask = this.buildWaterMask();
-    this.tiles.clear();
+    // Перерисовываем только участки, где уровень или залежи заметно изменились
+    // с прошлой отрисовки: блоки по REDRAW_BLOCK единиц мира.
+    const m = this.world.mineral;
+    const level = this.world.terrain.applied;
+    const dep = this.world.terrain.deposits;
+    const perDensity = m.cell * m.cell * this.world.params.mineralStock;
+    const bs = REDRAW_BLOCK / m.cell;
+    const bcols = Math.ceil(m.cols / bs), brows = Math.ceil(m.rows / bs);
+    const dirty = new Uint8Array(bcols * brows);
+    let any = false;
+    for (let k = 0; k < level.length; k++) {
+      const d = dep[k] / perDensity;
+      if (Math.abs(level[k] - this.drawnLevel[k]) > REDRAW_LEVEL || Math.abs(d - this.drawnDeposit[k]) > REDRAW_DEPOSIT) {
+        this.drawnLevel[k] = level[k];
+        this.drawnDeposit[k] = d;
+        const i = k % m.cols, j = (k - i) / m.cols;
+        dirty[Math.floor(j / bs) * bcols + Math.floor(i / bs)] = 1;
+        any = true;
+      }
+    }
+    if (!any) return;
+    // Подложку и маску воды по изменившимся блокам дорисовываем понемногу,
+    // по кадрам (drainRedraw), — чтобы не было рывка.
+    for (let bj = 0; bj < brows; bj++) {
+      for (let bi = 0; bi < bcols; bi++) if (dirty[bj * bcols + bi]) this.redrawQueue.add(bj * bcols + bi);
+    }
+    this.redrawCols = bcols;
+    // Плитки, задевающие изменившиеся блоки, — заново (лениво, как обычно).
+    for (const key of [...this.tiles.keys()]) {
+      const [sc, ti, tj] = key.split(':').map(Number);
+      const span = TILE / sc;
+      const b0i = Math.floor((ti * span) / REDRAW_BLOCK), b1i = Math.floor(((ti + 1) * span - 1e-6) / REDRAW_BLOCK);
+      const b0j = Math.floor((tj * span) / REDRAW_BLOCK), b1j = Math.floor(((tj + 1) * span - 1e-6) / REDRAW_BLOCK);
+      let hit = false;
+      for (let bj = Math.max(0, b0j); bj <= Math.min(brows - 1, b1j) && !hit; bj++) {
+        for (let bi = Math.max(0, b0i); bi <= Math.min(bcols - 1, b1i); bi++) if (dirty[bj * bcols + bi]) { hit = true; break; }
+      }
+      if (hit) this.tiles.delete(key);
+    }
   }
+
 
   /** Подогнать разрешение холстов под размер на экране и плотность пикселей. */
   private resize(): void {
@@ -509,6 +587,7 @@ export class WorldRenderer {
   /** Кадр; `animTime` — секунды анимации бликов (стоит на паузе). */
   draw(animTime = 0): void {
     this.refreshTerrain();
+    this.drainRedraw();
     const w = this.world;
     const p = w.params;
     const ctx = this.ctx;
@@ -594,7 +673,9 @@ export class WorldRenderer {
     const m = this.world.mineral;
     const stock = this.world.params.mineralStock;
     const ctx = this.ctx;
-    if (m.version !== this.mineralVersion || this.mineralCanvas.width !== m.cols) {
+    const nowMs = performance.now();
+    if ((m.version !== this.mineralVersion && nowMs - this.hazeDrawnAt >= HAZE_REDRAW_MS) || this.mineralCanvas.width !== m.cols) {
+      this.hazeDrawnAt = nowMs;
       this.mineralVersion = m.version;
       const c = this.mineralCanvas;
       c.width = m.cols;
@@ -879,25 +960,34 @@ export class WorldRenderer {
 
   /** Маска воды для бликов: непрозрачна в воде, гаснет к отмели, пуста на суше и перегородках. */
   private buildWaterMask(): HTMLCanvasElement {
-    const step = 4;
-    const cols = DISH_WIDTH / step, rows = DISH_HEIGHT / step;
     const c = document.createElement('canvas');
-    c.width = cols;
-    c.height = rows;
+    c.width = DISH_WIDTH / WATER_MASK_STEP;
+    c.height = DISH_HEIGHT / WATER_MASK_STEP;
     const mctx = c.getContext('2d')!;
-    const img = mctx.createImageData(cols, rows);
-    for (let j = 0; j < rows; j++) {
-      for (let i = 0; i < cols; i++) {
-        const x = (i + 0.5) * step, y = (j + 0.5) * step;
-        const water = isBlocked(this.world.partitions, x, y) ? 0 : 1 - smoothstep(0.35, 0.95, smoothLevelAt(this.world.viscosity, x, y));
-        const k = (j * cols + i) * 4;
+    for (let y0 = 0; y0 < DISH_HEIGHT; y0 += REDRAW_BLOCK) {
+      for (let x0 = 0; x0 < DISH_WIDTH; x0 += REDRAW_BLOCK) mctx.putImageData(this.waterMaskBlock(x0, y0), x0 / WATER_MASK_STEP, y0 / WATER_MASK_STEP);
+    }
+    return c;
+  }
+
+  /** Кусок маски воды для блока REDRAW_BLOCK × REDRAW_BLOCK с углом (x0, y0). */
+  private waterMaskBlock(x0: number, y0: number): ImageData {
+    const step = WATER_MASK_STEP;
+    const n = REDRAW_BLOCK / step;
+    const img = new ImageData(n, n);
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const x = x0 + (i + 0.5) * step, y = y0 + (j + 0.5) * step;
+        const inside = x < DISH_WIDTH && y < DISH_HEIGHT;
+        const water = !inside || isBlocked(this.world.partitions, x, y) ? 0 : 1 - smoothstep(0.35, 0.95, smoothLevelAt(this.world.viscosity, x, y));
+        const k = (j * n + i) * 4;
         img.data[k] = img.data[k + 1] = img.data[k + 2] = 255;
         img.data[k + 3] = water * 255;
       }
     }
-    mctx.putImageData(img, 0, 0);
-    return c;
+    return img;
   }
+
 
   /**
    * Кромка стекла: граница между свободными ячейками чашки и занятыми (стена

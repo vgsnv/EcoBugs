@@ -219,16 +219,16 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
       const fx = (x + dx) / cell - 0.5, fy = (y + dy) / cell - 0.5;
       const i0 = Math.floor(fx), j0 = Math.floor(fy);
       const u = fx - i0, w = fy - j0;
+      // Четыре клетки вокруг точки назначения (без временных функций — это горячий цикл).
       let kept = 0;
-      const put = (a: number, b: number, share: number) => {
-        if (share === 0) return;
-        if (a < 0 || b < 0 || a >= cols || b >= rows || blocked[b * cols + a]) { kept += share; return; }
-        dst[b * cols + a] += moved * share;
-      };
-      put(i0, j0, (1 - u) * (1 - w));
-      put(i0 + 1, j0, u * (1 - w));
-      put(i0, j0 + 1, (1 - u) * w);
-      put(i0 + 1, j0 + 1, u * w);
+      const inX0 = i0 >= 0 && i0 < cols, inX1 = i0 + 1 >= 0 && i0 + 1 < cols;
+      const inY0 = j0 >= 0 && j0 < rows, inY1 = j0 + 1 >= 0 && j0 + 1 < rows;
+      const s00 = (1 - u) * (1 - w), s10 = u * (1 - w), s01 = (1 - u) * w, s11 = u * w;
+      const c00 = j0 * cols + i0;
+      if (s00 > 0) { if (inX0 && inY0 && !blocked[c00]) dst[c00] += moved * s00; else kept += s00; }
+      if (s10 > 0) { if (inX1 && inY0 && !blocked[c00 + 1]) dst[c00 + 1] += moved * s10; else kept += s10; }
+      if (s01 > 0) { if (inX0 && inY1 && !blocked[c00 + cols]) dst[c00 + cols] += moved * s01; else kept += s01; }
+      if (s11 > 0) { if (inX1 && inY1 && !blocked[c00 + cols + 1]) dst[c00 + cols + 1] += moved * s11; else kept += s11; }
       dst[k] += moved * kept;
     }
   }
@@ -360,27 +360,27 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
  */
 function runoff(field: Float64Array, ground: Float64Array, deposits: Float64Array, blocked: Uint8Array, cols: number, rows: number, perLevel: number, P: number): Float64Array {
   const out = Float64Array.from(field);
-  const nb = [-1, 1, -cols, cols];
+  const surf = (n: number) => (ground[n] + deposits[n] + field[n]) / perLevel;
   for (let j = 0; j < rows; j++) {
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
       const a = field[k];
       if (a === 0 || blocked[k]) continue;
       const h = (ground[k] + deposits[k] + a) / perLevel;
-      let total = 0;
-      const drops = [0, 0, 0, 0];
-      for (let d = 0; d < 4; d++) {
-        if ((d === 0 && i === 0) || (d === 1 && i === cols - 1) || (d === 2 && j === 0) || (d === 3 && j === rows - 1)) continue;
-        const n = k + nb[d];
-        if (blocked[n]) continue;
-        const drop = h - (ground[n] + deposits[n] + field[n]) / perLevel;
-        if (drop > 0) { drops[d] = drop; total += drop; }
-      }
+      // Перепады к четырём соседям (без временных массивов — горячий цикл).
+      const dl = i > 0 && !blocked[k - 1] ? Math.max(0, h - surf(k - 1)) : 0;
+      const dr = i < cols - 1 && !blocked[k + 1] ? Math.max(0, h - surf(k + 1)) : 0;
+      const du = j > 0 && !blocked[k - cols] ? Math.max(0, h - surf(k - cols)) : 0;
+      const dd = j < rows - 1 && !blocked[k + cols] ? Math.max(0, h - surf(k + cols)) : 0;
+      const total = dl + dr + du + dd;
       if (total === 0) continue;
-      const share = Math.min(0.5, RUNOFF * P * total);
-      const moved = a * share;
+      const moved = a * Math.min(0.5, RUNOFF * P * total);
+      const f = moved / total;
       out[k] -= moved;
-      for (let d = 0; d < 4; d++) if (drops[d] > 0) out[k + nb[d]] += (moved * drops[d]) / total;
+      if (dl > 0) out[k - 1] += f * dl;
+      if (dr > 0) out[k + 1] += f * dr;
+      if (du > 0) out[k - cols] += f * du;
+      if (dd > 0) out[k + cols] += f * dd;
     }
   }
   return out;

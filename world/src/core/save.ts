@@ -10,7 +10,7 @@ import { movement } from './terrain.ts';
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 12;
+export const WORLD_FORMAT_VERSION = 13;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -25,6 +25,7 @@ const OLD_FORMATS: Record<number, string> = {
   9: 'тогда извержения были короткими',
   10: 'тогда скорость дрейфа света не была параметром',
   11: 'тогда не было залежей и вулканы работали по расписанию',
+  12: 'тогда течения пересчитывались вдвое чаще',
 };
 
 export interface MineralFile {
