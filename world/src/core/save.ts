@@ -9,7 +9,7 @@ import { createWorld, worldHash, type World } from './world.ts';
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 5;
+export const WORLD_FORMAT_VERSION = 6;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -17,12 +17,13 @@ const OLD_FORMATS: Record<number, string> = {
   2: 'тогда планировка была параметром, теперь её выбирает сид',
   3: 'тогда в мире не было сноса',
   4: 'тогда в мире не было минерала',
+  5: 'тогда извержения были мгновенными',
 };
 
 export interface MineralFile {
   depths: number;
-  /** Для каждого вулкана — номер следующего извержения и его шаг. */
-  volcanoes: [number, number][];
+  /** Для каждого вулкана: номер следующего извержения, его шаг; идёт ли извержение (0/1), до какого шага, выброс за шаг, сколько осталось. */
+  volcanoes: [number, number, number, number, number, number][];
   /** Растворённый минерал по клеткам: Float64, little-endian, base64. */
   field: string;
 }
@@ -57,7 +58,7 @@ export function worldToFile(world: World, savedAt?: Date): WorldFile {
     step: world.step,
     mineral: {
       depths: world.mineral.depths,
-      volcanoes: world.mineral.volcanoes.map((v) => [v.k, v.next]),
+      volcanoes: world.mineral.volcanoes.map((v) => [v.k, v.next, v.active ? 1 : 0, v.until, v.rate, v.left]),
       field: toBase64(new Uint8Array(world.mineral.field.buffer.slice(0))),
     },
     checksum: worldHash(world).toString(16).padStart(8, '0'),
@@ -175,9 +176,14 @@ function restoreMineral(world: World, raw: unknown): string[] {
   if (bytes.length !== m.field.length * 8) return ['Поле минерала другого размера'];
   const field = new Float64Array(bytes.buffer, bytes.byteOffset, m.field.length).slice();
   for (const [i, entry] of (raw.volcanoes as unknown[]).entries()) {
-    if (!Array.isArray(entry) || entry.length !== 2 || !entry.every((x) => Number.isSafeInteger(x))) return [`Вулкан ${i + 1}: ожидаются два целых`];
-    m.volcanoes[i].k = entry[0] as number;
-    m.volcanoes[i].next = entry[1] as number;
+    if (!Array.isArray(entry) || entry.length !== 6 || !entry.every((x) => typeof x === 'number' && Number.isFinite(x) && x >= 0)
+      || ![0, 1, 3].every((n) => Number.isSafeInteger(entry[n])) || (entry[2] !== 0 && entry[2] !== 1)) {
+      return [`Вулкан ${i + 1}: ожидаются шесть неотрицательных чисел`];
+    }
+    const v = m.volcanoes[i];
+    [v.k, v.next] = [entry[0] as number, entry[1] as number];
+    v.active = entry[2] === 1;
+    [v.until, v.rate, v.left] = [entry[3] as number, entry[4] as number, entry[5] as number];
   }
   m.field = field;
   m.depths = raw.depths;

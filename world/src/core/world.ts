@@ -82,7 +82,7 @@ export function worldHash(world: World): number {
     p.viscosityZoneSize, p.driftStrength, p.mineralStock, p.volcanoCount, p.eruptionInterval,
     world.step,
     world.mineral.depths,
-    ...world.mineral.volcanoes.flatMap((v) => [v.k, v.next]),
+    ...world.mineral.volcanoes.flatMap((v) => [v.k, v.next, v.active ? 1 : 0, v.until, v.rate, v.left]),
     ...world.mineral.field,
   ]);
 }

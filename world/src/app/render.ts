@@ -6,7 +6,7 @@
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
-import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, hash3, isBlocked, periodicFbm, smoothLevelAt, spotAnchors, spotOutlines, SPOT_EDGE, type Eruption, type World } from '../core/index.ts';
+import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, hash3, isBlocked, periodicFbm, smoothLevelAt, spotAnchors, spotOutlines, SPOT_EDGE, type World } from '../core/index.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
@@ -172,8 +172,11 @@ function ripple(): HTMLCanvasElement {
 export const MINERAL_COLOR: Rgb = [196, 128, 255];
 const MINERAL_FULL = 4;
 const MINERAL_ALPHA = 0.6;
-/** Кольцо извержения: сколько секунд расходится. */
-const ERUPTION_SHOW_S = 3;
+/** Кольца идущего извержения: сколько секунд расходится одно, сколько колец сразу. */
+const ERUPTION_RING_S = 1.6;
+const ERUPTION_RINGS = 3;
+const ERUPTION_RING_COLOR = 'rgb(240, 225, 255)';
+const ERUPTION_RING_MIN_CSS = 36;
 
 /** Сторона плитки местности, пикселей. */
 const TILE = 256;
@@ -255,10 +258,6 @@ export class WorldRenderer {
   /** Дымка минерала (клетка поля — пиксель) и версия поля, по которой она построена. */
   private readonly mineralCanvas = document.createElement('canvas');
   private mineralVersion = -1;
-  /** Извержения, которые показываем: где и когда (время анимации) началось. */
-  private eruptions: { x: number; y: number; t0: number }[] = [];
-  private lastEruption: Eruption | null = null;
-  private seenMineral: unknown = null;
   /** Контуры пятен последнего кадра — для мини-карты. */
   private lastSpots = new Path2D();
   private world!: World;
@@ -578,34 +577,31 @@ export class WorldRenderer {
     ctx.drawImage(this.mineralCanvas, 0, 0, m.cols * m.cell, m.rows * m.cell);
     ctx.restore();
 
-    // Новые извержения — в очередь показа: всё, что после последнего увиденного
-    // (мир сменился — начинаем заново, старые не показываем).
-    if (this.seenMineral !== m) { this.seenMineral = m; this.lastEruption = m.recent.at(-1) ?? null; this.eruptions = []; }
-    const from = this.lastEruption ? m.recent.lastIndexOf(this.lastEruption) + 1 : 0;
-    for (const e of m.recent.slice(from)) {
-      const v = m.volcanoes[e.volcano];
-      this.eruptions.push({ x: v.x, y: v.y, t0: animTime });
-    }
-    this.lastEruption = m.recent.at(-1) ?? this.lastEruption;
-    this.eruptions = this.eruptions.filter((e) => animTime - e.t0 < ERUPTION_SHOW_S);
-
-    for (const e of this.eruptions) {
-      const f = (animTime - e.t0) / ERUPTION_SHOW_S;
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = 1 - f;
-      ctx.strokeStyle = rgb(MINERAL_COLOR);
-      ctx.lineWidth = this.px(2.5);
-      ctx.beginPath();
-      ctx.arc(e.x, e.y, ERUPTION_RADIUS * (0.2 + f), 0, Math.PI * 2);
-      ctx.stroke();
+    // Идущие извержения: кольца расходятся от вулкана, пока он извергается;
+    // ярче — чем сильнее выброс.
+    const maxRate = Math.max(1e-9, ...m.volcanoes.map((v) => (v.active ? v.rate : 0)));
+    for (const v of m.volcanoes) {
+      if (!v.active) continue;
+      const strength = 0.45 + 0.55 * Math.min(1, v.rate / maxRate);
+      for (let n = 0; n < ERUPTION_RINGS; n++) {
+        const f = (animTime / ERUPTION_RING_S + n / ERUPTION_RINGS) % 1;
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = (1 - f) * strength;
+        ctx.strokeStyle = ERUPTION_RING_COLOR;
+        ctx.lineWidth = this.px(2);
+        ctx.beginPath();
+        // Не меньше ERUPTION_RING_MIN_CSS на экране — чтобы было видно и на всей чашке.
+        ctx.arc(v.x, v.y, Math.max(ERUPTION_RADIUS, this.px(ERUPTION_RING_MIN_CSS)) * (0.15 + 0.85 * f), 0, Math.PI * 2);
+        ctx.stroke();
+      }
     }
     ctx.globalAlpha = 1;
-    // Вулканы: тёмный кружок с фиолетовой каймой.
+    // Вулканы: тёмный кружок с фиолетовой каймой; извергающийся — светлый.
     const r = this.px(5);
     for (const v of m.volcanoes) {
       ctx.beginPath();
-      ctx.arc(v.x, v.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(30, 18, 40, 0.9)';
+      ctx.arc(v.x, v.y, v.active ? r * 1.3 : r, 0, Math.PI * 2);
+      ctx.fillStyle = v.active ? ERUPTION_RING_COLOR : 'rgba(30, 18, 40, 0.9)';
       ctx.fill();
       ctx.lineWidth = this.px(2);
       ctx.strokeStyle = rgb(MINERAL_COLOR);

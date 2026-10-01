@@ -105,8 +105,17 @@ export const MINERAL_SETTLE = 4e-5;
 /** Доля запаса минерала, лежащая в недрах при сотворении. */
 export const MINERAL_START_DEPTHS = 0.2;
 
-/** Доля недр, которую выбрасывает одно извержение. */
-export const ERUPTION_SHARE = 0.25;
+/** Доля недр, которую выбрасывает одно извержение (при мощности вулкана 1) — случайно от и до. */
+export const ERUPTION_SHARE: readonly [number, number] = [0.1, 0.4];
+
+/** Длительность извержения, шагов — случайно от и до. Минерал выходит равномерно всё это время. */
+export const ERUPTION_DURATION: readonly [number, number] = [300, 3000];
+
+/** Мощность вулкана — постоянная, из сида: множитель доли выброса, от и до. */
+export const VOLCANO_POWER: readonly [number, number] = [0.6, 1.4];
+
+/** Сколько вулканов может извергаться одновременно; остальные ждут своей очереди. */
+export const MAX_ACTIVE_ERUPTIONS = 1;
 
 /** Радиус выброса вокруг вулкана, единиц мира. */
 export const ERUPTION_RADIUS = 48;
