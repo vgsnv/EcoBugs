@@ -40,6 +40,8 @@ export interface WorldParams {
   viscosityZoneSize: number;
   /** Сила сноса: смещение за шаг в начале течения, единиц мира. */
   driftStrength: number;
+  /** Длина течений: путь течения в воде (сопротивление 1), единиц мира; в вязкой среде короче. */
+  driftLength: number;
   /** Запас минерала: общее количество в мире — в среднем на единицу свободной площади чашки. */
   mineralStock: number;
   /** Число вулканов; на деле не меньше числа отсеков. */
@@ -62,6 +64,7 @@ export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
   viscosityShares: Object.freeze({ water: 0.6, shallows: 0.25, land: 0.15 }),
   viscosityZoneSize: 120,
   driftStrength: 0.3,
+  driftLength: 480,
   mineralStock: 1,
   volcanoCount: 6,
   eruptionInterval: 20000,
@@ -88,6 +91,7 @@ export const PARAM_LABELS: Readonly<Record<string, string>> = {
   'baseViscosity': 'Базовая вязкость',
   'viscosityZoneSize': 'Размер зон вязкости',
   'driftStrength': 'Сила сноса',
+  'driftLength': 'Длина течений',
   'sunRhythm': 'Размах ритма солнца',
   'sunPeriod': 'Период ритма солнца',
   'mineralStock': 'Запас минерала',
@@ -131,6 +135,7 @@ export function validateParams(p: WorldParams): string[] {
   inRange('baseViscosity', p.baseViscosity, 0, 100, true);
   inRange('viscosityZoneSize', p.viscosityZoneSize, 1, 10000);
   inRange('driftStrength', p.driftStrength, 0, 100);
+  inRange('driftLength', p.driftLength, 10, 10000);
   inRange('sunRhythm', p.sunRhythm, 0, 0.9);
   inRange('sunPeriod', p.sunPeriod, 1000, 100_000_000);
   inRange('mineralStock', p.mineralStock, 0, 100, true);

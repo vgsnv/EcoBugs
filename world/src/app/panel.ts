@@ -35,7 +35,7 @@ export const SPEED_KEYS = SPEEDS.map((_, i) => String(i + 1));
 
 const OPEN_GROUPS_KEY = 'ecobugs.params.open';
 
-type NumberKey = 'sun' | 'sunRhythm' | 'sunPeriod' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'baseViscosity' | 'viscosityZoneSize' | 'driftStrength' | 'mineralStock' | 'volcanoCount' | 'eruptionInterval';
+type NumberKey = 'sun' | 'sunRhythm' | 'sunPeriod' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'baseViscosity' | 'viscosityZoneSize' | 'driftStrength' | 'driftLength' | 'mineralStock' | 'volcanoCount' | 'eruptionInterval';
 
 interface SliderSpec {
   key: NumberKey;
@@ -76,7 +76,8 @@ const GROUPS: readonly { title: string; sliders: readonly SliderSpec[] }[] = [
   {
     title: 'Снос',
     sliders: [
-      { key: 'driftStrength', label: 'Сила сноса', hint: 'Течения идут от краёв пятен света наружу. Сила — смещение за шаг в начале течения; по пути течение слабеет (быстрее на отмели, почти сразу на суше) и чем сильнее, тем дальше уходит. Снесённое копится там, где течения кончаются.', min: 0, max: 1, step: 0.05 },
+      { key: 'driftLength', label: 'Длина течений', hint: 'Сколько течение проходит от края пятна в воде; на отмели путь втрое, на суше вдевятеро короче. От силы течения не зависит.', min: 60, max: 1500, step: 20 },
+      { key: 'driftStrength', label: 'Сила сноса', hint: 'Течения идут от краёв пятен света наружу. Сила — смещение за шаг в начале течения (умножается на силу солнца); к концу течения она убывает до нуля. Снесённое копится там, где течения кончаются; густое смывается постепенно, оставляя шлейф.', min: 0, max: 1, step: 0.05 },
     ],
   },
   {

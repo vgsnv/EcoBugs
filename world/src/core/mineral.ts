@@ -13,7 +13,7 @@
  */
 import {
   DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_SHARE, ERUPTION_SPREAD,
-  MAX_ACTIVE_ERUPTIONS, MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_START_DEPTHS,
+  MAX_ACTIVE_ERUPTIONS, MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_START_DEPTHS, MINERAL_LAYER, TURBIDITY,
   VOLCANO_MIN_GAP, VOLCANO_POWER,
 } from './constants.ts';
 import type { Drift } from './drift.ts';
@@ -173,6 +173,11 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
       }
       let dx = v[0] * P, dy = v[1] * P;
       if (dx === 0 && dy === 0) { dst[k] += amount; continue; }
+      // Слоистость: уносится не больше слоя, толщина которого растёт с силой
+      // течения; остальное лежит на месте и смывается в следующие разы.
+      const layer = MINERAL_LAYER * Math.hypot(v[0], v[1]) * P * cell * cell;
+      const moved = Math.min(amount, layer);
+      dst[k] += amount - moved;
       // Не перескакивать перегородки: идём по пути и останавливаемся перед преградой.
       const len = Math.hypot(dx, dy);
       const probes = Math.ceil(len / (cell * 0.5));
@@ -191,9 +196,9 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
       for (const [a, b, share] of parts) {
         if (share === 0) continue;
         if (a < 0 || b < 0 || a >= cols || b >= rows || blocked[b * cols + a]) { kept += share; continue; }
-        dst[b * cols + a] += amount * share;
+        dst[b * cols + a] += moved * share;
       }
-      dst[k] += amount * kept;
+      dst[k] += moved * kept;
     }
   }
 
@@ -296,3 +301,26 @@ export function mineralDensityAt(m: MineralState, stock: number, x: number, y: n
   const j = Math.min(m.rows - 1, Math.max(0, Math.floor(y / m.cell)));
   return m.field[j * m.cols + i] / (m.cell * m.cell) / stock;
 }
+
+/** Плотность растворённого минерала в точке (количество на единицу площади), билинейно по клеткам. */
+export function mineralDensity(m: MineralState, x: number, y: number): number {
+  const fx = Math.min(m.cols - 1, Math.max(0, x / m.cell - 0.5));
+  const fy = Math.min(m.rows - 1, Math.max(0, y / m.cell - 0.5));
+  const i0 = Math.floor(fx), j0 = Math.floor(fy);
+  const i1 = Math.min(m.cols - 1, i0 + 1), j1 = Math.min(m.rows - 1, j0 + 1);
+  const u = fx - i0, v = fy - j0;
+  const f = m.field;
+  const a = f[j0 * m.cols + i0] + (f[j0 * m.cols + i1] - f[j0 * m.cols + i0]) * u;
+  const b = f[j1 * m.cols + i0] + (f[j1 * m.cols + i1] - f[j1 * m.cols + i0]) * u;
+  return (a + (b - a) * v) / (m.cell * m.cell);
+}
+
+/** Мутность: доля света, проходящая сквозь растворённый минерал (0, 1]. */
+export function transparencyForDensity(density: number): number {
+  return 1 / (1 + TURBIDITY * density);
+}
+
+export function transparencyAt(m: MineralState, x: number, y: number): number {
+  return transparencyForDensity(mineralDensity(m, x, y));
+}
+

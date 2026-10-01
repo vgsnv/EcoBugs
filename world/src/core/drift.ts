@@ -1,7 +1,8 @@
 /**
  * Снос (спецификация, раздел «Снос»): течения начинаются на краю пятен света
  * с силой, ослабленной средой в месте старта, и идут наружу, по самой дешёвой
- * дороге; по пути тратят силу пропорционально сопротивлению движению; кончаются, где сила иссякла или встретились течения
+ * дороге; длина пути — параметр (в воде), в вязкой среде путь тратится быстрее
+ * пропорционально сопротивлению; сила убывает до нуля к концу пути; кончаются, где сила иссякла или встретились течения
  * от разных пятен. Смещение за шаг равно силе течения в точке.
  *
  * Расчёт — «расстояние с ценой» от краёв пятен на грубой сетке (Дейкстра),
@@ -9,7 +10,7 @@
  * Поле пересчитывается раз в DRIFT_PERIOD шагов, между пересчётами — плавный
  * переход, поэтому снос — функция номера шага.
  */
-import { DISH_HEIGHT, DISH_WIDTH, DRIFT_CELL, DRIFT_DECAY, DRIFT_PERIOD, DRIFT_SOURCE } from './constants.ts';
+import { DISH_HEIGHT, DISH_WIDTH, DRIFT_CELL, DRIFT_PERIOD, DRIFT_SOURCE } from './constants.ts';
 import { rasterizeSpotIntensity, sunAt, type LightMap } from './light.ts';
 import type { WorldParams } from './params.ts';
 import { isBlocked, type PartitionLayout } from './partitions.ts';
@@ -113,25 +114,31 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
   const cols = COLS;
   const rows = ROWS;
   const n = cols * rows;
-  // Запас силы на старте пропорционален силе солнца: ярче — течения сильнее и длиннее.
-  const budget = world.params.driftStrength * sunAt(world.light, t);
+  // Сила на старте (в воде) — сила сноса × сила солнца: ярче — течения быстрее.
+  // Длина от силы не зависит: путь меряется в долях длины течений.
+  const strength = world.params.driftStrength * sunAt(world.light, t);
+  const length = world.params.driftLength;
   const vx = new Float32Array(n);
   const vy = new Float32Array(n);
-  if (budget <= 0) return { cols, rows, cell, vx, vy };
+  if (strength <= 0 || length <= 0) return { cols, rows, cell, vx, vy };
+  const budget = 1;
 
   const intensity = rasterizeSpotIntensity(world.light, t, cols, rows, cell);
   const { blocked, resistance } = ground;
 
-  // Потраченная сила: на краях пятен — сколько отняла среда на старте, дальше
-  // растёт по пути; Infinity — не дошло.
-  const spent = new Float32Array(n).fill(Infinity);
+  // Израсходованная доля пути (0…1): на краях пятен — сколько отняла среда на
+  // старте, дальше растёт с пройденным путём × сопротивление; Infinity — не дошло.
+  // Двойная точность: те же числа, что в очереди, — иначе округление ломает
+  // проверку «уже лучше» и клетки проталкиваются заново.
+  const spent = new Float64Array(n).fill(Infinity);
   const source = new Uint8Array(n);
   const baseViscosity = world.params.baseViscosity;
   const heap = new Heap();
   for (let k = 0; k < n; k++) {
     if (!blocked[k] && intensity[k] >= DRIFT_SOURCE) {
-      // На старте течение тоже ослаблено средой: сила = сила сноса / множитель
-      // градации (вода — полная, отмель — втрое, суша — вдевятеро слабее).
+      // На старте течение ослаблено средой: сила = сила сноса / множитель
+      // градации (вода — полная, отмель — втрое, суша — вдевятеро слабее);
+      // путь укорочен так же.
       source[k] = 1;
       spent[k] = budget * (1 - baseViscosity / resistance[k]);
       heap.push(spent[k], k);
@@ -150,7 +157,7 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
       if (blocked[m]) continue;
       // По диагонали — только если не срезаем угол преграды.
       if (di !== 0 && dj !== 0 && (blocked[j * cols + a] || blocked[b * cols + i])) continue;
-      const next = cost + DRIFT_DECAY * len * cell * 0.5 * (resistance[k] + resistance[m]);
+      const next = cost + (len * cell * 0.5 * (resistance[k] + resistance[m])) / length;
       if (next < spent[m]) {
         spent[m] = next;
         heap.push(next, m);
@@ -158,8 +165,8 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
     }
   }
 
-  // Вектор: направление — прочь от пятна (по росту потраченной силы), величина —
-  // оставшаяся сила. Где встречаются течения, рост с разных сторон гасит друг
+  // Вектор: направление — прочь от пятна (по росту израсходованного пути),
+  // величина — сила × оставшаяся доля пути. Где встречаются течения, рост с разных сторон гасит друг
   // друга — там течение кончается.
   const reached = (k: number) => !blocked[k] && spent[k] < budget;
   for (let j = 0; j < rows; j++) {
@@ -175,9 +182,9 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
       if (g === 0) continue;
       // Ожидаемый рост за две клетки при здешнем сопротивлении: на гребне, где
       // встречаются течения, разность мала, и сила гаснет.
-      const expected = 2 * DRIFT_DECAY * cell * resistance[k];
+      const expected = (2 * cell * resistance[k]) / length;
       const coherence = Math.min(1, g / expected);
-      const s = (budget - here) * coherence;
+      const s = strength * (budget - here) * coherence;
       vx[k] = (ex / g) * s;
       vy[k] = (ey / g) * s;
     }

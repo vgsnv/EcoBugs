@@ -6,7 +6,7 @@
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
-import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, hash3, isBlocked, periodicFbm, smoothLevelAt, spotAnchors, spotOutlines, SPOT_EDGE, sunAt, type World } from '../core/index.ts';
+import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, hash3, isBlocked, periodicFbm, smoothLevelAt, spotAnchors, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, type World } from '../core/index.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
@@ -122,7 +122,7 @@ const GLINT_LAYERS = [
  */
 const LINE_ANCHOR_SPACING = 60;
 const LINE_STEP = 4;
-const LINE_MAX_POINTS = 150;
+const LINE_MAX_POINTS = 400;
 const LINE_MIN_SHARE = 0.05;
 const LINE_DASH = 5;
 const LINE_GAP = 5;
@@ -172,6 +172,8 @@ function ripple(): HTMLCanvasElement {
 export const MINERAL_COLOR: Rgb = [196, 128, 255];
 const MINERAL_FULL = 4;
 const MINERAL_ALPHA = 0.6;
+/** Насколько мягче показывать затемнение от мутности, чем по модели (1 — как есть). */
+const MURK_STRENGTH = 0.8;
 /** Кольца идущего извержения: сколько секунд расходится одно, сколько колец сразу. */
 const ERUPTION_RING_S = 1.6;
 const ERUPTION_RINGS = 3;
@@ -257,6 +259,8 @@ export class WorldRenderer {
   private linesKey = '';
   /** Дымка минерала (клетка поля — пиксель) и версия поля, по которой она построена. */
   private readonly mineralCanvas = document.createElement('canvas');
+  /** Затемнение от мутности (серый для умножения), той же сетки. */
+  private readonly murkCanvas = document.createElement('canvas');
   private mineralVersion = -1;
   /** Контуры пятен последнего кадра — для мини-карты. */
   private lastSpots = new Path2D();
@@ -557,6 +561,20 @@ export class WorldRenderer {
           }
         }
       }
+      const murk = this.murkCanvas;
+      murk.width = m.cols;
+      murk.height = m.rows;
+      const kctx = murk.getContext('2d')!;
+      const dark = kctx.createImageData(m.cols, m.rows);
+      const meanT = transparencyForDensity(stock);
+      for (let k = 0; k < m.field.length; k++) {
+        // Мутность: темнее там, где прозрачность ниже, чем при средней плотности.
+        const shade = Math.min(1, transparencyForDensity(smooth[k] / area) / meanT);
+        const g = 255 * (1 - (1 - shade) * MURK_STRENGTH);
+        dark.data[k * 4] = dark.data[k * 4 + 1] = dark.data[k * 4 + 2] = g;
+        dark.data[k * 4 + 3] = 255;
+      }
+      kctx.putImageData(dark, 0, 0);
       for (let k = 0; k < m.field.length; k++) {
         const d = smooth[k] / area / stock;
         const a = Math.min(1, Math.max(0, (d - 1) / (MINERAL_FULL - 1))) ** 0.8 * MINERAL_ALPHA;
@@ -572,8 +590,10 @@ export class WorldRenderer {
     ctx.rect(0, 0, DISH_WIDTH, DISH_HEIGHT);
     ctx.clip();
     ctx.imageSmoothingEnabled = true;
-    ctx.globalCompositeOperation = 'screen';
     ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.drawImage(this.murkCanvas, 0, 0, m.cols * m.cell, m.rows * m.cell);
+    ctx.globalCompositeOperation = 'screen';
     ctx.drawImage(this.mineralCanvas, 0, 0, m.cols * m.cell, m.rows * m.cell);
     ctx.restore();
 

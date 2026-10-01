@@ -4,12 +4,12 @@
 import { DISH_HEIGHT, DISH_WIDTH } from './constants.ts';
 import { mix32 } from './prng.ts';
 import { type WorldParams, validateParams } from './params.ts';
-import { type LightMap, createLightMap } from './light.ts';
+import { type LightMap, createLightMap, lightAt } from './light.ts';
 import { type ViscosityMap, createViscosityMap } from './viscosity.ts';
 import { type PartitionLayout, buildLayout, layoutForSeed } from './partitions.ts';
 import { Drift } from './drift.ts';
 import { MINERAL_PERIOD } from './constants.ts';
-import { createMineral, updateMineral, type MineralState } from './mineral.ts';
+import { createMineral, transparencyAt, updateMineral, type MineralState } from './mineral.ts';
 
 export interface World {
   readonly params: Readonly<WorldParams>;
@@ -59,6 +59,11 @@ export function stepWorld(world: World): void {
   if (world.step % MINERAL_PERIOD === 0) updateMineral(world.mineral, world.params, world.drift, world.partitions, world.step);
 }
 
+/** Свет, доходящий до места: свет карты при текущем солнце × прозрачность (мутность от минерала). */
+export function worldLightAt(world: World, x: number, y: number): number {
+  return lightAt(world.light, x, y, world.step) * transparencyAt(world.mineral, x, y);
+}
+
 /** Хеш произвольных чисел в порядке перечисления. */
 export function hashNumbers(values: Iterable<number>): number {
   const buf = new Float64Array(1);
@@ -79,7 +84,7 @@ export function worldHash(world: World): number {
     p.seed, DISH_WIDTH, DISH_HEIGHT, p.sun, p.sunRhythm, p.sunPeriod, p.backgroundLevel, p.illumination, p.spotSize,
     p.baseTemperature, p.spotHeat, p.baseViscosity,
     p.viscosityShares.water, p.viscosityShares.shallows, p.viscosityShares.land,
-    p.viscosityZoneSize, p.driftStrength, p.mineralStock, p.volcanoCount, p.eruptionInterval,
+    p.viscosityZoneSize, p.driftStrength, p.driftLength, p.mineralStock, p.volcanoCount, p.eruptionInterval,
     world.step,
     world.mineral.depths,
     ...world.mineral.volcanoes.flatMap((v) => [v.k, v.next, v.active ? 1 : 0, v.until, v.rate, v.left]),
