@@ -12,7 +12,7 @@
  * назначения; в перегородки не попадает.
  */
 import {
-  DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_SHRINK, ERUPTION_BURST, ERUPTION_FRONT, ERUPTION_PUSH, ERUPTION_TAIL_REACH, MINERAL_SPREAD,
+  DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_BURST, ERUPTION_FRONT, ERUPTION_TAIL_AREA, BLAST_FADE, MINERAL_SPREAD,
   MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_SINK_SETTLE, MINERAL_SEEP, MINERAL_LAYER, MINERAL_MOBILITY, DRIFT_REFERENCE, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
   DEPOSIT_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
   VOLCANO_MIN_GAP, VOLCANO_POWER, VOLCANO_BIRTH, VOLCANO_MATURE, VOLCANO_EXTINCT_CHANCE, VOLCANO_WAKE_CHANCE, VOLCANO_DORMANT_LIFE, VOLCANO_FADE, VOLCANO_DEPOSIT_AVOID,
@@ -190,6 +190,7 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
       flowY[k] = v[1];
       const amount = src[k];
       if (amount === 0) continue;
+      const flow = Math.sqrt(v[0] * v[0] + v[1] * v[1]);
       let dx = v[0] * P, dy = v[1] * P;
       if (dx === 0 && dy === 0) { dst[k] += amount; continue; }
       // Слоистость: уносится не больше слоя, толщина которого растёт с силой
@@ -197,13 +198,13 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
       // Толщина слоя растёт с силой течения и падает с вязкостью: в воде
       // уносится почти всё, на отмели — тонкий слой, на суше — почти ничего.
       const mob = multiplierForLevel(terrain.applied[k]);
-      const layer = (MINERAL_LAYER * MINERAL_MOBILITY * speed[k] * P * cell * cell) / (mob * mob);
+      const layer = (MINERAL_LAYER * MINERAL_MOBILITY * flow * P * cell * cell) / (mob * mob);
       const moved = Math.min(amount, layer);
       dst[k] += amount - moved;
       // Не перескакивать перегородки: рядом с ними идём по пути и
       // останавливаемся перед преградой (вдали от перегородок путь свободен).
-      if (m.nearWall[k] || speed[k] * P > NEAR_WALL * cell) {
-        const probes = Math.ceil((speed[k] * P) / (cell * 0.5));
+      if (m.nearWall[k] || flow * P > NEAR_WALL * cell) {
+        const probes = Math.ceil((flow * P) / (cell * 0.5));
         let f = 1;
         for (let p = 1; p <= probes; p++) {
           const t = p / probes;
@@ -369,21 +370,10 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     if (vol.stage !== 'erupting') continue;
     const d = vol.until - vol.begin;
     const u0 = (step - P - vol.begin) / d, u1 = (step - vol.begin) / d;
-    // Залп выходит в жерло, и давление гонит массу наружу — до фронта;
-    // хвост выходит в окрестность жерла, гуще у жерла и к концу всё ближе
-    // (см. eruptionProfile, eruptionFront, eruptionReach, push).
-    const burst = vol.total * (burstProfile(u1) - burstProfile(u0));
-    const tail = vol.total * (tailProfile(u1) - tailProfile(u0));
-    const out = step >= vol.until ? vol.left : Math.min(vol.left, Math.max(0, burst + tail));
-    const share = burst + tail > 0 ? burst / (burst + tail) : 0;
-    const field = viscousDistances(m, terrain, vol.x, vol.y, vol.radius);
-    m.field[field.cells[0]] += out * share;
-    // Дальность толчка — по доле залпа за обновление: весь залп доталкивает массу примерно до фронта.
-    const db = (burstProfile(u1) - burstProfile(u0)) / ERUPTION_BURST;
-    const limit = vol.radius * eruptionFront(Math.min(1, Math.max(0, u1)));
-    push(m, terrain, field, limit, (limit / m.cell / ERUPTION_PUSH) * PUSH_BURST * db);
-    const um = Math.min(1, Math.max(0, (u0 + u1) / 2));
-    releaseNear(m, field, out * (1 - share), vol.radius * eruptionReach(um) * ERUPTION_TAIL_REACH);
+    // Жерло впрыскивает в среду объём: всё вокруг расталкивается наружу
+    // (импульс), а вышедшее вещество заполняет новый объём у жерла (см. blast).
+    const out = step >= vol.until ? vol.left : Math.min(vol.left, Math.max(0, vol.total * (eruptionProfile(u1) - eruptionProfile(u0))));
+    blast(m, terrain, partitions, vol, injectedArea(vol, Math.max(0, u0)), injectedArea(vol, u1), out);
     vol.left -= out;
     vol.rate = out / P;
     if (step >= vol.until) {
@@ -490,10 +480,10 @@ function prepareVolcano(m: MineralState, params: WorldParams, terrain: TerrainSt
 }
 
 /**
- * Извержение — залп и хвост. Залп (доля ERUPTION_BURST) выходит, пока фронт
- * выброса расходится от жерла (первые ERUPTION_FRONT времени), и ложится
- * везде, куда фронт уже дошёл. Хвост выходит всё извержение, слабея (темп ∝
- * 1 − u), и ложится всё ближе к жерлу — его течения тянут шлейфами.
+ * Темп извержения — залп и хвост. Залп (доля ERUPTION_BURST) выходит за
+ * первые ERUPTION_FRONT времени — темп и скорость выброса в начале велики,
+ * масса летит далеко. Хвост выходит всё извержение, слабея (темп ∝ 1 − u), —
+ * скорость выброса мала, масса остаётся у жерла, и течения тянут её шлейфами.
  */
 const ease = (t: number) => 1 - (1 - Math.min(1, Math.max(0, t))) ** 2;
 function burstProfile(u: number): number {
@@ -514,16 +504,6 @@ export function eruptionRate(u: number): number {
   const burst = t < ERUPTION_FRONT ? (ERUPTION_BURST * 2 * (1 - t / ERUPTION_FRONT)) / ERUPTION_FRONT : 0;
   const tail = (1 - ERUPTION_BURST) * 2 * (1 - t);
   return (burst + tail) / ((ERUPTION_BURST * 2) / ERUPTION_FRONT + (1 - ERUPTION_BURST) * 2);
-}
-
-/** Докуда (доля радиуса выброса) дошёл фронт к доле времени u: быстро, потом замедляясь. */
-export function eruptionFront(u: number): number {
-  return ease(u / ERUPTION_FRONT);
-}
-
-/** Докуда (доля радиуса выброса) ложится хвост, вышедший к доле времени u: сначала до края, к концу — у жерла. */
-export function eruptionReach(u: number): number {
-  return 1 - ERUPTION_SHRINK * u;
 }
 
 /** Радиус выброса извержения объёма `total`: растёт как √ от доли предела. */
@@ -604,75 +584,103 @@ export function viscousDistances(m: MineralState, terrain: TerrainState, x: numb
   return { cells: Int32Array.from(cells), dists: Float64Array.from(dists) };
 }
 
-/** Сколько проходов давления даёт весь залп — в долях «доталкивания до фронта». */
-const PUSH_BURST = 0.4;
-
 /**
- * Выбросить `amount` в окрестность жерла не дальше `reach` (вязкое
- * расстояние): гуще у жерла — доля клетки 1 − (d/r)². Клетка жерла всегда в ней.
+ * Сколько объёма (площади) жерло впрыснуло в среду к доле времени u: залп —
+ * круг радиуса выброса за первые ERUPTION_FRONT времени (это и есть волна),
+ * хвост — круг ERUPTION_TAIL_AREA радиуса за остальное время. Площади
+ * складываются: к концу среда вокруг расступилась на √(залп + хвост).
  */
-function releaseNear(m: MineralState, field: { cells: Int32Array; dists: Float64Array }, amount: number, reach: number): void {
-  if (amount <= 0) return;
-  const r = Math.max(m.cell * 1.5, reach);
-  let sum = 0;
-  for (let n = 0; n < field.dists.length; n++) if (field.dists[n] < r) sum += 1 - (field.dists[n] / r) ** 2;
-  for (let n = 0; n < field.cells.length; n++) {
-    const d = field.dists[n];
-    if (d < r) m.field[field.cells[n]] += (amount * (1 - (d / r) ** 2)) / sum;
-  }
+export function injectedArea(vol: Volcano, u: number): number {
+  const burst = Math.PI * vol.radius * vol.radius;
+  const tail = Math.PI * (vol.radius * ERUPTION_TAIL_AREA) ** 2;
+  return burst * (burstProfile(u) / ERUPTION_BURST) + tail * (tailProfile(u) / (1 - ERUPTION_BURST));
+}
+
+/** Докуда (вязкое расстояние, по воде) расступилась среда вокруг жерла к шагу t — край впрыснутого объёма. */
+export function blastReach(vol: Volcano, t: number): number {
+  const u = Math.min(1, Math.max(0, (t - vol.begin) / Math.max(1, vol.until - vol.begin)));
+  return Math.sqrt(injectedArea(vol, u) / Math.PI);
 }
 
 /**
- * Давление выброса гонит массу от жерла: несколько раз за обновление каждая
- * клетка области отдаёт долю минерала соседям дальше от жерла (по «вязкому»
- * расстоянию), но не дальше фронта `limit`. Доля тем меньше, чем выше
- * вязкость клетки; `passes` — сколько проходов (дробная часть — неполный проход).
- * Толкается весь минерал на пути, не только вышедший. Количество сохраняется.
+ * Импульс извержения за обновление: жерло впрыскивает площадь A1 − A0, и всё,
+ * что лежало на вязком расстоянии d, сдвигается наружу до √(d² + (A1 − A0)/π)
+ * — вокруг стало больше места, среда расступается; в вязком сдвиг меньше
+ * (÷ множитель вязкости), за краем радиуса выброса затухает; направление — по
+ * росту вязкого расстояния (огибает перегородки), сквозь преграды не идёт.
+ * Сдвигается весь минерал на пути. Вышедшее вещество `amount` ложится ровно в
+ * новый объём у жерла. Количество сохраняется.
  */
-function push(m: MineralState, terrain: TerrainState, field: { cells: Int32Array; dists: Float64Array }, limit: number, passes: number): void {
-  const { cols, rows } = m;
-  const n = field.cells.length;
-  if (n < 2 || passes <= 0) return;
-  const index = new Map<number, number>();
-  for (let q = 0; q < n; q++) index.set(field.cells[q], q);
-  // Соседи дальше от жерла и в пределах фронта, с весами по приросту расстояния.
-  const out: number[][] = [];
-  const outW: number[][] = [];
-  for (let q = 0; q < n; q++) {
-    const k = field.cells[q], d = field.dists[q];
-    const i = k % cols, j = (k - i) / cols;
-    const to: number[] = [], wt: number[] = [];
-    for (let dj = -1; dj <= 1; dj++) {
-      for (let di = -1; di <= 1; di++) {
-        if (di === 0 && dj === 0) continue;
-        const a = i + di, b = j + dj;
-        if (a < 0 || b < 0 || a >= cols || b >= rows) continue;
-        const r = index.get(b * cols + a);
-        if (r === undefined || field.dists[r] <= d || field.dists[r] > limit) continue;
-        to.push(r);
-        wt.push(field.dists[r] - d);
+function blast(m: MineralState, terrain: TerrainState, partitions: PartitionLayout, vol: Volcano, a0: number, a1: number, amount: number): void {
+  const { cols, rows, cell, blocked } = m;
+  const added = Math.max(0, a1 - a0);
+  const field = viscousDistances(m, terrain, vol.x, vol.y, vol.radius * BLAST_FADE);
+  if (added > 0) {
+    const dist = new Map<number, number>();
+    for (let q = 0; q < field.cells.length; q++) dist.set(field.cells[q], field.dists[q]);
+    const moved = new Float64Array(m.field.length);
+    for (let q = 0; q < field.cells.length; q++) {
+      const k = field.cells[q], d = field.dists[q];
+      const mass = m.field[k];
+      if (mass === 0) continue;
+      const i = k % cols, j = (k - i) / cols;
+      // Направление — к соседям дальше от жерла; у самого жерла — от его центра.
+      let gx = 0, gy = 0;
+      for (let dj = -1; dj <= 1; dj++) {
+        for (let di = -1; di <= 1; di++) {
+          if ((di === 0 && dj === 0) || i + di < 0 || j + dj < 0 || i + di >= cols || j + dj >= rows) continue;
+          const dn = dist.get((j + dj) * cols + i + di);
+          if (dn === undefined || dn <= d) continue;
+          const len = Math.hypot(di, dj);
+          gx += ((dn - d) * di) / len;
+          gy += ((dn - d) * dj) / len;
+        }
       }
+      const g = Math.hypot(gx, gy);
+      if (g === 0) continue;
+      const fade = Math.max(0, Math.min(1, (vol.radius * BLAST_FADE - d) / (vol.radius * (BLAST_FADE - 1))));
+      let shift = ((Math.sqrt(d * d + added / Math.PI) - d) * fade) / multiplierForLevel(terrain.applied[k]);
+      if (shift <= 0) continue;
+      const x = (i + 0.5) * cell, y = (j + 0.5) * cell;
+      let dx = (gx / g) * shift, dy = (gy / g) * shift;
+      // Сквозь преграды — нет: останавливаемся перед первой на пути.
+      const probes = Math.ceil(shift / (cell * 0.5));
+      for (let p = 1; p <= probes; p++) {
+        if (isBlocked(partitions, x + (dx * p) / probes, y + (dy * p) / probes)) { shift = (shift * (p - 1)) / probes; break; }
+      }
+      dx = (gx / g) * shift;
+      dy = (gy / g) * shift;
+      m.field[k] = 0;
+      spill(moved, blocked, cols, rows, cell, x + dx, y + dy, mass, k);
     }
-    const sum = wt.reduce((x, y) => x + y, 0);
-    out.push(to);
-    outW.push(wt.map((x) => x / sum));
+    for (let k = 0; k < moved.length; k++) m.field[k] += moved[k];
   }
-  const mass = new Float64Array(n);
-  for (let q = 0; q < n; q++) mass[q] = m.field[field.cells[q]];
-  const next = new Float64Array(n);
-  for (let p = 0; p < passes; p++) {
-    const part = Math.min(1, passes - p);
-    // Все клетки отдают одновременно (из mass в next) — за проход масса уходит на одну клетку.
-    next.set(mass);
-    for (let q = 0; q < n; q++) {
-      if (out[q].length === 0 || mass[q] === 0) continue;
-      const give = (mass[q] * ERUPTION_PUSH * part) / multiplierForLevel(terrain.applied[field.cells[q]]);
-      next[q] -= give;
-      for (let e = 0; e < out[q].length; e++) next[out[q][e]] += give * outW[q][e];
-    }
-    mass.set(next);
+  // Вышедшее вещество — в новый объём у жерла: круг площади (A1 − A0), всё
+  // прежнее уже сдвинуто наружу (не меньше клетки жерла).
+  if (amount > 0) {
+    const reach = Math.max(cell * 0.75, Math.sqrt(added / Math.PI));
+    let n = 0;
+    for (let q = 0; q < field.cells.length; q++) if (field.dists[q] <= reach) n++;
+    for (let q = 0; q < field.cells.length; q++) if (field.dists[q] <= reach) m.field[field.cells[q]] += amount / n;
   }
-  for (let q = 0; q < n; q++) m.field[field.cells[q]] = mass[q];
+}
+
+/** Положить `mass` в точку (x, y): доли четырёх соседних клеток, в занятые — не кладём (остаток — в `home`). */
+function spill(out: Float64Array, blocked: Uint8Array, cols: number, rows: number, cell: number, x: number, y: number, mass: number, home: number): void {
+  const fx = x / cell - 0.5, fy = y / cell - 0.5;
+  const i0 = Math.floor(fx), j0 = Math.floor(fy);
+  const u = fx - i0, w = fy - j0;
+  let kept = 0;
+  const put = (i: number, j: number, s: number) => {
+    if (s <= 0) return;
+    if (i < 0 || j < 0 || i >= cols || j >= rows || blocked[j * cols + i]) { kept += s; return; }
+    out[j * cols + i] += mass * s;
+  };
+  put(i0, j0, (1 - u) * (1 - w));
+  put(i0 + 1, j0, u * (1 - w));
+  put(i0, j0 + 1, (1 - u) * w);
+  put(i0 + 1, j0 + 1, u * w);
+  out[home] += mass * kept;
 }
 
 /**

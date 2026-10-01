@@ -6,7 +6,7 @@
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
-import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_FRONT, ERUPTION_RADIUS, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, DRIFT_REFERENCE, multiplierForLevel, eruptionFront, eruptionRate, hash3, viscousDistances, isBlocked, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, VOLCANO_BIRTH, VOLCANO_POWER, type Volcano, type World } from '../core/index.ts';
+import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, DRIFT_REFERENCE, multiplierForLevel, blastReach, eruptionRate, injectedArea, ERUPTION_FRONT, hash3, viscousDistances, isBlocked, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, VOLCANO_BIRTH, VOLCANO_POWER, type Volcano, type World } from '../core/index.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
@@ -270,6 +270,12 @@ const VENT_DOT_CSS: readonly [number, number] = [2.5, 7];
  * сжимается до 0,55 вместе с темпом.
  */
 const VENT_POWER_SCALE: readonly [number, number] = [0.7, 1.3];
+/** Темп хвоста сразу после залпа (доля начального) — от него тускнеет цвет жерла. */
+const VENT_TAIL_RATE = 0.13;
+/** Приток из жерла: сколько крупинок, размер (CSS px), докуда видны (в радиусах диска). */
+const SPRING_COUNT = 70;
+const SPRING_DOT_CSS = 1.8;
+const SPRING_REACH = 2.2;
 const VENT_ERUPT_CSS: readonly [number, number] = [5, 11];
 const VENT_VOLUME_FROM = 0.35;
 const BAR_OUT: Rgb = [226, 200, 255];
@@ -426,6 +432,8 @@ export class WorldRenderer {
   private readonly grains = new Float32Array(GRAIN_COUNT * 4);
   private grainTime = -1;
   private grainStep = 0;
+  /** Крупинки притока из жерла по вулканам: угол, расстояние от центра, жива ли (−1 — нет); шаг мира прошлого кадра. */
+  private springs = new Map<number, { p: Float32Array; step: number }>();
   /** Вспышки начала извержений: где, когда (время анимации), размах. */
   private shocks: { x: number; y: number; t: number; scale: number }[] = [];
   /** Сколько раз извергался каждый вулкан на прошлом кадре. */
@@ -497,6 +505,7 @@ export class WorldRenderer {
     this.shocks = [];
     this.seenEruptions = new Map(world.mineral.volcanoes.map((v) => [v.id, v.k]));
     this.fronts.clear();
+    this.springs.clear();
     this.grains.fill(0);
     this.grainTime = -1;
     this.grainStep = world.step;
@@ -1011,13 +1020,15 @@ export class WorldRenderer {
         front = { ...viscousDistances(m, w.terrain, v.x, v.y, v.radius), seen: animTime };
         this.fronts.set(key, front);
       }
-      const model = Math.min(1, Math.max(0, (w.step - v.begin) / Math.max(1, (v.until - v.begin) * ERUPTION_FRONT)));
-      const shown = Math.min(model, (animTime - front.seen) / ERUPTION_SHOCK_S);
-      if (shown >= 1) continue;
-      const reach = v.radius * eruptionFront(shown * ERUPTION_FRONT);
+      // Докуда расступилась среда по модели (край впрыснутого объёма); на экране — не быстрее ERUPTION_SHOCK_S.
+      const modelReach = blastReach(v, w.step);
+      const shown = Math.min(1, (animTime - front.seen) / ERUPTION_SHOCK_S);
+      const reach = Math.min(modelReach, v.radius * (1 - (1 - shown) ** 2));
+      if (reach >= v.radius * 0.98) continue;
       const band = m.cell * FRONT_BAND;
       const size = Math.max(this.px(FRONT_DOT_MIN_CSS), m.cell * FRONT_DOT);
-      const fade = 0.85 * (1 - shown) ** 1.5;
+      // Гаснет, по мере того как выброс долетает до края.
+      const fade = 0.85 * (1 - reach / v.radius) ** 1.5;
       for (let n = 0; n < front.cells.length; n++) {
         const off = Math.abs(front.dists[n] - reach);
         if (off > band) continue;
@@ -1034,7 +1045,8 @@ export class WorldRenderer {
       if (v.stage !== 'erupting') continue;
       const flicker = 0.8 + 0.12 * Math.sin(animTime * 11 + v.id * 1.7) + 0.08 * Math.sin(animTime * 23.3 + v.id);
       const r = Math.max(this.px(VENT_GLOW_MIN_CSS), v.radius * VENT_GLOW) * (0.85 + 0.15 * flicker);
-      ctx.globalAlpha = Math.min(1, (0.3 + 0.7 * this.ventStrength(v)) * flicker);
+      const after = smoothstep(ERUPTION_FRONT * 0.8, ERUPTION_FRONT * 1.3, this.eruptionPhase(v));
+      ctx.globalAlpha = Math.min(1, (0.3 + 0.7 * this.ventStrength(v)) * flicker * (1 - 0.65 * after));
       ctx.drawImage(light, v.x - r, v.y - r, r * 2, r * 2);
     }
 
@@ -1096,8 +1108,12 @@ export class WorldRenderer {
         const volume = Math.max(0, Math.min(1, (v.radius / ERUPTION_RADIUS - VENT_VOLUME_FROM) / (1 - VENT_VOLUME_FROM)));
         const now = VENT_ERUPT_CSS[0] + (VENT_ERUPT_CSS[1] - VENT_ERUPT_CSS[0]) * volume;
         const dot = Math.max(this.px(now) * big, r * 0.7) * (0.55 + 0.45 * this.ventStrength(v));
-        this.softSpot(v.x, v.y, dot * 2.3, [[0.3, BAR_OUT, 0.8], [0.75, MINERAL_COLOR, 0.35], [1, MINERAL_COLOR, 0]]);
-        this.solidDot(v.x, v.y, dot, VENT_SPARK);
+        // Залп — ярко-белый; после залпа идёт вещество — цвет минерала, тускнеет с темпом.
+        const after = smoothstep(ERUPTION_FRONT * 0.8, ERUPTION_FRONT * 1.3, this.eruptionPhase(v));
+        const color = mix(VENT_SPARK, mix(MINERAL_COLOR, VENT_DIM, 0.4 * (1 - this.ventStrength(v) / VENT_TAIL_RATE)), after);
+        this.softSpot(v.x, v.y, dot * 2.3, [[0.3, mix(BAR_OUT, MINERAL_COLOR, after), 0.8 - 0.4 * after], [0.75, MINERAL_COLOR, 0.35 - 0.15 * after], [1, MINERAL_COLOR, 0]]);
+        this.solidDot(v.x, v.y, dot, color);
+        this.drawSpring(v, dot, after);
       } else if (v.stage === 'dormant') {
         // Угасшая искра: маленькое тусклое отверстие, без ореола; может снова разгореться.
         this.solidDot(v.x, v.y, Math.max(this.px(VENT_DOT_CSS[0]) * big, r * 0.2), VENT_DIM);
@@ -1106,6 +1122,50 @@ export class WorldRenderer {
         const dot = Math.max(this.px(VENT_DOT_CSS[0]) * big, r * 0.2) * (1 - phase);
         this.solidDot(v.x, v.y, dot, mix(VENT_DIM, VENT_ASH, Math.min(1, phase * 3)));
       }
+    }
+    for (const id of this.springs.keys()) if (!m.volcanoes.some((v) => v.id === id && v.stage === 'erupting')) this.springs.delete(id);
+    ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Приток вещества: по всей площади диска жерла появляются крупинки и уходят
+   * от центра наружу так, как в модели расступается среда — скорость по
+   * впрыснутому объёму (dA/dt ÷ 2πr), у центра быстрее; за краем диска тают.
+   * Чем сильнее выброс, тем их больше. Движутся по шагам мира — на паузе стоят.
+   */
+  private drawSpring(v: Volcano, disk: number, after: number): void {
+    const w = this.world;
+    const ctx = this.ctx;
+    let st = this.springs.get(v.id);
+    if (!st) {
+      st = { p: new Float32Array(SPRING_COUNT * 3), step: w.step };
+      for (let n = 0; n < SPRING_COUNT; n++) st.p[n * 3 + 2] = -1;
+      this.springs.set(v.id, st);
+    }
+    const steps = Math.max(0, w.step - st.step);
+    st.step = w.step;
+    // Скорость расступания: впрыснуто за шаг ÷ 2πr.
+    const d = Math.max(1, v.until - v.begin);
+    const u = this.eruptionPhase(v);
+    const rate = (injectedArea(v, Math.min(1, u + 0.002)) - injectedArea(v, u)) / (0.002 * d);
+    const strength = this.ventStrength(v);
+    const size = this.px(SPRING_DOT_CSS);
+    const p = st.p;
+    ctx.fillStyle = rgb(VENT_SPARK);
+    for (let n = 0; n < SPRING_COUNT; n++) {
+      const o = n * 3;
+      if (p[o + 2] < 0) {
+        // Новая — в случайной точке диска (равномерно по площади); живых тем больше, чем сильнее выброс.
+        if (Math.random() > 0.05 + 0.6 * strength) continue;
+        const a = Math.random() * Math.PI * 2, rr = disk * Math.sqrt(Math.random());
+        p[o] = a; p[o + 1] = rr; p[o + 2] = 0;
+      }
+      const r = Math.max(p[o + 1], disk * 0.05);
+      p[o + 1] = Math.sqrt(r * r + (rate * steps) / Math.PI);
+      const f = p[o + 1] / (disk * SPRING_REACH);
+      if (f >= 1) { p[o + 2] = -1; continue; }
+      ctx.globalAlpha = (1 - f) * (0.6 + 0.35 * after) * Math.min(1, 0.55 + strength * 3);
+      ctx.fillRect(v.x + Math.cos(p[o]) * p[o + 1] - size / 2, v.y + Math.sin(p[o]) * p[o + 1] - size / 2, size, size);
     }
     ctx.globalAlpha = 1;
   }
