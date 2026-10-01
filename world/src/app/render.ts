@@ -192,6 +192,19 @@ const ERUPTION_RINGS = 3;
 const ERUPTION_RING_COLOR = 'rgb(240, 225, 255)';
 const ERUPTION_RING_MIN_CSS = 36;
 
+/** Блёстки кристаллов: с какой густоты залежей, скорость мерцания, порог вспышки (доля времени ярко — малая). */
+const SPARKLE_DEPOSIT = 2;
+const SPARKLE_SPEED = 1.3;
+const SPARKLE_THRESHOLD = 0.965;
+/** Пена у берега: насколько видна, фактура (размер ряби, единиц мира), ровная часть, пересчёт маски не чаще, мс. */
+const FOAM_ALPHA = 0.4;
+const FOAM_RIPPLE_SIZE = 60;
+const FOAM_BASE = 0.35;
+const FOAM_REBUILD_MS = 300;
+/** Дыхание вулканов: с какого давления недр (доля порога) и период пульса, с. */
+const BREATH_FROM = 0.6;
+const BREATH_PERIOD_S = 2.6;
+
 /** Перерисовывать изменившуюся местность не чаще, мс. */
 const TERRAIN_REDRAW_MS = 1000;
 /**
@@ -327,6 +340,11 @@ export class WorldRenderer {
   private drawnLevel = new Float32Array(0);
   private drawnDeposit = new Float32Array(0);
   private hazeDrawnAt = 0;
+  /** Блёстки (x, y, фаза), маска пены и когда она построена. */
+  private sparkles = new Float32Array(0);
+  private readonly foamCanvas = document.createElement('canvas');
+  private foamBuiltAt = 0;
+  private foamStep = -1;
   /** Блоки подложки, ждущие перерисовки, и сколько блоков в строке. */
   private readonly redrawQueue = new Set<number>();
   private redrawCols = 1;
@@ -370,6 +388,8 @@ export class WorldRenderer {
     this.drawnLevel = Float32Array.from(world.terrain.applied);
     const per = world.mineral.cell * world.mineral.cell * world.params.mineralStock;
     this.drawnDeposit = Float32Array.from(world.terrain.deposits, (d) => d / per);
+    this.buildSparkles();
+    this.foamStep = -1;
     this.resize();
     this.fit();
   }
@@ -427,6 +447,7 @@ export class WorldRenderer {
       }
     }
     if (!any) return;
+    this.buildSparkles();
     // Подложку и маску воды по изменившимся блокам дорисовываем понемногу,
     // по кадрам (drainRedraw), — чтобы не было рывка.
     for (let bj = 0; bj < brows; bj++) {
@@ -660,6 +681,8 @@ export class WorldRenderer {
     }
     ctx.filter = 'none';
     this.drawGlints(animTime, lit);
+    this.drawSparkles(animTime, lit);
+    this.drawFoam(animTime);
     ctx.restore();
 
     ctx.setTransform(...view);
@@ -757,6 +780,23 @@ export class WorldRenderer {
         ctx.stroke();
       }
     }
+    // Дыхание спящих вулканов: когда давление недр близко к порогу, вокруг
+    // медленно пульсирует кольцо — ярче у сильных и ближе к извержению.
+    const pressure = m.depths / m.threshold;
+    if (pressure > BREATH_FROM) {
+      const near = smoothstep(BREATH_FROM, 1, pressure);
+      for (const v of m.volcanoes) {
+        if (v.active) continue;
+        const pulse = (Math.sin((animTime * 2 * Math.PI) / BREATH_PERIOD_S + v.x * 0.013) + 1) / 2;
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = near * (0.35 + 0.65 * (v.power - 0.6) / 0.8) * (0.25 + 0.55 * (1 - pulse));
+        ctx.strokeStyle = rgb(MINERAL_COLOR);
+        ctx.lineWidth = this.px(1.5);
+        ctx.beginPath();
+        ctx.arc(v.x, v.y, this.px(9 + 12 * pulse), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
     ctx.globalAlpha = 1;
     // Вулканы: тёмный кружок с фиолетовой каймой; извергающийся — светлый.
     const r = this.px(5);
@@ -769,6 +809,150 @@ export class WorldRenderer {
       ctx.strokeStyle = rgb(MINERAL_COLOR);
       ctx.stroke();
     }
+  }
+
+  /**
+   * Блёстки кристаллов залежей: точки на плотных неглубоких залежах коротко
+   * вспыхивают каждая в своё время; видны только в пятнах света.
+   */
+  private drawSparkles(time: number, lit: number): void {
+    const pts = this.sparkles;
+    if (pts.length === 0) return;
+    const g = this.gctx;
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+    g.clearRect(0, 0, this.glint.width, this.glint.height);
+    g.setTransform(...this.view());
+    const [x0, y0] = this.screenToWorld(0, 0);
+    const [x1, y1] = this.screenToWorld(this.glint.width, this.glint.height);
+    const buckets = [new Path2D(), new Path2D(), new Path2D()];
+    for (let n = 0; n < pts.length; n += 3) {
+      const x = pts[n], y = pts[n + 1];
+      if (x < x0 || x > x1 || y < y0 || y > y1) continue;
+      const tw = Math.sin(time * SPARKLE_SPEED + pts[n + 2]);
+      if (tw < SPARKLE_THRESHOLD) continue;
+      const b = (tw - SPARKLE_THRESHOLD) / (1 - SPARKLE_THRESHOLD);
+      const r = this.px(0.8 + 2.2 * b);
+      const p = buckets[Math.min(2, Math.floor(b * 3))];
+      // Четырёхлучевая звёздочка.
+      p.moveTo(x - r, y);
+      p.lineTo(x, y - r * 0.3);
+      p.lineTo(x + r, y);
+      p.lineTo(x, y + r * 0.3);
+      p.closePath();
+      p.moveTo(x, y - r);
+      p.lineTo(x + r * 0.3, y);
+      p.lineTo(x, y + r);
+      p.lineTo(x - r * 0.3, y);
+      p.closePath();
+    }
+    buckets.forEach((p, i) => {
+      g.fillStyle = `rgba(245, 230, 255, ${(0.35 + 0.3 * i).toFixed(2)})`;
+      g.fill(p);
+    });
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalCompositeOperation = 'destination-in';
+    g.drawImage(this.spots, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+    const ctx = this.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = Math.min(1, lit);
+    ctx.drawImage(this.glint, 0, 0);
+  }
+
+  /** Точки блёсток: на плотных залежах неглубоко — по нескольку на клетку, место и фаза из хеша. */
+  private buildSparkles(): void {
+    const m = this.world.mineral;
+    const out: number[] = [];
+    const seed = this.world.params.seed ^ 0x51a4c;
+    for (let k = 0; k < this.drawnDeposit.length; k++) {
+      const d = this.drawnDeposit[k];
+      const L = this.drawnLevel[k];
+      if (d < SPARKLE_DEPOSIT || L < 0.35 || L > 1.6 || m.blocked[k]) continue;
+      const count = Math.min(4, Math.floor(d / SPARKLE_DEPOSIT));
+      const i = k % m.cols, j = (k - i) / m.cols;
+      for (let c = 0; c < count; c++) {
+        const h1 = hash3(seed, k, c, 1) / 4294967296, h2 = hash3(seed, k, c, 2) / 4294967296, h3 = hash3(seed, k, c, 3) / 4294967296;
+        out.push((i + h1) * m.cell, (j + h2) * m.cell, h3 * Math.PI * 2 * 7);
+      }
+    }
+    this.sparkles = Float32Array.from(out);
+  }
+
+  /**
+   * Пена у берега: на мелководье у суши, где течение направлено в берег, —
+   * гуще при сильном потоке. Маска строится по полю течений, фактура — бегущая рябь.
+   */
+  private drawFoam(time: number): void {
+    const now = performance.now();
+    if (now - this.foamBuiltAt >= FOAM_REBUILD_MS || this.foamStep < 0) {
+      this.foamBuiltAt = now;
+      this.foamStep = this.world.step;
+      this.buildFoam();
+    }
+    const g = this.gctx;
+    const view = this.view();
+    const [x0, y0] = this.screenToWorld(0, 0);
+    const [x1, y1] = this.screenToWorld(this.glint.width, this.glint.height);
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+    g.clearRect(0, 0, this.glint.width, this.glint.height);
+    g.setTransform(...view);
+    const k = FOAM_RIPPLE_SIZE / 256;
+    this.ripplePattern.setTransform(new DOMMatrix([k, 0, 0, k, -time * 6, time * 3]));
+    g.fillStyle = this.ripplePattern;
+    g.fillRect(x0, y0, x1 - x0, y1 - y0);
+    g.globalAlpha = FOAM_BASE;
+    g.fillStyle = 'rgba(255, 255, 255, 1)';
+    g.fillRect(x0, y0, x1 - x0, y1 - y0);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'destination-in';
+    g.imageSmoothingEnabled = true;
+    g.drawImage(this.foamCanvas, 0, 0, DISH_WIDTH, DISH_HEIGHT);
+    g.globalCompositeOperation = 'source-over';
+    const ctx = this.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = FOAM_ALPHA;
+    ctx.drawImage(this.glint, 0, 0);
+  }
+
+  private buildFoam(): void {
+    const w = this.world;
+    const m = w.mineral;
+    const c = this.foamCanvas;
+    if (c.width !== m.cols) { c.width = m.cols; c.height = m.rows; }
+    const fctx = c.getContext('2d')!;
+    const img = fctx.createImageData(m.cols, m.rows);
+    const { a, b, u } = w.drift.nodes(w.step);
+    const same = a.cols === m.cols && a.rows === m.rows;
+    const level = w.terrain.applied;
+    const sMax = Math.max(1e-9, w.params.driftStrength * sunAt(w.light, w.step));
+    for (let j = 1; j < m.rows - 1; j++) {
+      for (let i = 1; i < m.cols - 1; i++) {
+        const k = j * m.cols + i;
+        if (!same || m.blocked[k]) continue;
+        const L = level[k];
+        const shore = smoothstep(0.7, 1.2, L) * (1 - smoothstep(1.45, 1.7, L));
+        if (shore === 0) continue;
+        const vx = a.vx[k] + (b.vx[k] - a.vx[k]) * u, vy = a.vy[k] + (b.vy[k] - a.vy[k]) * u;
+        const sp = Math.sqrt(vx * vx + vy * vy);
+        if (sp === 0) continue;
+        // Вверх по склону — к суше.
+        const gx = (level[k + 1] - level[k - 1]) / 2, gy = (level[k + m.cols] - level[k - m.cols]) / 2;
+        const gl = Math.sqrt(gx * gx + gy * gy);
+        if (gl === 0) continue;
+        const toward = Math.max(0, (vx * gx + vy * gy) / (sp * gl));
+        // Только заметный поток, бьющий почти прямо в берег.
+        const f = smoothstep(0.25, 0.8, sp / sMax) * toward * toward * shore;
+        img.data[k * 4] = img.data[k * 4 + 1] = img.data[k * 4 + 2] = 255;
+        img.data[k * 4 + 3] = Math.min(255, f * 255 * 1.6);
+      }
+    }
+    fctx.putImageData(img, 0, 0);
   }
 
   /** Блики: две сдвигающиеся ряби, оставленные только на воде и в пятнах света. */
