@@ -8,7 +8,9 @@ import { type LightMap, createLightMap, lightAt } from './light.ts';
 import { type ViscosityMap, createViscosityMap } from './viscosity.ts';
 import { type PartitionLayout, buildLayout, layoutForSeed } from './partitions.ts';
 import { Drift } from './drift.ts';
-import { MINERAL_PERIOD } from './constants.ts';
+import { MINERAL_CELL, MINERAL_PERIOD, TERRAIN_PERIOD } from './constants.ts';
+import { createTerrain, levelFromGround, type TerrainState } from './terrain.ts';
+import { applyLevels } from './viscosity.ts';
 import { createMineral, transparencyAt, updateMineral, type MineralState } from './mineral.ts';
 
 export interface World {
@@ -25,6 +27,8 @@ export interface World {
   readonly drift: Drift;
   /** Минерал в среде и недрах, вулканы — состояние, меняется по шагам. */
   readonly mineral: MineralState;
+  /** Местность: грунт, снимок уровня, подвижки — состояние, меняется по шагам. */
+  readonly terrain: TerrainState;
 }
 
 export class InvalidParamsError extends Error {
@@ -42,10 +46,15 @@ export function createWorld(params: WorldParams): World {
   const light = createLightMap(own);
   const viscosity = createViscosityMap(own);
   const partitions = buildLayout(layoutForSeed(own.seed), DISH_WIDTH, DISH_HEIGHT);
+  const mineral = createMineral(own, partitions);
+  const terrain = createTerrain(own, viscosity, mineral.cols, mineral.rows, mineral.cell, mineral.blocked);
+  // С самого начала карта собрана из уровня грунта — как и после каждой пересборки.
+  applyLevels(viscosity, terrain.applied, mineral.cols, mineral.rows, mineral.cell);
   return {
     params: own, step: 0, light, viscosity, partitions,
     drift: new Drift({ params: own, light, viscosity, partitions }),
-    mineral: createMineral(own, partitions),
+    mineral,
+    terrain,
   };
 }
 
@@ -56,7 +65,18 @@ export function createWorld(params: WorldParams): World {
 export function stepWorld(world: World): void {
   world.step++;
   // Снос, осаждение и извержения минерала — раз в MINERAL_PERIOD шагов, за весь промежуток.
-  if (world.step % MINERAL_PERIOD === 0) updateMineral(world.mineral, world.params, world.drift, world.partitions, world.step);
+  if (world.step % MINERAL_PERIOD === 0) {
+    updateMineral(world.mineral, world.params, world.drift, world.partitions, world.terrain, world.light, world.step);
+  }
+  // Местность пересобирается из грунта: карта вязкости, затем течения.
+  if (world.step % TERRAIN_PERIOD === 0) applyTerrain(world, levelFromGround(world.terrain, MINERAL_CELL));
+}
+
+/** Собрать карту вязкости по снимку уровня и забыть течения, посчитанные по старой местности. */
+export function applyTerrain(world: World, level: Float32Array): void {
+  world.terrain.applied = level;
+  applyLevels(world.viscosity, level, world.mineral.cols, world.mineral.rows, world.mineral.cell);
+  world.drift.reset();
 }
 
 /** Свет, доходящий до места: свет карты при текущем солнце × прозрачность (мутность от минерала). */
@@ -81,13 +101,19 @@ export function hashNumbers(values: Iterable<number>): number {
 export function worldHash(world: World): number {
   const p = world.params;
   return hashNumbers([
-    p.seed, DISH_WIDTH, DISH_HEIGHT, p.sun, p.sunRhythm, p.sunPeriod, p.backgroundLevel, p.illumination, p.spotSize,
+    p.seed, DISH_WIDTH, DISH_HEIGHT, p.sun, p.lightDrift, p.sunRhythm, p.sunPeriod, p.backgroundLevel, p.illumination, p.spotSize,
     p.baseTemperature, p.spotHeat, p.baseViscosity,
     p.viscosityShares.water, p.viscosityShares.shallows, p.viscosityShares.land,
-    p.viscosityZoneSize, p.driftStrength, p.driftLength, p.mineralStock, p.volcanoCount, p.eruptionInterval,
+    p.viscosityZoneSize, p.driftStrength, p.driftLength, p.mineralStock, p.volcanoCount, p.terrainSpeed, p.quakeInterval,
     world.step,
     world.mineral.depths,
-    ...world.mineral.volcanoes.flatMap((v) => [v.k, v.next, v.active ? 1 : 0, v.until, v.rate, v.left]),
+    ...world.terrain.ground,
+    ...world.terrain.deposits,
+    ...world.terrain.applied,
+    world.terrain.nextMove, world.terrain.nextMoveStep, world.terrain.nextQuake, world.terrain.nextQuakeStep,
+    ...world.terrain.active.flatMap((m) => [m.n, m.quake ? 1 : 0, m.start]),
+    world.mineral.threshold, world.mineral.eruptions,
+    ...world.mineral.volcanoes.flatMap((v) => [v.k, v.active ? 1 : 0, v.begin, v.until, v.total, v.left, v.rate]),
     ...world.mineral.field,
   ]);
 }

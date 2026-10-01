@@ -18,6 +18,8 @@ export interface WorldParams {
   seed: number;
   /** Яркость света в пятнах. */
   sun: number;
+  /** Скорость дрейфа света: множитель общего сдвига карты и собственного дрейфа пятен; 0 — свет стоит. */
+  lightDrift: number;
   /** Размах ритма солнца: сила солнца ходит от (1 − размах) до (1 + размах) от параметра «Солнце», [0, 0.9]. */
   sunRhythm: number;
   /** Период ритма солнца, шагов. */
@@ -44,15 +46,18 @@ export interface WorldParams {
   driftLength: number;
   /** Запас минерала: общее количество в мире — в среднем на единицу свободной площади чашки. */
   mineralStock: number;
+  /** Скорость местности: множитель намыва, размыва, подвижек и толчков; 0 — местность неподвижна. */
+  terrainSpeed: number;
+  /** Средний промежуток между толчками, шагов. */
+  quakeInterval: number;
   /** Число вулканов; на деле не меньше числа отсеков. */
   volcanoCount: number;
-  /** Средний промежуток между извержениями одного вулкана, шагов. */
-  eruptionInterval: number;
 }
 
 export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
   seed: 1,
   sun: 1,
+  lightDrift: 1,
   sunRhythm: 0.4,
   sunPeriod: 150000,
   backgroundLevel: 0.2,
@@ -67,7 +72,8 @@ export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
   driftLength: 480,
   mineralStock: 1,
   volcanoCount: 6,
-  eruptionInterval: 20000,
+  terrainSpeed: 1,
+  quakeInterval: 400000,
 });
 
 /** Параметры по умолчанию с заданным сидом и частичными переопределениями. */
@@ -92,11 +98,13 @@ export const PARAM_LABELS: Readonly<Record<string, string>> = {
   'viscosityZoneSize': 'Размер зон вязкости',
   'driftStrength': 'Сила сноса',
   'driftLength': 'Длина течений',
+  'lightDrift': 'Скорость дрейфа света',
   'sunRhythm': 'Размах ритма солнца',
   'sunPeriod': 'Период ритма солнца',
   'mineralStock': 'Запас минерала',
   'volcanoCount': 'Число вулканов',
-  'eruptionInterval': 'Промежуток между извержениями',
+  'terrainSpeed': 'Скорость местности',
+  'quakeInterval': 'Промежуток между толчками',
   'viscosityShares': 'Доли вязкости',
   'viscosityShares.water': 'Доля воды',
   'viscosityShares.shallows': 'Доля отмели',
@@ -136,12 +144,14 @@ export function validateParams(p: WorldParams): string[] {
   inRange('viscosityZoneSize', p.viscosityZoneSize, 1, 10000);
   inRange('driftStrength', p.driftStrength, 0, 100);
   inRange('driftLength', p.driftLength, 10, 10000);
+  inRange('lightDrift', p.lightDrift, 0, 100);
   inRange('sunRhythm', p.sunRhythm, 0, 0.9);
   inRange('sunPeriod', p.sunPeriod, 1000, 100_000_000);
   inRange('mineralStock', p.mineralStock, 0, 100, true);
   inRange('volcanoCount', p.volcanoCount, 1, 50);
+  inRange('terrainSpeed', p.terrainSpeed, 0, 100);
+  inRange('quakeInterval', p.quakeInterval, 1000, 1e9);
   if (Number.isFinite(p.volcanoCount) && !Number.isInteger(p.volcanoCount)) errors.push('Число вулканов: ожидается целое');
-  inRange('eruptionInterval', p.eruptionInterval, 100, 10_000_000);
 
   const s = p.viscosityShares;
   if (typeof s !== 'object' || s === null) {

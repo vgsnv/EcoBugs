@@ -3,7 +3,7 @@
  * Скорость показа — дело приложения; мир знает только номер шага.
  */
 import {
-  WorldFileError, lightDriftVelocity, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInMedium, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
+  WorldFileError, lightDriftVelocity, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInDeposits, mineralInGround, mineralInMedium, smoothLevelAt, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
   parseWorldFile, resistanceAt, serializeWorld, stepWorld, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
@@ -167,6 +167,14 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+/** Залежи в точке относительно средней плотности запаса минерала. */
+function depositsAt(w: World, x: number, y: number): number {
+  const m = w.mineral;
+  const i = Math.min(m.cols - 1, Math.max(0, Math.floor(x / m.cell)));
+  const j = Math.min(m.rows - 1, Math.max(0, Math.floor(y / m.cell)));
+  return w.terrain.deposits[j * m.cols + i] / (m.cell * m.cell) / w.params.mineralStock;
+}
+
 function probe(): void {
   if (!pointer) { panel.setProbe(null); return; }
   const { x, y, clientX, clientY } = pointer;
@@ -177,8 +185,8 @@ function probe(): void {
     const v = world.mineral.volcanoes[volcano];
     const state = v.active
       ? [`Извергается ещё ${(v.until - world.step).toLocaleString('ru')} шагов`, `Осталось выбросить: ${Math.round((v.left / (world.params.mineralStock * world.mineral.freeArea)) * 1000) / 10}% запаса`]
-      : [v.next <= world.step ? 'Ждёт, пока кончится другое извержение' : `Следующее — через ${(v.next - world.step).toLocaleString('ru')} шагов`];
-    panel.setProbe([`Вулкан ${volcano + 1} · ${where}`, `Мощность ×${v.power.toFixed(2)} · извержений было: ${v.k - 1 - (v.active ? 1 : 0)}`, ...state], clientX, clientY);
+      : ['Спит — проснётся, когда недра наберут давление (какой вулкан — случай, сильные чаще)'];
+    panel.setProbe([`Вулкан ${volcano + 1} · ${where}`, `Мощность ×${v.power.toFixed(2)} · извержений было: ${v.k - (v.active ? 1 : 0)}`, ...state], clientX, clientY);
     return;
   }
   if (isBlocked(world.partitions, x, y)) {
@@ -187,12 +195,13 @@ function probe(): void {
   }
   const temp = temperatureAt(p, world.light, x, y, world.step);
   panel.setProbe([
-    `${GRADATION_NAMES[gradationAt(world.viscosity, x, y)]} · ${where}`,
+    `${GRADATION_NAMES[gradationAt(world.viscosity, x, y)]} · уровень ${smoothLevelAt(world.viscosity, x, y).toFixed(2)} · ${where}`,
     `Свет ${worldLightAt(world, x, y).toFixed(3)} · усваивается ${absorptionAt(world.viscosity, x, y).toFixed(2)}`,
     `Температура ${temp.toFixed(2)} · мутации ${mutationStrength(temp).toFixed(2)}`,
     `Сопротивление движению ${resistanceAt(p, world.viscosity, x, y).toFixed(2)}`,
     `Снос ${Math.hypot(...world.drift.at(x, y, world.step)).toFixed(3)} за шаг`,
     `Минерал ×${mineralDensityAt(world.mineral, p.mineralStock, x, y).toFixed(2)} от среднего · прозрачность ${transparencyAt(world.mineral, x, y).toFixed(2)}`,
+    `Залежи ×${depositsAt(world, x, y).toFixed(2)} от среднего запаса`,
   ], clientX, clientY);
 }
 
@@ -230,10 +239,12 @@ function frame(now: number): void {
   if (world.mineral.version !== mineralStatsVersion) {
     mineralStatsVersion = world.mineral.version;
     const medium = mineralInMedium(world.mineral);
-    const total = medium + world.mineral.depths + mineralInEruptions(world.mineral);
+    const ground = mineralInGround(world.terrain);
+    const deposits = mineralInDeposits(world.terrain);
+    const total = medium + world.mineral.depths + mineralInEruptions(world.mineral) + ground + deposits;
     const share = (x: number) => `${Math.round((x / total) * 100)}%`;
     const active = world.mineral.volcanoes.flatMap((v, i) => (v.active ? [i + 1] : []));
-    mineralStats.innerHTML = `<b>минерал</b> · в среде ${share(medium)} · в недрах ${share(world.mineral.depths)} · ${active.length ? `извергается вулкан ${active.join(', ')}` : 'вулканы спят'} · извержений ${world.mineral.volcanoes.reduce((a, v) => a + v.k - 1, 0)}`;
+    mineralStats.innerHTML = `<b>минерал</b> · в среде ${share(medium)} · в залежах ${share(deposits)} · давление недр ${Math.round((world.mineral.depths / world.mineral.threshold) * 100)}% · ${active.length ? `извергается вулкан ${active.join(', ')}` : 'вулканы спят'} · извержений ${world.mineral.eruptions}`;
   }
   panel.setTime(world.step, paused, speed, behind || actualRate < stepsPerSecond * 0.9 ? actualRate : stepsPerSecond, behind);
   probe();

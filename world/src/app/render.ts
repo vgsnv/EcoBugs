@@ -31,6 +31,17 @@ const STONE_SLAB = 14;
 const STONE_UNDERWATER_LIFT = 45;
 /** Насколько вода над отмелью прозрачна (0 — не видно камня, 1 — только камень). */
 const SHALLOWS_CLARITY = 0.6;
+/**
+ * Залежи минерала на дне: тёмно-фиолетовые, с мелкими светлыми кристаллами;
+ * с какой густоты залежей (от средней плотности запаса) начинаются и с какой
+ * сплошные, наибольшая укрывистость, доля и яркость кристаллов.
+ */
+export const DEPOSIT_COLOR: Rgb = [84, 44, 122];
+const DEPOSIT_FROM = 0.5;
+const DEPOSIT_FULL = 8;
+const DEPOSIT_MAX = 0.9;
+const CRYSTAL_SHARE = 0.06;
+const CRYSTAL_LIGHT = 70;
 /** Образцы для легенды. */
 export const STONE_SAMPLE: Rgb = [STONE_BASE, STONE_BASE, STONE_BASE + 4];
 export const SHALLOWS_SAMPLE: Rgb = mix(lift(STONE_SAMPLE, STONE_UNDERWATER_LIFT), SHALLOW_WATER, 1 - SHALLOWS_CLARITY);
@@ -170,8 +181,9 @@ function ripple(): HTMLCanvasElement {
  * наибольшая непрозрачность.
  */
 export const MINERAL_COLOR: Rgb = [196, 128, 255];
-const MINERAL_FULL = 4;
-const MINERAL_ALPHA = 0.6;
+const MINERAL_FROM = 1;
+const MINERAL_FULL = 6;
+const MINERAL_ALPHA = 0.5;
 /** Насколько мягче показывать затемнение от мутности, чем по модели (1 — как есть). */
 const MURK_STRENGTH = 0.8;
 /** Кольца идущего извержения: сколько секунд расходится одно, сколько колец сразу. */
@@ -179,6 +191,9 @@ const ERUPTION_RING_S = 1.6;
 const ERUPTION_RINGS = 3;
 const ERUPTION_RING_COLOR = 'rgb(240, 225, 255)';
 const ERUPTION_RING_MIN_CSS = 36;
+
+/** Перерисовывать изменившуюся местность не чаще, мс. */
+const TERRAIN_REDRAW_MS = 1000;
 
 /** Сторона плитки местности, пикселей. */
 const TILE = 256;
@@ -200,6 +215,18 @@ function terrainSampler(world: World): (x: number, y: number, out: Uint8ClampedA
   const mottle = gridField(DISH_WIDTH, DISH_HEIGHT, 4, (x, y) => fbm(x / 40, y / 40));
   const grain = gridField(DISH_WIDTH, DISH_HEIGHT, 1.25, (x, y) => hash3(seed ^ 0x6a41, Math.round(x * 0.8), Math.round(y * 0.8)) / 2147483648 - 1);
   const edge = cellEdges(seed ^ 0xc4ac, Math.ceil(DISH_WIDTH / STONE_SLAB), Math.ceil(DISH_HEIGHT / STONE_SLAB));
+  const m = world.mineral;
+  const deposits = world.terrain.deposits;
+  const stock = world.params.mineralStock;
+  /** Залежи в точке относительно средней плотности запаса — билинейно по клеткам. */
+  const depositAt = (x: number, y: number) => {
+    const fx = Math.min(m.cols - 1, Math.max(0, x / m.cell - 0.5)), fy = Math.min(m.rows - 1, Math.max(0, y / m.cell - 0.5));
+    const i0 = Math.floor(fx), j0 = Math.floor(fy), i1 = Math.min(m.cols - 1, i0 + 1), j1 = Math.min(m.rows - 1, j0 + 1);
+    const u = fx - i0, v = fy - j0;
+    const a = deposits[j0 * m.cols + i0] + (deposits[j0 * m.cols + i1] - deposits[j0 * m.cols + i0]) * u;
+    const b = deposits[j1 * m.cols + i0] + (deposits[j1 * m.cols + i1] - deposits[j1 * m.cols + i0]) * u;
+    return (a + (b - a) * v) / (m.cell * m.cell) / stock;
+  };
   return (x, y, out, k) => {
     const L = smoothLevelAt(world.viscosity, x, y);
     const crack = 1 - smoothstep(0.02, 0.07, edge(x / STONE_SLAB, y / STONE_SLAB));
@@ -207,12 +234,24 @@ function terrainSampler(world: World): (x: number, y: number, out: Uint8ClampedA
     // Вода мелеет к отмели и сходит на нет к суше; камень под ней светлее.
     const shallow = smoothstep(0.2, 1.3, L);
     const dry = smoothstep(1.35, 1.75, L);
-    const under = v + STONE_UNDERWATER_LIFT * (1 - dry);
+    const stone = v + STONE_UNDERWATER_LIFT * (1 - dry);
+    let r = stone, g = stone, b = stone + 4;
+    // Залежи: тёмно-фиолетовый налёт на дне — гуще залежи, плотнее цвет;
+    // по нему редкие светлые кристаллы.
+    const lode = Math.min(1, smoothstep(DEPOSIT_FROM, DEPOSIT_FULL, depositAt(x, y)));
+    if (lode > 0) {
+      const speck = hash3(seed ^ 0x3a7d, Math.round(x * 1.5), Math.round(y * 1.5)) / 4294967296;
+      const crystal = speck < CRYSTAL_SHARE * lode ? CRYSTAL_LIGHT : 0;
+      const cover = lode * DEPOSIT_MAX;
+      r += (DEPOSIT_COLOR[0] + crystal * 0.9 - r) * cover;
+      g += (DEPOSIT_COLOR[1] + crystal * 0.6 - g) * cover;
+      b += (DEPOSIT_COLOR[2] + crystal - b) * cover;
+    }
     const water = mix(DEEP_WATER, SHALLOW_WATER, shallow);
     const cover = (1 - SHALLOWS_CLARITY * shallow) * (1 - dry);
-    out[k] = under + (water[0] - under) * cover;
-    out[k + 1] = under + (water[1] - under) * cover;
-    out[k + 2] = under + 4 + (water[2] - under - 4) * cover;
+    out[k] = r + (water[0] - r) * cover;
+    out[k + 1] = g + (water[1] - g) * cover;
+    out[k + 2] = b + (water[2] - b) * cover;
     out[k + 3] = 255;
   };
 }
@@ -267,6 +306,9 @@ export class WorldRenderer {
   private world!: World;
   /** Толщина стены вокруг чашки, единиц мира — как у перегородок. */
   private wall = 0;
+  /** Версия карты вязкости, по которой нарисована местность, и когда перерисована. */
+  private terrainVersion = -1;
+  private terrainDrawnAt = 0;
   /** Местность целиком в самом мелком масштабе — подложка, пока нет плиток. */
   private base!: HTMLCanvasElement;
   private sample!: ReturnType<typeof terrainSampler>;
@@ -302,12 +344,30 @@ export class WorldRenderer {
     this.edges = this.buildEdges();
     this.parts = this.buildParts();
     this.waterMask = this.buildWaterMask();
+    this.terrainVersion = world.viscosity.version;
     this.resize();
     this.fit();
   }
 
   private get dpr(): number {
     return window.devicePixelRatio || 1;
+  }
+
+  /**
+   * Местность изменилась (пересборка из грунта) — перестроить подложку, маску
+   * воды и сбросить плитки. Не чаще раза в TERRAIN_REDRAW_MS: на ускорении
+   * пересборки идут часто, а картинка нужна плавная.
+   */
+  private refreshTerrain(): void {
+    const v = this.world.viscosity.version;
+    if (v === this.terrainVersion) return;
+    const now = performance.now();
+    if (now - this.terrainDrawnAt < TERRAIN_REDRAW_MS) return;
+    this.terrainVersion = v;
+    this.terrainDrawnAt = now;
+    this.base = renderTerrain(this.sample, 0, 0, DISH_WIDTH * TILE_SCALE_MIN, DISH_HEIGHT * TILE_SCALE_MIN, TILE_SCALE_MIN);
+    this.waterMask = this.buildWaterMask();
+    this.tiles.clear();
   }
 
   /** Подогнать разрешение холстов под размер на экране и плотность пикселей. */
@@ -448,6 +508,7 @@ export class WorldRenderer {
 
   /** Кадр; `animTime` — секунды анимации бликов (стоит на паузе). */
   draw(animTime = 0): void {
+    this.refreshTerrain();
     const w = this.world;
     const p = w.params;
     const ctx = this.ctx;
@@ -577,7 +638,7 @@ export class WorldRenderer {
       kctx.putImageData(dark, 0, 0);
       for (let k = 0; k < m.field.length; k++) {
         const d = smooth[k] / area / stock;
-        const a = Math.min(1, Math.max(0, (d - 1) / (MINERAL_FULL - 1))) ** 0.8 * MINERAL_ALPHA;
+        const a = Math.min(1, Math.max(0, (d - MINERAL_FROM) / (MINERAL_FULL - MINERAL_FROM))) ** 0.8 * MINERAL_ALPHA;
         img.data[k * 4] = MINERAL_COLOR[0];
         img.data[k * 4 + 1] = MINERAL_COLOR[1];
         img.data[k * 4 + 2] = MINERAL_COLOR[2];
@@ -598,11 +659,11 @@ export class WorldRenderer {
     ctx.restore();
 
     // Идущие извержения: кольца расходятся от вулкана, пока он извергается;
-    // ярче — чем сильнее выброс.
-    const maxRate = Math.max(1e-9, ...m.volcanoes.map((v) => (v.active ? v.rate : 0)));
+    // ярче на пике извержения (выброс за шаг относительно пикового).
     for (const v of m.volcanoes) {
       if (!v.active) continue;
-      const strength = 0.45 + 0.55 * Math.min(1, v.rate / maxRate);
+      const peak = (2 * v.total) / Math.max(1, v.until - v.begin);
+      const strength = 0.25 + 0.75 * Math.min(1, v.rate / Math.max(1e-12, peak));
       for (let n = 0; n < ERUPTION_RINGS; n++) {
         const f = (animTime / ERUPTION_RING_S + n / ERUPTION_RINGS) % 1;
         ctx.globalCompositeOperation = 'source-over';

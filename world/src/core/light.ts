@@ -85,7 +85,7 @@ function sampleRadius(rng: Rng, mean: number): number {
   return mean * Math.min(SPOT_SIZE_MAX, Math.max(SPOT_SIZE_MIN, k));
 }
 
-function makeSpot(rng: Rng, mapW: number, mapH: number, meanRadius: number): Spot {
+function makeSpot(rng: Rng, mapW: number, mapH: number, meanRadius: number, driftScale: number): Spot {
   const radius = sampleRadius(rng, meanRadius);
   const blobCount = 1 + rng.int(SPOT_MAX_BLOBS);
   const blobs: Blob[] = [];
@@ -105,7 +105,7 @@ function makeSpot(rng: Rng, mapW: number, mapH: number, meanRadius: number): Spo
     });
   }
   const angle = rng.range(0, TAU);
-  const speed = LIGHT_DRIFT_SPEED * SPOT_OWN_DRIFT * rng.range(0.3, 1);
+  const speed = LIGHT_DRIFT_SPEED * driftScale * SPOT_OWN_DRIFT * rng.range(0.3, 1);
   return {
     x0: rng.range(0, mapW), y0: rng.range(0, mapH),
     vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
@@ -255,7 +255,7 @@ export function createLightMap(params: WorldParams): LightMap {
   const grid = new CoverageGrid(mapW, mapH, 0);
   for (let guard = 0; guard < 200; guard++) {
     for (let k = 0; k < batch; k++) {
-      const spot = makeSpot(rng, mapW, mapH, params.spotSize);
+      const spot = makeSpot(rng, mapW, mapH, params.spotSize, params.lightDrift);
       spots.push(spot);
       grid.add(spot);
     }
@@ -264,8 +264,8 @@ export function createLightMap(params: WorldParams): LightMap {
 
   const drift: DriftHarmonic[] = [];
   const w1 = TAU / LIGHT_TURN_PERIOD;
-  drift.push({ speed: LIGHT_DRIFT_SPEED * 0.8, w: w1 * rng.range(0.8, 1.2), phase: rng.range(0, TAU) });
-  drift.push({ speed: LIGHT_DRIFT_SPEED * 0.4, w: -w1 * GOLDEN * rng.range(0.8, 1.2), phase: rng.range(0, TAU) });
+  drift.push({ speed: LIGHT_DRIFT_SPEED * params.lightDrift * 0.8, w: w1 * rng.range(0.8, 1.2), phase: rng.range(0, TAU) });
+  drift.push({ speed: LIGHT_DRIFT_SPEED * params.lightDrift * 0.4, w: -w1 * GOLDEN * rng.range(0.8, 1.2), phase: rng.range(0, TAU) });
 
   return {
     mapWidth: mapW,

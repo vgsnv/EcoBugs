@@ -4,8 +4,9 @@
  * движению (базовая вязкость × множитель градации) и долю усваиваемого света.
  *
  * Суша отделена от воды отмелью; границы плавные; доли градаций и средний
- * размер зон — параметры. Карта строится из сида, не зависит от перегородок
- * и не меняется.
+ * размер зон — параметры стартовой местности. Карта строится из сида и не
+ * зависит от перегородок; дальше её меняет местность (грунт): раз в
+ * TERRAIN_PERIOD шагов карта пересобирается из уровня грунта (applyLevels).
  */
 import {
   DISH_HEIGHT, DISH_WIDTH,
@@ -26,11 +27,13 @@ export interface ViscosityMap {
   /** Размер ячейки, единиц мира. */
   readonly cell: number;
   /** Градация каждой ячейки (без размытия). */
-  readonly levels: Uint8Array;
+  levels: Uint8Array;
   /** Плавный уровень 0…2 (0 — вода, 1 — отмель, 2 — суша) после размытия границ. */
-  readonly smooth: Float32Array;
+  smooth: Float32Array;
   /** Фактические доли градаций. */
-  readonly shares: ViscosityShares;
+  shares: ViscosityShares;
+  /** Растёт при каждой пересборке — чтобы показ знал, что пора перерисовать местность. */
+  version: number;
 }
 
 /** Порог, выше которого лежит доля `share` значений. */
@@ -156,7 +159,50 @@ export function createViscosityMap(params: WorldParams): ViscosityMap {
   return {
     cols, rows, cell, levels, smooth,
     shares: { water: counts[0] / n, shallows: counts[1] / n, land: counts[2] / n },
+    version: 0,
   };
+}
+
+/**
+ * Пересобрать карту из уровня местности на грубой сетке (cols × rows, ячейка
+ * `cell`): билинейно на сетку карты; градация — по порогам 0,5 и 1,5. Уровень
+ * непрерывен, поэтому между водой и сушей всегда проходит отмель.
+ */
+export function applyLevels(map: ViscosityMap, level: Float32Array, cols: number, rows: number, cell: number): void {
+  const n = map.cols * map.rows;
+  const counts = [0, 0, 0];
+  for (let j = 0; j < map.rows; j++) {
+    const fy = Math.min(rows - 1, Math.max(0, ((j + 0.5) * map.cell) / cell - 0.5));
+    const j0 = Math.floor(fy), j1 = Math.min(rows - 1, j0 + 1), v = fy - j0;
+    for (let i = 0; i < map.cols; i++) {
+      const fx = Math.min(cols - 1, Math.max(0, ((i + 0.5) * map.cell) / cell - 0.5));
+      const i0 = Math.floor(fx), i1 = Math.min(cols - 1, i0 + 1), u = fx - i0;
+      const a = level[j0 * cols + i0] + (level[j0 * cols + i1] - level[j0 * cols + i0]) * u;
+      const b = level[j1 * cols + i0] + (level[j1 * cols + i1] - level[j1 * cols + i0]) * u;
+      const L = a + (b - a) * v;
+      const k = j * map.cols + i;
+      map.smooth[k] = L;
+      const g = L < 0.5 ? WATER : L < 1.5 ? SHALLOWS : LAND;
+      map.levels[k] = g;
+      counts[g]++;
+    }
+  }
+  map.shares = { water: counts[0] / n, shallows: counts[1] / n, land: counts[2] / n };
+  map.version++;
+}
+
+/** Уровень местности на грубой сетке — среднее плавного уровня карты по ячейке. */
+export function levelsOnGrid(map: ViscosityMap, cols: number, rows: number, cell: number): Float32Array {
+  const out = new Float32Array(cols * rows);
+  const sub = 4;
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) {
+      let s = 0;
+      for (let b = 0; b < sub; b++) for (let a = 0; a < sub; a++) s += smoothLevelAt(map, (i + (a + 0.5) / sub) * cell, (j + (b + 0.5) / sub) * cell);
+      out[j * cols + i] = s / (sub * sub);
+    }
+  }
+  return out;
 }
 
 /** Значение свойства по плавному уровню: линейно между градациями. */

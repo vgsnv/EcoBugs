@@ -10,11 +10,11 @@
  * Поле пересчитывается раз в DRIFT_PERIOD шагов, между пересчётами — плавный
  * переход, поэтому снос — функция номера шага.
  */
-import { DISH_HEIGHT, DISH_WIDTH, DRIFT_CELL, DRIFT_PERIOD, DRIFT_SOURCE } from './constants.ts';
+import { DISH_HEIGHT, DISH_WIDTH, DRIFT_CELL, DRIFT_PERIOD, DRIFT_SOURCE, LAND_FLOW_BLOCK, MERGE_MAX } from './constants.ts';
 import { rasterizeSpotIntensity, sunAt, type LightMap } from './light.ts';
 import type { WorldParams } from './params.ts';
 import { isBlocked, type PartitionLayout } from './partitions.ts';
-import { resistanceAt, type ViscosityMap } from './viscosity.ts';
+import { resistanceAt, smoothLevelAt, type ViscosityMap } from './viscosity.ts';
 
 /** Течения в один момент: вектор сноса в центре каждой клетки. */
 export interface DriftField {
@@ -84,15 +84,18 @@ const NEIGHBORS: readonly [number, number, number][] = [
   [1, 1, Math.SQRT2], [1, -1, Math.SQRT2], [-1, 1, Math.SQRT2], [-1, -1, Math.SQRT2],
 ];
 
-/** Неизменное на сетке течений: преграды и сопротивление движению. */
+/** Неизменное на сетке течений: преграды, сопротивление движению и цена пути течения. */
 interface Ground {
   readonly blocked: Uint8Array;
   readonly resistance: Float32Array;
+  /** Цена пути: сопротивление, а на суше — во много раз выше (течения её огибают). */
+  readonly cost: Float32Array;
 }
 
 function groundOf(world: Sources, cols: number, rows: number, cell: number): Ground {
   const blocked = new Uint8Array(cols * rows);
   const resistance = new Float32Array(cols * rows);
+  const cost = new Float32Array(cols * rows);
   for (let j = 0; j < rows; j++) {
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
@@ -100,9 +103,11 @@ function groundOf(world: Sources, cols: number, rows: number, cell: number): Gro
       const y = (j + 0.5) * cell;
       blocked[k] = isBlocked(world.partitions, x, y) ? 1 : 0;
       resistance[k] = resistanceAt(world.params, world.viscosity, x, y);
+      const u = Math.min(1, Math.max(0, (smoothLevelAt(world.viscosity, x, y) - 1.3) / 0.4));
+      cost[k] = resistance[k] * (1 + LAND_FLOW_BLOCK * u * u * (3 - 2 * u));
     }
   }
-  return { blocked, resistance };
+  return { blocked, resistance, cost };
 }
 
 const COLS = Math.ceil(DISH_WIDTH / DRIFT_CELL);
@@ -124,7 +129,11 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
   const budget = 1;
 
   const intensity = rasterizeSpotIntensity(world.light, t, cols, rows, cell);
-  const { blocked, resistance } = ground;
+  const { blocked, resistance, cost: pathCost } = ground;
+  /** Порядок, в котором клетки получили окончательный путь (от пятен наружу), и геометрическая длина пути в клетках. */
+  const order = new Int32Array(n);
+  let ordered = 0;
+  const dist = new Float32Array(n);
 
   // Израсходованная доля пути (0…1): на краях пятен — сколько отняла среда на
   // старте, дальше растёт с пройденным путём × сопротивление; Infinity — не дошло.
@@ -148,6 +157,7 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
     const k = heap.pop();
     const cost = heap.lastKey;
     if (cost > spent[k] || cost >= budget) continue;
+    order[ordered++] = k;
     const i = k % cols;
     const j = (k - i) / cols;
     for (const [di, dj, len] of NEIGHBORS) {
@@ -157,9 +167,10 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
       if (blocked[m]) continue;
       // По диагонали — только если не срезаем угол преграды.
       if (di !== 0 && dj !== 0 && (blocked[j * cols + a] || blocked[b * cols + i])) continue;
-      const next = cost + (len * cell * 0.5 * (resistance[k] + resistance[m])) / length;
+      const next = cost + (len * cell * 0.5 * (pathCost[k] + pathCost[m])) / length;
       if (next < spent[m]) {
         spent[m] = next;
+        dist[m] = dist[k] + len;
         heap.push(next, m);
       }
     }
@@ -182,12 +193,41 @@ export function computeDriftField(world: Sources, t: number, ground: Ground = gr
       if (g === 0) continue;
       // Ожидаемый рост за две клетки при здешнем сопротивлении: на гребне, где
       // встречаются течения, разность мала, и сила гаснет.
-      const expected = (2 * cell * resistance[k]) / length;
+      const expected = (2 * cell * pathCost[k]) / length;
       const coherence = Math.min(1, g / expected);
       const s = strength * (budget - here) * coherence;
       vx[k] = (ex / g) * s;
       vy[k] = (ey / g) * s;
     }
+  }
+
+  // Слияние: каждая клетка передаёт свой расход соседу вниз по течению (от
+  // пятен наружу — уже готовый порядок). Где сходятся пути, расход больше, чем
+  // длина пути, — там течение сильнее (не больше MERGE_MAX).
+  const flux = new Float32Array(n);
+  for (let o = 0; o < ordered; o++) {
+    const k = order[o];
+    if (source[k] || (vx[k] === 0 && vy[k] === 0)) continue;
+    flux[k] += 1;
+    const i = k % cols, j = (k - i) / cols;
+    const sv = Math.sqrt(vx[k] * vx[k] + vy[k] * vy[k]);
+    let best = -1, bestDot = 0;
+    for (const [di, dj, len] of NEIGHBORS) {
+      const a = i + di, b = j + dj;
+      if (a < 0 || b < 0 || a >= cols || b >= rows) continue;
+      const m = b * cols + a;
+      if (!reached(m) || spent[m] <= spent[k]) continue;
+      const dot = (di * vx[k] + dj * vy[k]) / (len * sv);
+      if (dot > bestDot) { bestDot = dot; best = m; }
+    }
+    if (best >= 0) flux[best] += flux[k];
+  }
+  for (let o = 0; o < ordered; o++) {
+    const k = order[o];
+    if (vx[k] === 0 && vy[k] === 0) continue;
+    const f = Math.min(MERGE_MAX, Math.max(1, Math.sqrt(flux[k] / Math.max(1, dist[k]))));
+    vx[k] *= f;
+    vy[k] *= f;
   }
   return { cols, rows, cell, vx, vy };
 }
@@ -214,6 +254,12 @@ export class Drift {
       while (this.cache.size > 3) this.cache.delete(this.cache.keys().next().value!);
     }
     return f;
+  }
+
+  /** Местность изменилась: забыть поля и неизменное (сопротивление), пересчитать заново. */
+  reset(): void {
+    this.cache.clear();
+    this.ground = null;
   }
 
   /** Поля в двух узлах вокруг шага t и доля пути между ними — для обхода клеток без интерполяции по точке. */

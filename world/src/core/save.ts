@@ -5,11 +5,12 @@
  * как исходный.
  */
 import { makeParams, validateParams, type WorldParams } from './params.ts';
-import { createWorld, worldHash, type World } from './world.ts';
+import { applyTerrain, createWorld, worldHash, type World } from './world.ts';
+import { movement } from './terrain.ts';
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 8;
+export const WORLD_FORMAT_VERSION = 12;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -20,14 +21,35 @@ const OLD_FORMATS: Record<number, string> = {
   5: 'тогда извержения были мгновенными',
   6: 'тогда солнце было ровным',
   7: 'тогда длина течений зависела от их силы',
+  8: 'тогда местность не менялась',
+  9: 'тогда извержения были короткими',
+  10: 'тогда скорость дрейфа света не была параметром',
+  11: 'тогда не было залежей и вулканы работали по расписанию',
 };
 
 export interface MineralFile {
   depths: number;
-  /** Для каждого вулкана: номер следующего извержения, его шаг; идёт ли извержение (0/1), до какого шага, выброс за шаг, сколько осталось. */
-  volcanoes: [number, number, number, number, number, number][];
+  /** Порог давления недр и сколько извержений было. */
+  threshold: number;
+  eruptions: number;
+  /** Для каждого вулкана: сколько раз извергался; идёт ли извержение (0/1), начало, конец, сколько выбросит всего, сколько осталось, выброс за шаг сейчас. */
+  volcanoes: [number, number, number, number, number, number, number][];
   /** Растворённый минерал по клеткам: Float64, little-endian, base64. */
   field: string;
+}
+
+export interface TerrainFile {
+  /** Коренной грунт и залежи по клеткам: Float64, base64. */
+  ground: string;
+  deposits: string;
+  /** Снимок уровня, по которому собрана карта: Float32, base64. */
+  applied: string;
+  nextMove: number;
+  nextMoveStep: number;
+  nextQuake: number;
+  nextQuakeStep: number;
+  /** Идущие подвижки и толчки: номер, толчок ли (0/1), шаг начала. */
+  active: [number, number, number][];
 }
 
 export interface WorldFile {
@@ -39,6 +61,8 @@ export interface WorldFile {
   step: number;
   /** Минерал — состояние мира, из сида его не восстановить. */
   mineral: MineralFile;
+  /** Местность — тоже состояние мира. */
+  terrain: TerrainFile;
   /** Контрольная сумма состояния, шестнадцатеричная. */
   checksum: string;
 }
@@ -60,8 +84,20 @@ export function worldToFile(world: World, savedAt?: Date): WorldFile {
     step: world.step,
     mineral: {
       depths: world.mineral.depths,
-      volcanoes: world.mineral.volcanoes.map((v) => [v.k, v.next, v.active ? 1 : 0, v.until, v.rate, v.left]),
+      threshold: world.mineral.threshold,
+      eruptions: world.mineral.eruptions,
+      volcanoes: world.mineral.volcanoes.map((v) => [v.k, v.active ? 1 : 0, v.begin, v.until, v.total, v.left, v.rate]),
       field: toBase64(new Uint8Array(world.mineral.field.buffer.slice(0))),
+    },
+    terrain: {
+      ground: toBase64(new Uint8Array(world.terrain.ground.buffer.slice(0))),
+      deposits: toBase64(new Uint8Array(world.terrain.deposits.buffer.slice(0))),
+      applied: toBase64(new Uint8Array(world.terrain.applied.buffer.slice(0))),
+      nextMove: world.terrain.nextMove,
+      nextMoveStep: world.terrain.nextMoveStep,
+      nextQuake: world.terrain.nextQuake,
+      nextQuakeStep: world.terrain.nextQuakeStep,
+      active: world.terrain.active.map((m) => [m.n, m.quake ? 1 : 0, m.start]),
     },
     checksum: worldHash(world).toString(16).padStart(8, '0'),
   };
@@ -97,6 +133,7 @@ function readParams(raw: unknown, problems: string[]): WorldParams | null {
   const params: WorldParams = {
     seed: raw.seed as number,
     sun: raw.sun as number,
+    lightDrift: raw.lightDrift as number,
     sunRhythm: raw.sunRhythm as number,
     sunPeriod: raw.sunPeriod as number,
     backgroundLevel: raw.backgroundLevel as number,
@@ -111,7 +148,8 @@ function readParams(raw: unknown, problems: string[]): WorldParams | null {
     driftLength: raw.driftLength as number,
     mineralStock: raw.mineralStock as number,
     volcanoCount: raw.volcanoCount as number,
-    eruptionInterval: raw.eruptionInterval as number,
+    terrainSpeed: raw.terrainSpeed as number,
+    quakeInterval: raw.quakeInterval as number,
   };
   for (const key of Object.keys(defaults) as (keyof WorldParams)[]) {
     if (!(key in raw)) problems.push(`Нет параметра «${key}»`);
@@ -157,7 +195,7 @@ export function parseWorldFile(text: string): World {
 
   const world = createWorld(params);
   world.step = step as number;
-  const mineralProblems = restoreMineral(world, data.mineral);
+  const mineralProblems = [...restoreMineral(world, data.mineral), ...restoreTerrain(world, data.terrain)];
   if (mineralProblems.length > 0) throw new WorldFileError(mineralProblems);
   if (worldHash(world) !== parseInt(data.checksum as string, 16)) {
     throw new WorldFileError(['Контрольная сумма не совпадает — файл повреждён или изменён вручную']);
@@ -181,17 +219,49 @@ function restoreMineral(world: World, raw: unknown): string[] {
   if (bytes.length !== m.field.length * 8) return ['Поле минерала другого размера'];
   const field = new Float64Array(bytes.buffer, bytes.byteOffset, m.field.length).slice();
   for (const [i, entry] of (raw.volcanoes as unknown[]).entries()) {
-    if (!Array.isArray(entry) || entry.length !== 6 || !entry.every((x) => typeof x === 'number' && Number.isFinite(x) && x >= 0)
-      || ![0, 1, 3].every((n) => Number.isSafeInteger(entry[n])) || (entry[2] !== 0 && entry[2] !== 1)) {
-      return [`Вулкан ${i + 1}: ожидаются шесть неотрицательных чисел`];
+    if (!Array.isArray(entry) || entry.length !== 7 || !entry.every((x) => typeof x === 'number' && Number.isFinite(x) && x >= 0)
+      || ![0, 2, 3].every((n) => Number.isSafeInteger(entry[n])) || (entry[1] !== 0 && entry[1] !== 1)) {
+      return [`Вулкан ${i + 1}: ожидаются семь неотрицательных чисел`];
     }
     const v = m.volcanoes[i];
-    [v.k, v.next] = [entry[0] as number, entry[1] as number];
-    v.active = entry[2] === 1;
-    [v.until, v.rate, v.left] = [entry[3] as number, entry[4] as number, entry[5] as number];
+    v.k = entry[0] as number;
+    v.active = entry[1] === 1;
+    [v.begin, v.until, v.total, v.left, v.rate] = entry.slice(2) as number[];
   }
   m.field = field;
   m.depths = raw.depths;
+  if (typeof raw.threshold !== 'number' || !(raw.threshold > 0) || !Number.isSafeInteger(raw.eruptions)) return ['Давление недр повреждено'];
+  m.threshold = raw.threshold;
+  m.eruptions = raw.eruptions as number;
+  return [];
+}
+
+/** Местность из файла; возвращает причины отказа. */
+function restoreTerrain(world: World, raw: unknown): string[] {
+  if (!isObject(raw)) return ['Нет состояния местности'];
+  const t = world.terrain;
+  const ints = [raw.nextMove, raw.nextMoveStep, raw.nextQuake, raw.nextQuakeStep];
+  if (!ints.every((x) => Number.isSafeInteger(x) && (x as number) >= 0)) return ['Местность: расписание подвижек повреждено'];
+  if (typeof raw.ground !== 'string' || typeof raw.deposits !== 'string' || typeof raw.applied !== 'string' || !Array.isArray(raw.active)) return ['Местность: нет грунта, залежей или снимка'];
+  let ground: Uint8Array, deposits: Uint8Array, applied: Uint8Array;
+  try {
+    ground = fromBase64(raw.ground);
+    deposits = fromBase64(raw.deposits);
+    applied = fromBase64(raw.applied);
+  } catch {
+    return ['Местность повреждена'];
+  }
+  if (ground.length !== t.ground.length * 8 || deposits.length !== t.deposits.length * 8 || applied.length !== t.applied.length * 4) return ['Местность другого размера'];
+  const active = [];
+  for (const entry of raw.active as unknown[]) {
+    if (!Array.isArray(entry) || entry.length !== 3 || !entry.every((x) => Number.isSafeInteger(x) && x >= 0)) return ['Местность: подвижка повреждена'];
+    active.push(movement(world.params.seed, entry[1] === 1, entry[0] as number, entry[2] as number));
+  }
+  t.ground = new Float64Array(ground.buffer, ground.byteOffset, t.ground.length).slice();
+  t.deposits = new Float64Array(deposits.buffer, deposits.byteOffset, t.deposits.length).slice();
+  [t.nextMove, t.nextMoveStep, t.nextQuake, t.nextQuakeStep] = ints as number[];
+  t.active = active;
+  applyTerrain(world, new Float32Array(applied.buffer, applied.byteOffset, t.applied.length).slice());
   return [];
 }
 

@@ -5,7 +5,7 @@
  * применяются кнопкой «Создать мир».
  */
 import { LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type WorldParams } from '../core/index.ts';
-import { DEEP_WATER, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render.ts';
+import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render.ts';
 
 export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
 
@@ -35,7 +35,7 @@ export const SPEED_KEYS = SPEEDS.map((_, i) => String(i + 1));
 
 const OPEN_GROUPS_KEY = 'ecobugs.params.open';
 
-type NumberKey = 'sun' | 'sunRhythm' | 'sunPeriod' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'baseViscosity' | 'viscosityZoneSize' | 'driftStrength' | 'driftLength' | 'mineralStock' | 'volcanoCount' | 'eruptionInterval';
+type NumberKey = 'sun' | 'lightDrift' | 'sunRhythm' | 'sunPeriod' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'baseViscosity' | 'viscosityZoneSize' | 'driftStrength' | 'driftLength' | 'terrainSpeed' | 'quakeInterval' | 'mineralStock' | 'volcanoCount';
 
 interface SliderSpec {
   key: NumberKey;
@@ -52,6 +52,7 @@ const GROUPS: readonly { title: string; sliders: readonly SliderSpec[] }[] = [
     title: 'Свет',
     sliders: [
       { key: 'sun', label: 'Солнце', hint: 'Средняя яркость света в пятнах. От неё же зависит сила течений: ярче — сильнее и длиннее.', min: 0.1, max: 3, step: 0.1 },
+      { key: 'lightDrift', label: 'Скорость дрейфа', hint: 'Как быстро карта света сдвигается по чашке и пятна дрейфуют: 1 — обычно (вся чашка проходится примерно за 80 тысяч шагов), 0 — свет стоит на месте. Медленнее — ниши и концы течений дольше на одном месте, минерал успевает оседать; быстрее — ниши чаще меняются.', min: 0, max: 5, step: 0.1 },
       { key: 'sunRhythm', label: 'Размах ритма', hint: 'Солнце медленно и плавно то светлеет, то тускнеет: от (1 − размах) до (1 + размах) от среднего. 0 — ровное солнце. Ритм меняет энергию и силу течений, но не температуру.', min: 0, max: 0.9, step: 0.05 },
       { key: 'sunPeriod', label: 'Период ритма', hint: 'За сколько шагов солнце проходит полный цикл: от яркого к тусклому и обратно.', min: 10000, max: 1000000, step: 10000 },
       { key: 'backgroundLevel', label: 'Яркость фона', hint: 'Свет между пятнами — доля от света в пятне.', min: 0.02, max: 0.9, step: 0.01 },
@@ -81,11 +82,17 @@ const GROUPS: readonly { title: string; sliders: readonly SliderSpec[] }[] = [
     ],
   },
   {
+    title: 'Местность',
+    sliders: [
+      { key: 'terrainSpeed', label: 'Скорость местности', hint: 'Множитель для намыва (избыток минерала оседает в грунт там, где течения слабые), размыва (сильные течения срывают грунт), оседания дна и подвижек. 0 — местность неподвижна.', min: 0, max: 5, step: 0.1 },
+      { key: 'quakeInterval', label: 'Промежуток между толчками', hint: 'Средний промежуток между толчками — короткими резкими подъёмами или провалами небольшого участка, в шагах. Медленные подвижки (хребты, моря, проливы) идут сами, раз в сотни тысяч шагов.', min: 50000, max: 2000000, step: 50000 },
+    ],
+  },
+  {
     title: 'Минерал',
     sliders: [
       { key: 'mineralStock', label: 'Запас минерала', hint: 'Общее количество минерала в мире (в среднем на единицу площади чашки). Оно постоянно: минерал переходит между средой, телами, останками и недрами.', min: 0.2, max: 5, step: 0.1 },
-      { key: 'volcanoCount', label: 'Число вулканов', hint: 'Сколько вулканов в чашке; в каждом отсеке хотя бы один, поэтому на деле их не меньше числа отсеков.', min: 1, max: 20, step: 1 },
-      { key: 'eruptionInterval', label: 'Промежуток между извержениями', hint: 'Средний промежуток между извержениями одного вулкана, в шагах; сами промежутки случайны. Извержение выбрасывает четверть минерала из недр.', min: 2000, max: 100000, step: 1000 },
+      { key: 'volcanoCount', label: 'Число вулканов', hint: 'Сколько вулканов в чашке; в каждом отсеке хотя бы один, поэтому на деле их не меньше числа отсеков. Когда извергаться, решают недра: извержение начинается, когда в них накопится достаточно минерала, — а это зависит от течений, света и местности.', min: 1, max: 20, step: 1 },
     ],
   },
 ];
@@ -353,11 +360,12 @@ export class Panel {
       item(css(DEEP_WATER), 'вода'),
       item(css(SHALLOWS_SAMPLE), 'отмель — камень под водой'),
       item(css(STONE_SAMPLE), 'суша — тёмный камень'),
+      item(`radial-gradient(circle at 30% 40%, rgba(230,200,255,0.9) 0 1px, transparent 1.5px), radial-gradient(circle at 70% 65%, rgba(230,200,255,0.9) 0 1px, transparent 1.5px), ${css(DEPOSIT_COLOR)}`, 'залежи минерала — тёмно-фиолетовое дно'),
       item(css(SUN_COLOR), 'пятна света'),
       item(css(DEEP_WATER.map((c, i) => (c * SHADE_COLOR[i]) / 255) as unknown as Rgb), 'тень'),
       item('rgb(255, 170, 70)', 'нагрев — теплее'),
       item('rgb(40, 80, 150)', 'течение — бегущий пунктир от пятна до конца течения'),
-      item(css(MINERAL_COLOR), 'минерал — дымка, где его больше среднего'),
+      item(css(MINERAL_COLOR), 'растворённый минерал — дымка, где его больше среднего'),
       item('radial-gradient(circle, rgb(30,18,40) 0 35%, rgb(196,128,255) 36% 55%, transparent 56%)', 'вулкан'),
       item('repeating-linear-gradient(60deg, rgba(255,250,230,0.9) 0 1px, transparent 1px 4px), rgb(84, 144, 210)', 'блики — вода на свету'),
       item('rgba(150, 190, 222, 0.6)', 'стекло — стенки и перегородки'),
