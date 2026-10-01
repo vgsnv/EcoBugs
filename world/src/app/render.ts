@@ -191,9 +191,11 @@ function ripple(): HTMLCanvasElement {
  */
 export const MINERAL_COLOR: Rgb = [196, 128, 255];
 const MINERAL_DEEP: Rgb = [164, 112, 236];
-const MINERAL_FROM = 0.3;
-const MINERAL_FULL = 14;
+const MINERAL_FROM = 0.15;
+const MINERAL_FULL = 8;
 const MINERAL_ALPHA = 0.5;
+/** Как быстро растёт непрозрачность с плотностью (1 — ровно по логарифму; больше — тонкое прозрачнее). */
+const MINERAL_GAMMA = 1.1;
 /**
  * Зёрна минерала — только для показа: точки там, где минерал движется (гуще,
  * где больше количество × скорость — видно и тонкие реки), движутся так же,
@@ -261,6 +263,15 @@ const VENT_DIM: Rgb = [128, 106, 160];
 const VENT_BEAT = 0.3;
 /** Радиус точки на экране, CSS px: у спящего и только зародившегося — и перед самым взрывом. */
 const VENT_DOT_CSS: readonly [number, number] = [2.5, 7];
+/**
+ * Размер жерла по мощности вулкана (множитель у слабого и сильного); у
+ * извергающегося — радиус диска (CSS px) у малого и у большого извержения
+ * (объём — по радиусу выброса, от такой его доли); к концу извержения диск
+ * сжимается до 0,55 вместе с темпом.
+ */
+const VENT_POWER_SCALE: readonly [number, number] = [0.7, 1.3];
+const VENT_ERUPT_CSS: readonly [number, number] = [5, 11];
+const VENT_VOLUME_FROM = 0.35;
 const BAR_OUT: Rgb = [226, 200, 255];
 
 /** Перерисовывать изменившуюся местность не чаще, мс. */
@@ -864,7 +875,7 @@ export class WorldRenderer {
         // Градации: по логарифму плотности — видно и тонкий налёт, и густое ядро.
         const d = smooth[k] / area / stock;
         const t = d <= MINERAL_FROM ? 0 : Math.min(1, Math.log(d / MINERAL_FROM) / Math.log(MINERAL_FULL / MINERAL_FROM));
-        const a = t ** 1.6 * MINERAL_ALPHA;
+        const a = t ** MINERAL_GAMMA * MINERAL_ALPHA;
         const c = mix(MINERAL_COLOR, MINERAL_DEEP, smoothstep(0.4, 1, t));
         img.data[k * 4] = c[0];
         img.data[k * 4 + 1] = c[1];
@@ -1039,12 +1050,14 @@ export class WorldRenderer {
 
   /**
    * Жерла по стадиям — плоские; само жерло — отверстие в недра, сплошной
-   * непрозрачный диск (мягкий только ореол), крупнее у сильных вулканов:
+   * непрозрачный диск (мягкий только ореол). Размер — по модели: сильный
+   * вулкан крупнее во всех стадиях; извергающийся — по объёму извержения и
+   * темпу выброса сейчас:
    * - готовится — маленькая белая точка с оттенком минерала и ореолом набирает
    *   силу (растёт и ярчает, к самому взрыву — заметно крупнее) по мере
    *   созревания и роста давления к порогу;
    *   созревший перед самым выбросом пульсирует размером, цветом и ореолом;
-   * - извергается — крупное белое отверстие со светлым ореолом;
+   * - извергается — белое отверстие со светлым ореолом, к концу сжимается;
    * - спит — угасшая искра: маленькое тусклое отверстие;
    * - потух — отверстие сереет и затягивается до исчезновения.
    */
@@ -1059,6 +1072,8 @@ export class WorldRenderer {
       const r = Math.max(this.px(VENT_MIN_CSS[0] + (VENT_MIN_CSS[1] - VENT_MIN_CSS[0]) * power), VENT_SIZE[0] + (VENT_SIZE[1] - VENT_SIZE[0]) * power);
       const phase = Math.max(0, Math.min(1, (step - v.stageAt) / Math.max(1, v.stageUntil - v.stageAt)));
       const pulse = (Math.sin((animTime * 2 * Math.PI) / VENT_PULSE_S + v.id) + 1) / 2;
+      // Размер — по мощности вулкана: сильный крупнее во всех стадиях.
+      const big = VENT_POWER_SCALE[0] + (VENT_POWER_SCALE[1] - VENT_POWER_SCALE[0]) * power;
       // Само жерло — отверстие в недра: сплошной непрозрачный диск; мягким
       // бывает только ореол вокруг.
       if (v.stage === 'preparing') {
@@ -1071,19 +1086,24 @@ export class WorldRenderer {
         // Пульс созревшего — размером и цветом диска и ореолом; диск всегда непрозрачен.
         const beat = ready * pulse;
         const grow = force * force;
-        const dot = Math.max(this.px(VENT_DOT_CSS[0] + (VENT_DOT_CSS[1] - VENT_DOT_CSS[0]) * grow), r * (0.2 + 0.7 * grow))
+        const dot = Math.max(this.px(VENT_DOT_CSS[0] + (VENT_DOT_CSS[1] - VENT_DOT_CSS[0]) * grow) * big, r * (0.2 + 0.7 * grow))
           * (v.fresh ? smoothstep(0, 0.3, phase) : 1) * (1 + VENT_BEAT * beat);
         this.softSpot(v.x, v.y, dot * (3.2 + 1.2 * beat), [[0, MINERAL_COLOR, (0.45 + 0.3 * beat) * force], [0.5, MINERAL_COLOR, (0.15 + 0.15 * beat) * force], [1, MINERAL_COLOR, 0]]);
         this.solidDot(v.x, v.y, dot, mix(mix(VENT_DIM, VENT_SPARK, force), MINERAL_COLOR, 0.45 * beat));
       } else if (v.stage === 'erupting') {
-        this.softSpot(v.x, v.y, r * 1.6, [[0.3, BAR_OUT, 0.8], [0.75, MINERAL_COLOR, 0.35], [1, MINERAL_COLOR, 0]]);
-        this.solidDot(v.x, v.y, Math.max(this.px(VENT_DOT_CSS[1]), r * 0.7), VENT_SPARK);
+        // Извергается: крупнее у большого извержения (по объёму) и сейчас, пока
+        // выброс силён, — к концу диск сжимается вместе с темпом.
+        const volume = Math.max(0, Math.min(1, (v.radius / ERUPTION_RADIUS - VENT_VOLUME_FROM) / (1 - VENT_VOLUME_FROM)));
+        const now = VENT_ERUPT_CSS[0] + (VENT_ERUPT_CSS[1] - VENT_ERUPT_CSS[0]) * volume;
+        const dot = Math.max(this.px(now) * big, r * 0.7) * (0.55 + 0.45 * this.ventStrength(v));
+        this.softSpot(v.x, v.y, dot * 2.3, [[0.3, BAR_OUT, 0.8], [0.75, MINERAL_COLOR, 0.35], [1, MINERAL_COLOR, 0]]);
+        this.solidDot(v.x, v.y, dot, VENT_SPARK);
       } else if (v.stage === 'dormant') {
         // Угасшая искра: маленькое тусклое отверстие, без ореола; может снова разгореться.
-        this.solidDot(v.x, v.y, Math.max(this.px(VENT_DOT_CSS[0]), r * 0.2), VENT_DIM);
+        this.solidDot(v.x, v.y, Math.max(this.px(VENT_DOT_CSS[0]) * big, r * 0.2), VENT_DIM);
       } else {
         // Потухший: отверстие сереет и затягивается до исчезновения.
-        const dot = Math.max(this.px(VENT_DOT_CSS[0]), r * 0.2) * (1 - phase);
+        const dot = Math.max(this.px(VENT_DOT_CSS[0]) * big, r * 0.2) * (1 - phase);
         this.solidDot(v.x, v.y, dot, mix(VENT_DIM, VENT_ASH, Math.min(1, phase * 3)));
       }
     }

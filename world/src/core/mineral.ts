@@ -12,7 +12,7 @@
  * назначения; в перегородки не попадает.
  */
 import {
-  DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_SHRINK, ERUPTION_BURST, ERUPTION_FRONT, ERUPTION_PUSH, MINERAL_SPREAD,
+  DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_SHRINK, ERUPTION_BURST, ERUPTION_FRONT, ERUPTION_PUSH, ERUPTION_TAIL_REACH, MINERAL_SPREAD,
   MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_SINK_SETTLE, MINERAL_SEEP, MINERAL_LAYER, MINERAL_MOBILITY, DRIFT_REFERENCE, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
   DEPOSIT_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
   VOLCANO_MIN_GAP, VOLCANO_POWER, VOLCANO_BIRTH, VOLCANO_MATURE, VOLCANO_EXTINCT_CHANCE, VOLCANO_WAKE_CHANCE, VOLCANO_DORMANT_LIFE, VOLCANO_FADE, VOLCANO_DEPOSIT_AVOID,
@@ -369,19 +369,21 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     if (vol.stage !== 'erupting') continue;
     const d = vol.until - vol.begin;
     const u0 = (step - P - vol.begin) / d, u1 = (step - vol.begin) / d;
-    // Выброс выходит в жерло, и давление выброса гонит массу наружу — до
-    // фронта (см. eruptionProfile, eruptionFront, push).
-    const due = vol.total * (eruptionProfile(u1) - eruptionProfile(u0));
-    const out = step >= vol.until ? vol.left : Math.min(vol.left, Math.max(0, due));
+    // Залп выходит в жерло, и давление гонит массу наружу — до фронта;
+    // хвост выходит в окрестность жерла, гуще у жерла и к концу всё ближе
+    // (см. eruptionProfile, eruptionFront, eruptionReach, push).
+    const burst = vol.total * (burstProfile(u1) - burstProfile(u0));
+    const tail = vol.total * (tailProfile(u1) - tailProfile(u0));
+    const out = step >= vol.until ? vol.left : Math.min(vol.left, Math.max(0, burst + tail));
+    const share = burst + tail > 0 ? burst / (burst + tail) : 0;
     const field = viscousDistances(m, terrain, vol.x, vol.y, vol.radius);
-    m.field[field.cells[0]] += out;
-    // Дальность толчка — по вышедшему за обновление: залп за всё время
-    // доталкивает массу до фронта, хвост за всё извержение — ещё примерно на
-    // полрадиуса (в долгом извержении толчок за обновление мал).
+    m.field[field.cells[0]] += out * share;
+    // Дальность толчка — по доле залпа за обновление: весь залп доталкивает массу примерно до фронта.
     const db = (burstProfile(u1) - burstProfile(u0)) / ERUPTION_BURST;
-    const dt = (tailProfile(u1) - tailProfile(u0)) / (1 - ERUPTION_BURST);
     const limit = vol.radius * eruptionFront(Math.min(1, Math.max(0, u1)));
-    push(m, terrain, field, limit, (limit / m.cell / ERUPTION_PUSH) * (PUSH_BURST * db + PUSH_TAIL * dt));
+    push(m, terrain, field, limit, (limit / m.cell / ERUPTION_PUSH) * PUSH_BURST * db);
+    const um = Math.min(1, Math.max(0, (u0 + u1) / 2));
+    releaseNear(m, field, out * (1 - share), vol.radius * eruptionReach(um) * ERUPTION_TAIL_REACH);
     vol.left -= out;
     vol.rate = out / P;
     if (step >= vol.until) {
@@ -602,9 +604,23 @@ export function viscousDistances(m: MineralState, terrain: TerrainState, x: numb
   return { cells: Int32Array.from(cells), dists: Float64Array.from(dists) };
 }
 
-/** Сколько проходов давления даёт весь залп и весь хвост — в долях «доталкивания до фронта». */
+/** Сколько проходов давления даёт весь залп — в долях «доталкивания до фронта». */
 const PUSH_BURST = 0.4;
-const PUSH_TAIL = 0.3;
+
+/**
+ * Выбросить `amount` в окрестность жерла не дальше `reach` (вязкое
+ * расстояние): гуще у жерла — доля клетки 1 − (d/r)². Клетка жерла всегда в ней.
+ */
+function releaseNear(m: MineralState, field: { cells: Int32Array; dists: Float64Array }, amount: number, reach: number): void {
+  if (amount <= 0) return;
+  const r = Math.max(m.cell * 1.5, reach);
+  let sum = 0;
+  for (let n = 0; n < field.dists.length; n++) if (field.dists[n] < r) sum += 1 - (field.dists[n] / r) ** 2;
+  for (let n = 0; n < field.cells.length; n++) {
+    const d = field.dists[n];
+    if (d < r) m.field[field.cells[n]] += (amount * (1 - (d / r) ** 2)) / sum;
+  }
+}
 
 /**
  * Давление выброса гонит массу от жерла: несколько раз за обновление каждая
