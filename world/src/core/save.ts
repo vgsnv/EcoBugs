@@ -10,7 +10,7 @@ import { movement } from './terrain.ts';
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 13;
+export const WORLD_FORMAT_VERSION = 14;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -26,6 +26,7 @@ const OLD_FORMATS: Record<number, string> = {
   10: 'тогда скорость дрейфа света не была параметром',
   11: 'тогда не было залежей и вулканы работали по расписанию',
   12: 'тогда течения пересчитывались вдвое чаще',
+  13: 'тогда минерал при сотворении лежал в среде, а извержения не были ограничены',
 };
 
 export interface MineralFile {
@@ -33,6 +34,8 @@ export interface MineralFile {
   /** Порог давления недр и сколько извержений было. */
   threshold: number;
   eruptions: number;
+  /** Идёт ли стартовая серия извержений (0/1). */
+  genesis: number;
   /** Для каждого вулкана: сколько раз извергался; идёт ли извержение (0/1), начало, конец, сколько выбросит всего, сколько осталось, выброс за шаг сейчас. */
   volcanoes: [number, number, number, number, number, number, number][];
   /** Растворённый минерал по клеткам: Float64, little-endian, base64. */
@@ -87,6 +90,7 @@ export function worldToFile(world: World, savedAt?: Date): WorldFile {
       depths: world.mineral.depths,
       threshold: world.mineral.threshold,
       eruptions: world.mineral.eruptions,
+      genesis: world.mineral.genesis ? 1 : 0,
       volcanoes: world.mineral.volcanoes.map((v) => [v.k, v.active ? 1 : 0, v.begin, v.until, v.total, v.left, v.rate]),
       field: toBase64(new Uint8Array(world.mineral.field.buffer.slice(0))),
     },
@@ -231,9 +235,10 @@ function restoreMineral(world: World, raw: unknown): string[] {
   }
   m.field = field;
   m.depths = raw.depths;
-  if (typeof raw.threshold !== 'number' || !(raw.threshold > 0) || !Number.isSafeInteger(raw.eruptions)) return ['Давление недр повреждено'];
+  if (typeof raw.threshold !== 'number' || !(raw.threshold > 0) || !Number.isSafeInteger(raw.eruptions) || (raw.genesis !== 0 && raw.genesis !== 1)) return ['Давление недр повреждено'];
   m.threshold = raw.threshold;
   m.eruptions = raw.eruptions as number;
+  m.genesis = raw.genesis === 1;
   return [];
 }
 

@@ -112,7 +112,7 @@ export function worldHash(world: World): number {
     ...world.terrain.applied,
     world.terrain.nextMove, world.terrain.nextMoveStep, world.terrain.nextQuake, world.terrain.nextQuakeStep,
     ...world.terrain.active.flatMap((m) => [m.n, m.quake ? 1 : 0, m.start]),
-    world.mineral.threshold, world.mineral.eruptions,
+    world.mineral.threshold, world.mineral.eruptions, world.mineral.genesis ? 1 : 0,
     ...world.mineral.volcanoes.flatMap((v) => [v.k, v.active ? 1 : 0, v.begin, v.until, v.total, v.left, v.rate]),
     ...world.mineral.field,
   ]);

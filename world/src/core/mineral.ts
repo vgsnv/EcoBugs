@@ -13,14 +13,13 @@
  */
 import {
   DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_SHARE,
-  MAX_ACTIVE_ERUPTIONS, MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_START_DEPTHS, MINERAL_LAYER, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
-  DEPOSIT_SINK, DEPOSIT_DISSOLVE, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE,
+  MAX_ACTIVE_ERUPTIONS, MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_LAYER, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
+  DEPOSIT_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
   VOLCANO_MIN_GAP, VOLCANO_POWER,
 } from './constants.ts';
 import type { Drift } from './drift.ts';
 import { sunAt, type LightMap } from './light.ts';
 import { moveGround, type TerrainState } from './terrain.ts';
-import { periodicFbm } from './noise.ts';
 import type { WorldParams } from './params.ts';
 import { freeRegions, isBlocked, type PartitionLayout } from './partitions.ts';
 import { Rng, deriveSeed, hash3 } from './prng.ts';
@@ -58,6 +57,8 @@ export interface MineralState {
   /** Порог давления недр: когда недр больше — начинается извержение; и сколько извержений было. */
   threshold: number;
   eruptions: number;
+  /** Идёт стартовая серия извержений: с сотворения, пока давление недр впервые не упадёт ниже порога. */
+  genesis: boolean;
   readonly volcanoes: readonly Volcano[];
   /** Растёт при каждом обновлении — чтобы показ знал, что пора перерисовать. */
   version: number;
@@ -112,25 +113,13 @@ export function createMineral(params: WorldParams, partitions: PartitionLayout):
   const freeArea = freeCells * cell * cell;
   const total = params.mineralStock * freeArea;
 
-  // Стартовое распределение — случайное из сида: пятнистое поле.
-  const noise = periodicFbm(deriveSeed(params.seed, 'mineral'), 8, 6, 3);
+  // При сотворении весь минерал (кроме грунта) — в недрах: вода чистая,
+  // минерал приходит в среду только извержениями.
   const field = new Float64Array(n);
-  let sum = 0;
-  for (let j = 0; j < ROWS; j++) {
-    for (let i = 0; i < COLS; i++) {
-      const k = j * COLS + i;
-      if (blocked[k]) continue;
-      const v = Math.max(0, noise(((i + 0.5) / COLS) * 8, ((j + 0.5) / ROWS) * 6) + 0.55) ** 2;
-      field[k] = v;
-      sum += v;
-    }
-  }
-  const scale = sum > 0 ? (total * (1 - MINERAL_START_DEPTHS)) / sum : 0;
-  for (let k = 0; k < n; k++) field[k] *= scale;
 
   const volcanoes = placeVolcanoes(params, blocked, region);
   const threshold = total * ERUPTION_PRESSURE * (0.5 + hash3(deriveSeed(params.seed, 'eruptions'), -1, 4) / 4294967296);
-  return { cols: COLS, rows: ROWS, cell, field, depths: total * MINERAL_START_DEPTHS, threshold, eruptions: 0, volcanoes, version: 0, blocked, nearWall: nearWalls(blocked), region, freeArea };
+  return { cols: COLS, rows: ROWS, cell, field, depths: total, threshold, eruptions: 0, genesis: true, volcanoes, version: 0, blocked, nearWall: nearWalls(blocked), region, freeArea };
 }
 
 /** Вулканы: хотя бы один в каждом отсеке, остальные — где угодно; не теснее VOLCANO_MIN_GAP, если есть место. */
@@ -322,6 +311,7 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
       vol.rate = 0;
     }
   }
+  if (m.depths < m.threshold) m.genesis = false;
   if (m.depths >= m.threshold && m.volcanoes.filter((v) => v.active).length < MAX_ACTIVE_ERUPTIONS) {
     const n = m.eruptions;
     const u = (k: number) => hash3(timing, n, k) / 4294967296;
@@ -333,9 +323,11 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     const vol = m.volcanoes[index];
     const logSpan = (r: readonly [number, number], t: number) => r[0] * (r[1] / r[0]) ** t;
     const stock = params.mineralStock * m.freeArea;
-    const amount = m.depths * Math.min(0.95, logSpan(ERUPTION_SHARE, u(2)) * vol.power);
+    // Доля недр, но не больше предела: при полных недрах выходит серия извержений, а не одно.
+    const amount = Math.min(ERUPTION_MAX * stock, m.depths * Math.min(0.95, logSpan(ERUPTION_SHARE, u(2)) * vol.power));
+    // В стартовой серии извержения идут в GENESIS_SPEEDUP раз быстрее.
     const duration = Math.round(Math.min(ERUPTION_DURATION[1], Math.max(ERUPTION_DURATION[0],
-      ERUPTION_DURATION_SCALE * Math.sqrt(amount / stock) * (0.6 + u(3)))));
+      ERUPTION_DURATION_SCALE * Math.sqrt(amount / stock) * (0.6 + u(3)))) / (m.genesis ? GENESIS_SPEEDUP : 1));
     m.depths -= amount;
     vol.active = true;
     vol.begin = step;
