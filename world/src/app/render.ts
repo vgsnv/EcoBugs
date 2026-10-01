@@ -210,8 +210,13 @@ const GRAIN_FULL = 0.3;
 const GRAIN_MAX_HOP_CSS = 10;
 const GRAIN_COLOR: Rgb = [236, 214, 255];
 const GRAIN_ALPHA = 0.6;
-/** Насколько мягче показывать затемнение от мутности, чем по модели (1 — как есть). */
-const MURK_STRENGTH = 0.8;
+/**
+ * Мутность. Свет: минерал гасит пятна света ровно настолько, насколько модель
+ * задерживает свет (доля 1 − прозрачность; MURK_LIGHT = 1 — как есть). Дно:
+ * лёгкое затемнение там, где прозрачность ниже средней (насколько мягче модели).
+ */
+const MURK_LIGHT = 1;
+const MURK_STRENGTH = 0.5;
 /**
  * Извержение — показывается только то, что есть в модели. Начало: вспышка
  * света у жерла. Фронт выброса — линия «докуда дошёл выброс» по «вязкому»
@@ -403,6 +408,8 @@ export class WorldRenderer {
   private readonly mineralCanvas = document.createElement('canvas');
   /** Затемнение от мутности (серый для умножения), той же сетки. */
   private readonly murkCanvas = document.createElement('canvas');
+  /** Сколько света задерживает минерал (альфа = 1 − прозрачность), той же сетки — гасит маску пятен. */
+  private readonly lightMurkCanvas = document.createElement('canvas');
   private mineralVersion = -1;
   /** Зёрна минерала: x, y, возраст, жизнь (по 4 числа); время анимации и шаг мира прошлого кадра. */
   private readonly grains = new Float32Array(GRAIN_COUNT * 4);
@@ -732,6 +739,15 @@ export class WorldRenderer {
     this.lastSpots = spotsPath;
     sctx.fillStyle = rgb(SUN_COLOR);
     sctx.fill(spotsPath, 'nonzero');
+    // Мутность: минерал задерживает свет — пятна над ним тусклее (по модели).
+    // От маски пятен зависят и тень, и тёплый оттенок, и высветление, и блики.
+    const lm = this.lightMurkCanvas;
+    if (lm.width > 0) {
+      sctx.globalCompositeOperation = 'destination-out';
+      sctx.imageSmoothingEnabled = true;
+      sctx.drawImage(lm, 0, 0, lm.width * w.mineral.cell, lm.height * w.mineral.cell);
+      sctx.globalCompositeOperation = 'source-over';
+    }
 
     // Сила света пятен в абсолютной шкале: 1 при солнце 1.
     const lit = lightTone(sunAt(w.light, w.step)) / lightTone(1);
@@ -835,6 +851,15 @@ export class WorldRenderer {
         dark.data[k * 4 + 3] = 255;
       }
       kctx.putImageData(dark, 0, 0);
+      const lm = this.lightMurkCanvas;
+      lm.width = m.cols;
+      lm.height = m.rows;
+      const lctx = lm.getContext('2d')!;
+      const held = lctx.createImageData(m.cols, m.rows);
+      for (let k = 0; k < m.field.length; k++) {
+        held.data[k * 4 + 3] = 255 * Math.min(1, (1 - transparencyForDensity(smooth[k] / area)) * MURK_LIGHT);
+      }
+      lctx.putImageData(held, 0, 0);
       for (let k = 0; k < m.field.length; k++) {
         // Градации: по логарифму плотности — видно и тонкий налёт, и густое ядро.
         const d = smooth[k] / area / stock;
