@@ -69,13 +69,14 @@ function create(params: WorldParams): void {
 let lastTime = performance.now();
 /** Курсор над чашкой: координаты мира и окна. */
 let pointer: { x: number; y: number } | null = null;
+let pinnedPoint: { x: number; y: number } | null = null;
 
 const $ = (selector: string) => document.querySelector<HTMLElement>(selector)!;
 const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#params'), legend: $('#legend'), tip: $('.tip'), observation: $('#observation'), navigation: $('#navigation'), viewControls: $('#view-controls'), summary: $('#world-summary') }, world.params, {
   onLayoutChange: () => { pointer = null; renderer.resizeKeepingView(); },
   onCreate: (params: WorldParams) => create(params),
   onTogglePause: () => togglePause(),
-  onStepOnce: () => stepOnce(),
+  onUnpinProbe: () => { pinnedPoint = null; renderer.setProbePoint(null); panel.setProbePinned(false); },
   onSpeed: (s) => changeSpeed(s),
   onSave: () => saveWorld(),
   onLoad: (file) => { void loadWorld(file); },
@@ -170,6 +171,9 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function setWorld(next: World): void {
+  pinnedPoint = pointer = null;
+  renderer.setProbePoint(null);
+  panel.setProbePinned(false);
   flowStep = next.step;
   worldSummary.reset(next);
   world = next;
@@ -177,12 +181,6 @@ function setWorld(next: World): void {
   mineralStatsVersion = -1;
   panel.setCurrent(world.params);
   document.title = `Песочница мира · сид ${world.params.seed}`;
-}
-
-/** Один шаг: ставит на паузу, если время шло. */
-function stepOnce(): void {
-  paused = true;
-  send({ type: 'step', epoch });
 }
 
 // Камера: колесо — масштаб у курсора, щипок и прокрутка двумя пальцами на
@@ -198,17 +196,18 @@ canvas.addEventListener('wheel', (e) => {
   }
 }, { passive: false });
 
-let drag: { x: number; y: number } | null = null;
+let drag: { x: number; y: number; startX: number; startY: number; moved: boolean } | null = null;
 canvas.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
-  drag = { x: e.clientX, y: e.clientY };
+  drag = { x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY, moved: false };
   canvas.setPointerCapture(e.pointerId);
   canvas.parentElement!.classList.add('dragging');
 });
 canvas.addEventListener('pointermove', (e) => {
   if (drag) {
     renderer.panBy(e.clientX - drag.x, e.clientY - drag.y);
-    drag = { x: e.clientX, y: e.clientY };
+    drag.moved ||= Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 4;
+    drag.x = e.clientX; drag.y = e.clientY;
     pointer = null;
     return;
   }
@@ -219,7 +218,13 @@ const endDrag = () => {
   drag = null;
   canvas.parentElement!.classList.remove('dragging');
 };
-canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointerup', (e) => {
+  if (drag && !drag.moved && (document.querySelector<HTMLDetailsElement>('.probe-panel')!.open || !$('.probe-dock').hidden)) {
+    const at = renderer.toWorld(e.clientX, e.clientY);
+    if (at) { pinnedPoint = { x: at[0], y: at[1] }; renderer.setProbePoint(pinnedPoint); panel.setProbePinned(true); }
+  }
+  endDrag();
+});
 canvas.addEventListener('pointercancel', endDrag);
 canvas.addEventListener('pointerleave', () => { pointer = null; });
 canvas.addEventListener('dblclick', (e) => renderer.zoomBy(2, e.clientX, e.clientY));
@@ -234,13 +239,13 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { panel.closePanels(); return; }
   const target = e.target as HTMLElement;
   if (e.ctrlKey || e.metaKey || e.altKey || target.closest('input, select, textarea')) return;
+  // Native controls use Space/Enter for activation; the world shortcut applies
+  // when focus is outside a button or disclosure.
+  if ((e.key === ' ' || e.key === 'Enter') && target.closest('button, summary')) return;
   if (e.key === ' ') {
     e.preventDefault();
     (document.activeElement as HTMLElement | null)?.blur();
     togglePause();
-  } else if (e.key === 'ArrowRight') {
-    e.preventDefault();
-    stepOnce();
   } else if (e.key === '+' || e.key === '=') {
     renderer.zoomBy(ZOOM_STEP);
   } else if (e.key === '-' || e.key === '_') {
@@ -261,8 +266,9 @@ function depositsAt(w: World, x: number, y: number): number {
 }
 
 function probe(): void {
-  if (!pointer) { panel.setProbe(null); return; }
-  const { x, y } = pointer;
+  const point = pinnedPoint ?? pointer;
+  if (!point) { panel.setProbe(null); return; }
+  const { x, y } = point;
   const p = world.params;
   const where = `(${formatLength(x)}, ${formatLength(y)})`;
   const v = world.mineral.volcanoes.find((v) => Math.hypot(v.x - x, v.y - y) < 12);

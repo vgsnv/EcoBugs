@@ -12,6 +12,8 @@
 
       /* Чистая карта между внешними панелями управления и наблюдения. */
       .app { height: 100%; display: flex; flex-direction: column; }
+      .app-body, .map-column, .world-footer, .right-panel { display: contents; }
+      .right-panel-empty { display: none; }
       .app:fullscreen { width: 100%; height: 100%; background: var(--bg); }
       .workspace { display: flex; flex: 1; min-height: 0; padding: 0 6px; gap: 6px; }
       .field { flex: 1; min-width: 0; min-height: 0; display: flex; }
@@ -135,7 +137,20 @@
       /* Значения под курсором тоже находятся за пределами карты. */
       .probe-panel { padding: 0; border: 0; max-width: 100%; }
       .probe-panel > summary { text-transform: none; letter-spacing: 0; }
-      .probe-panel[open] { flex-basis: 100%; }
+      #toolbar .probe-panel { position: relative; flex-shrink: 0; }
+      #toolbar .probe-panel > summary { display: grid; place-items: center; width: 36px; height: 36px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); }
+      #toolbar .probe-panel > summary::marker { content: ''; }
+      #toolbar .probe-panel > summary::-webkit-details-marker { display: none; }
+      .probe-panel > summary svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+      #toolbar .probe-panel[open] > summary { color: var(--accent); background: #e8f2ff; border-color: #7fa9da; margin-bottom: 0; }
+      #toolbar .probe-panel .probe-content { position: absolute; top: calc(100% + 6px); right: 0; width: 320px; max-width: calc(100vw - 24px); max-height: 360px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); box-shadow: 0 8px 24px #1f232829; }
+      #toolbar .probe-panel .tip { height: auto; overflow: visible; }
+      .probe-actions { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 8px; border-bottom: 1px solid var(--border); }
+      .probe-actions button { font-size: 11px; padding: 5px 8px; }
+      .probe-dock { flex: 0 1 auto; max-height: 45%; overflow-y: auto; border-top: 1px solid var(--border); }
+      .probe-dock h3 { margin: 0; padding: 10px 8px 0; font-size: 12px; }
+      .probe-pin-note { display: block; padding: 6px 8px; color: var(--muted); font-size: 11px; }
+      #toolbar .probe-panel[data-docked=true] > summary { color: var(--accent); background: #e8f2ff; }
       .tip { padding: 8px; font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; }
       .probe-panel[open] .tip { height: 100px; overflow-y: auto; }
       .tip b { font-weight: 600; }
@@ -194,6 +209,78 @@
       button.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); position: relative; }
       .params-toggle, .params-close { display: inline-block; }
       .app.focus-mode .bottom-bar, .app.focus-mode #observation, .app.focus-mode .toolbar-secondary, .app.focus-mode .file-menu { display: none; }
+      /* Wide-screen controls. Keep the existing one-column presentation unchanged. */
+      .desktop-control-label, .desktop-panel-label, .desktop-menu-note, .actual-rate { display: none; }
+      .world-playback { display: none; }
+      .speed-ticks button[aria-pressed=true] { color: var(--muted); background: transparent; border-color: transparent; }
+      @media (min-width: 901px) {
+        #view-controls { flex-wrap: nowrap; }
+        #view-controls > .group > button, #view-controls > button, .process-control > button, #toolbar .probe-panel > summary { height: 48px; }
+        .process-control { position: relative; }
+        .process-legend { position: absolute; top: calc(100% + 6px); left: 0; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); box-shadow: 0 8px 24px #1f232829; white-space: nowrap; }
+        .summary-light .light-drift { flex-wrap: wrap; }
+        .summary-light .sun-rhythm { width: 100%; margin-left: 0; padding: 8px 0 0; border-left: 0; border-top: 1px solid var(--border); }
+        .app-body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; flex: 1; min-height: 0; gap: 12px; padding: 0 12px 12px; }
+        .map-column { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+        .workspace { padding: 0; }
+        .world-footer { display: flex; flex-direction: column; flex-shrink: 0; }
+        .world-playback { display: flex; align-items: center; gap: 12px; width: 100%; height: 64px; padding: 8px 6px; }
+        .right-panel { display: flex; flex-direction: column; min-height: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+        .right-panel > #observation, .right-panel > #world-summary, .right-panel > #params { width: 100%; flex: 1; min-height: 0; border: 0; border-radius: 0; }
+        .right-panel-empty { display: block; margin: 0; padding: 20px 16px; line-height: 1.6; color: var(--muted); }
+        .right-panel:has(#observation:not([hidden]), #world-summary:not([hidden])) .right-panel-empty, .app.params-open .right-panel-empty { display: none; }
+        .app.focus-mode .right-panel { display: none; }
+        .app.focus-mode .app-body { grid-template-columns: minmax(0, 1fr); }
+        .bottom-bar { margin-top: 0; padding-inline: 6px; }
+        .world-playback > .focus-toggle { height: 48px; margin-left: auto; }
+        .world-playback .time-controls .run-toggle { width: 98px; flex-basis: 98px; }
+        .world-playback .run-toggle .desktop-control-label { display: inline; }
+        .mineral-stats { position: relative; z-index: 4; width: 100%; flex: none; min-width: 0; max-width: none; }
+        .mineral-details { position: relative; }
+        .mineral-details > summary { padding: 0; gap: 0; border-radius: 0; }
+        .mineral-details > summary::before, .mineral-details > summary > b { display: none; }
+        .mineral-scale { position: relative; }
+        .mineral-bar { height: 22px; border: 0; border-top: 1px solid #ffffff70; cursor: pointer; }
+        .mineral-ticks { position: absolute; inset: 0; align-items: center; padding: 0 8px; color: white; text-shadow: 0 1px 3px #241334, 0 0 2px #241334; pointer-events: none; }
+        .mineral-keys { position: absolute; bottom: calc(100% + 6px); left: 0; right: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); box-shadow: 0 4px 16px #1f232826; }
+        #toolbar { padding: 10px 12px; gap: 12px; border-bottom: 1px solid #e1e6ed; margin-bottom: 6px; }
+        .time-controls { gap: 8px; }
+        .time { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; width: 300px; flex-basis: 300px; padding: 7px 10px; text-align: left; height: 48px; min-height: 48px; }
+        .world-age { grid-column: 1 / -1; }
+        .world-rate { color: #7a8491; }
+        .actual-rate { display: block; justify-self: end; font-size: 11px; line-height: 13px; white-space: nowrap; color: var(--muted); }
+        .actual-rate[data-limited=true] { color: #9a6700; }
+        .desktop-control-label { display: inline; }
+        .time-controls .run-toggle { display: flex; align-items: center; justify-content: center; gap: 7px; width: 98px; flex-basis: 98px; height: 48px; }
+        .time-controls .group > button:last-child { height: 48px; }
+        .file-menu > summary { display: flex; align-items: center; gap: 7px; width: auto; height: 48px; padding: 8px 10px; text-transform: none; letter-spacing: 0; }
+        .menu-chevron { margin-left: 4px; color: var(--muted); }
+        .menu-actions { width: 260px; padding: 6px; gap: 4px; }
+        .menu-actions button { padding: 10px; white-space: normal; }
+        .desktop-menu-note { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 400; line-height: 1.4; }
+        .menu-actions .params-toggle { border-bottom: 1px solid #e1e6ed; border-radius: 5px 5px 0 0; padding-bottom: 12px; }
+        .speed-control { width: 260px; flex-basis: 260px; height: 48px; padding-inline: 10px; }
+        .speed-head { height: 14px; }
+        input.speed-slider { height: 14px; }
+        .speed-value { font-size: 13px; }
+        .speed-ticks { height: 20px; }
+        .speed-ticks button { padding-top: 6px; min-height: 20px; }
+        .speed-ticks button[aria-pressed=true] { color: var(--accent); background: #e8f2ff; font-weight: 600; }
+        .toolbar-secondary { gap: 6px; padding-left: 12px; border-left: 1px solid #dce3ec; }
+        .toolbar-secondary > button, #toolbar > .focus-toggle { height: 48px; }
+      }
+      @media (min-width: 1280px) {
+        .desktop-panel-label { display: inline; font-size: 12px; }
+        .toolbar-secondary .legend-toggle, .toolbar-secondary .minimap-toggle { display: flex; gap: 6px; align-items: center; width: auto; padding-inline: 9px; }
+      }
+      @media (min-width: 901px) and (max-width: 1279px) {
+        #toolbar { gap: 8px; }
+        .time { width: 240px; flex-basis: 240px; }
+        .speed-control { width: 210px; flex-basis: 210px; }
+        .time-controls .run-toggle { width: 40px; flex-basis: 40px; }
+        .run-toggle .desktop-control-label { display: none; }
+        .toolbar-secondary { gap: 4px; padding-left: 8px; }
+      }
       @media (max-width: 900px) {
         .workspace { flex-direction: column; }
         .field { order: 0; min-height: 100px; }
@@ -232,6 +319,7 @@
   <body>
     <div class="app">
       <header id="toolbar"></header>
+      <div class="app-body"><div class="map-column">
       <div class="workspace">
         <main class="field"><div class="stage"><canvas id="world" aria-label="Карта мира"></canvas>
           <section id="navigation" hidden aria-label="Миникарта">
@@ -239,18 +327,22 @@
             <div class="navigation-body"><canvas class="minimap" aria-label="Мини-карта чашки" title="Клик — перейти сюда. Перетаскивание — переместить миникарту."></canvas></div>
           </section>
         </div></main>
-        <aside id="observation" hidden aria-label="Наблюдение за миром">
-          <section id="legend" hidden aria-label="Легенда карты"></section>
-        </aside>
-        <aside id="world-summary" hidden aria-label="Сводка мира"></aside>
-        <aside id="params"></aside>
       </div>
-      <footer class="bottom-bar">
+      <footer class="world-footer">
+      <div class="mineral-stats" title="Где сейчас минерал мира. Сумма постоянна."></div>
+      <div class="world-playback" role="toolbar" aria-label="Управление симуляцией"></div>
+      <div class="control-staging" hidden>
         <div id="view-controls"></div>
         <div class="light-drift" title="Куда сдвигается карта света"><svg viewBox="-12 -12 24 24"><circle r="11" /><path d="M -6 0 H 6 M 2 -4 L 6 0 L 2 4" /></svg><span>дрейф света</span><span class="sun-rhythm" title="Ритм солнца: множитель силы солнца сейчас и куда он идёт"></span></div>
-        <div class="mineral-stats" title="Где сейчас минерал мира. Сумма постоянна."></div>
-        <details class="probe-panel"><summary>Точка на карте</summary><div class="tip">Наведите курсор на чашку, чтобы увидеть значения.</div></details>
-      </footer>
+        <details class="probe-panel"><summary aria-label="Точка на карте" title="Точка на карте"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6"/><circle cx="10" cy="10" r="2"/><path d="M10 1v3m0 12v3M1 10h3m12 0h3"/></svg></summary><div class="probe-content"><div class="probe-actions"><button class="probe-window-pin" type="button">В правую панель</button><button class="probe-point-release" type="button" disabled>Снять точку</button></div><span class="probe-pin-note">Клик по карте закрепит точку. Её значения продолжат обновляться.</span><div class="tip">Наведите курсор на чашку, чтобы увидеть значения.</div></div></details>
+      </div></footer></div>
+      <aside class="right-panel" aria-label="Панель мира">
+        <div id="observation" hidden aria-label="Наблюдение за миром"><section id="legend" hidden aria-label="Легенда карты"></section></div>
+        <div id="world-summary" hidden aria-label="Сводка мира"></div>
+        <div id="params"></div>
+        <p class="right-panel-empty">Выбери «Сводка» или «Легенда» в хедере. Параметры нового мира доступны в меню «Мир».</p>
+        <section class="probe-dock" hidden aria-label="Закреплённое окно точки"><h3>Точка на карте</h3></section>
+      </aside></div>
     </div>
     <script type="module" src="/src/app/main.ts"></script>
   </body>

@@ -15,7 +15,7 @@ export interface PanelHandlers {
   onLayoutChange(): void;
   onCreate(params: WorldParams): void;
   onTogglePause(): void;
-  onStepOnce(): void;
+  onUnpinProbe(): void;
   onSpeed(speed: number): void;
   onSave(): void;
   onLoad(file: File): void;
@@ -165,6 +165,9 @@ export class Panel {
   private displayedStep = 0;
   private readonly ageLabel = el('span', { className: 'world-age' });
   private readonly rateLabel = el('span', { className: 'world-rate' });
+  private readonly actualRateLabel = el('span', { className: 'actual-rate' });
+  private readonly runLabel = el('span', { className: 'desktop-control-label', textContent: 'Пауза' });
+  private readonly speedPresets: { speed: number; button: HTMLButtonElement }[] = [];
   private readonly pauseButton = el('button', { className: 'run-toggle', ariaLabel: 'Пауза', title: 'Пауза (Пробел)' });
   private readonly speedSlider = el('input', { type: 'range', min: '0', max: '4', step: '0.001', value: '0', ariaLabel: 'Скорость мира', className: 'speed-slider', title: '×1 — реальное время; ×10 — в 10 раз быстрее; клавиши 1–7' });
   private readonly speedValue = el('output', { className: 'speed-value', textContent: '×1' });
@@ -177,7 +180,6 @@ export class Panel {
   private readonly navigationToggle = el('button', { className: 'minimap-toggle', ariaLabel: 'Миникарта', title: 'Миникарта', ariaExpanded: 'false' });
   private readonly fileMenu = el('details', { className: 'file-menu' });
   private readonly menuToggle = el('summary', { ariaLabel: 'Меню мира', title: 'Меню мира' });
-  private readonly stepButton = el('button', { textContent: '+1 шаг', title: 'Один шаг = 0,1 с мира (→)' });
   private readonly zoomButton = el('button', { className: 'zoom', title: 'Показать чашку целиком (0)' });
   private readonly createButton = el('button', { className: 'primary', textContent: 'Создать мир' });
   private readonly status = el('span', { className: 'status' });
@@ -198,6 +200,26 @@ export class Panel {
     this.buildParams();
     this.buildLegend();
     this.buildToolbar();
+    const probePanel = document.querySelector<HTMLDetailsElement>('.probe-panel')!;
+    const probeContent = document.querySelector<HTMLElement>('.probe-content')!;
+    const probeDock = document.querySelector<HTMLElement>('.probe-dock')!;
+    const pinWindow = document.querySelector<HTMLButtonElement>('.probe-window-pin')!;
+    pinWindow.addEventListener('click', () => {
+      const docked = probeDock.hidden;
+      probeDock.hidden = !docked;
+      probePanel.dataset.docked = String(docked);
+      pinWindow.textContent = docked ? 'Вернуть в хедер' : 'В правую панель';
+      if (docked) { probeDock.append(probeContent); probePanel.open = false; }
+      else { probePanel.append(probeContent); probePanel.open = true; }
+      pinWindow.focus();
+      this.handlers.onLayoutChange();
+    });
+    probePanel.querySelector('summary')!.addEventListener('click', event => {
+      if (!probeDock.hidden) { event.preventDefault(); pinWindow.focus(); }
+    });
+    document.querySelector('.probe-point-release')!.addEventListener('click', () => this.handlers.onUnpinProbe());
+    this.roots.summary.querySelector('.legend-head')!.after(el('section', { className: 'summary-section summary-light' },
+      el('h3', { textContent: 'Свет' }), document.querySelector<HTMLElement>('.light-drift')!));
     this.summaryToggle.setAttribute('aria-controls', 'world-summary');
     this.summaryToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3v14h14 M6 13V9 M10 13V5 M14 13V7"/></svg>';
     this.summaryToggle.addEventListener('click', () => this.toggleSummary());
@@ -207,10 +229,14 @@ export class Panel {
     this.navigationToggle.addEventListener('click', () => this.toggleNavigation());
     this.navigationToggle.setAttribute('aria-controls', 'navigation');
     this.navigationToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m2 4 5-2 6 2 5-2v14l-5 2-6-2-5 2Z M7 2v14 M13 4v14"/></svg>';
+    for (const [button, label] of [[this.legendToggle, 'Легенда'], [this.navigationToggle, 'Миникарта'], [this.summaryToggle, 'Сводка']] as const) {
+      button.append(el('span', { className: 'desktop-panel-label', textContent: label }));
+    }
     this.status.setAttribute('role', 'status');
     roots.toolbar.after(this.status);
     document.addEventListener('fullscreenchange', () => this.toggleFocus(document.fullscreenElement === roots.app));
     this.refresh();
+    if (matchMedia('(min-width: 901px)').matches) this.toggleSummary(true);
   }
 
   /** Мир создан с этими параметрами — черновик совпадает с миром. */
@@ -289,6 +315,7 @@ export class Panel {
   }
 
   closePanels(): void {
+    document.querySelector<HTMLDetailsElement>('.probe-panel')!.open = false;
     this.toggleSummary(false);
     this.toggleParams(false);
     this.toggleLegend(false);
@@ -316,10 +343,10 @@ export class Panel {
 
   private buildToolbar(): void {
     this.pauseButton.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path class="play-icon" d="M7 4 16 10 7 16Z"/><path class="pause-icon" d="M5 4h4v12H5zM11 4h4v12h-4z"/></svg>';
+    this.pauseButton.append(this.runLabel);
     this.pauseButton.dataset.state = 'running';
     this.pauseButton.addEventListener('click', () => this.handlers.onTogglePause());
-    this.stepButton.addEventListener('click', () => this.handlers.onStepOnce());
-    this.timeLabel.append(this.ageLabel, this.rateLabel);
+    this.timeLabel.append(this.ageLabel, this.rateLabel, this.actualRateLabel);
     this.timeLabel.addEventListener('click', () => {
       this.showSteps = !this.showSteps;
       this.syncTimeDisplay();
@@ -329,10 +356,11 @@ export class Panel {
     });
     const speedTicks = el('div', { className: 'speed-ticks' });
     for (const s of [1, 10, 100, 1000, 10000]) {
-      const tick = el('button', { type: 'button', textContent: s.toLocaleString('ru'), title: `Скорость ×${s.toLocaleString('ru')}`, ariaLabel: `Скорость ×${s.toLocaleString('ru')}` });
+      const tick = el('button', { type: 'button', textContent: s.toLocaleString('ru'), title: `Скорость ×${s.toLocaleString('ru')}`, ariaLabel: `Скорость ×${s.toLocaleString('ru')}`, ariaPressed: 'false' });
       tick.style.left = `${Math.log10(s) / 4 * 100}%`;
       tick.addEventListener('click', () => this.handlers.onSpeed(s));
       speedTicks.append(tick);
+      this.speedPresets.push({ speed: s, button: tick });
     }
     this.speedSlider.addEventListener('input', () => this.handlers.onSpeed(10 ** Number(this.speedSlider.value)));
     const speedControl = el('div', { className: 'speed-control' },
@@ -340,6 +368,9 @@ export class Panel {
       this.speedSlider, speedTicks);
     const save = el('button', { textContent: 'Сохранить', ariaLabel: 'Сохранить', title: 'Сохранить мир в файл (Ctrl+S)' });
     const load = el('button', { textContent: 'Загрузить', ariaLabel: 'Загрузить', title: 'Загрузить мир из файла' });
+    this.paramsToggle.append(el('span', { className: 'desktop-menu-note', textContent: 'Параметры и создание' }));
+    save.append(el('span', { className: 'desktop-menu-note', textContent: 'Файл JSON · Ctrl / ⌘ S' }));
+    load.append(el('span', { className: 'desktop-menu-note', textContent: 'Продолжить сохранённый мир' }));
     const picker = el('input', { type: 'file', accept: '.json,application/json', hidden: true });
     save.addEventListener('click', () => { this.closeMenu(); this.handlers.onSave(); });
     load.addEventListener('click', () => { this.closeMenu(); picker.click(); });
@@ -380,19 +411,57 @@ export class Panel {
     this.focusToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path class="focus-enter" d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4"/><path class="focus-exit" d="M3 7h4V3M13 3v4h4M17 13h-4v4M7 17v-4H3"/></svg>';
     this.focusToggle.addEventListener('click', () => { void this.toggleFullscreen(); });
     this.menuToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M10 4v12M4 10h12"/></svg>';
+    this.menuToggle.append(el('span', { className: 'desktop-control-label', textContent: 'Мир' }),
+      el('span', { className: 'desktop-control-label menu-chevron', textContent: '⌄', ariaHidden: 'true' }));
     this.fileMenu.append(this.menuToggle, el('div', { className: 'menu-actions' }, this.paramsToggle, save, load));
+    // Arrow navigation stays local: it must not trigger simulation shortcuts.
+    this.fileMenu.addEventListener('keydown', event => {
+      const actions = [this.paramsToggle, save, load];
+      if (event.key === 'Escape' && this.fileMenu.open) {
+        event.preventDefault(); event.stopPropagation(); this.closeMenu();
+      } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault(); event.stopPropagation(); this.fileMenu.open = true;
+        const current = actions.indexOf(document.activeElement as HTMLButtonElement);
+        const next = current < 0 ? (event.key === 'ArrowDown' ? 0 : actions.length - 1)
+          : (current + (event.key === 'ArrowDown' ? 1 : -1) + actions.length) % actions.length;
+        actions[next].focus();
+      }
+    });
     document.addEventListener('pointerdown', (event) => {
       if (this.fileMenu.open && !this.fileMenu.contains(event.target as Node)) this.closeMenu();
     });
+    const runGroup = this.pauseButton;
+    const timeControls = el('div', { className: 'time-controls' }, this.timeLabel, runGroup);
+    const spacer = el('span', { className: 'spacer' });
     this.roots.toolbar.append(
       this.fileMenu,
-      el('div', { className: 'time-controls' }, this.timeLabel, el('span', { className: 'group' }, this.pauseButton, this.stepButton)),
+      timeControls,
+      this.roots.viewControls,
       speedControl,
-      el('span', { className: 'spacer' }),
+      spacer,
       el('span', { className: 'toolbar-secondary' }, this.legendToggle, this.navigationToggle, this.summaryToggle),
+      document.querySelector<HTMLElement>('.probe-panel')!,
       this.focusToggle,
       picker,
     );
+    const playback = document.querySelector<HTMLElement>('.world-playback')!;
+    const playbackRun = el('div', { className: 'time-controls' });
+    const desktop = matchMedia('(min-width: 901px)');
+    const placePlayback = () => {
+      const mineralStats = document.querySelector<HTMLElement>('.mineral-stats')!;
+      if (desktop.matches) {
+        document.querySelector('.world-footer')!.prepend(mineralStats);
+        playbackRun.append(runGroup);
+        playback.append(playbackRun, speedControl, this.focusToggle);
+      } else {
+        document.querySelector('.world-footer')!.prepend(mineralStats);
+        timeControls.append(runGroup);
+        spacer.before(speedControl);
+        picker.before(this.focusToggle);
+      }
+    };
+    placePlayback();
+    desktop.addEventListener('change', () => { placePlayback(); this.handlers.onLayoutChange(); });
     for (const disclosure of [document.querySelector<HTMLDetailsElement>('.mineral-details')!, document.querySelector<HTMLDetailsElement>('.probe-panel')!]) {
       disclosure.querySelector('summary')!.addEventListener('click', () => requestAnimationFrame(() => this.handlers.onLayoutChange()));
       disclosure.addEventListener('toggle', () => this.handlers.onLayoutChange());
@@ -664,6 +733,9 @@ export class Panel {
     this.displayedStep = step;
     this.syncTimeDisplay();
     this.rateLabel.textContent = `${fps === null ? '—' : Math.round(fps).toLocaleString('ru')} FPS${paused ? ' · пауза' : ''}`;
+    const actual = paused ? 'Расчёт на паузе' : `${behind ? 'Предел · ' : ''}${rate}`;
+    if (this.actualRateLabel.textContent !== actual) this.actualRateLabel.textContent = actual;
+    this.actualRateLabel.dataset.limited = String(!paused && behind);
     this.timeLabel.title = `Нажмите, чтобы показать ${this.showSteps ? 'время' : 'шаги'}\nВозраст мира ${formatWorldAge(step)}\nШаг ${stepFormatter.format(step)}\n1 шаг = 0,1 с; ×1 — реальное время\n${this.rateLabel.textContent}`
       + '\nFPS — частота отрисовки карты за последнюю секунду'
       + (paused ? '\nРасчёт мира на паузе' : `\nРасчёт мира: ${rate}${behind ? ' · предел' : ''}`)
@@ -672,15 +744,19 @@ export class Panel {
     if (this.pauseButton.dataset.state !== state) {
       this.pauseButton.dataset.state = state;
       this.pauseButton.ariaLabel = paused ? 'Пуск' : 'Пауза';
+      this.runLabel.textContent = this.pauseButton.ariaLabel;
       this.pauseButton.title = `${this.pauseButton.ariaLabel} (Пробел)`;
     }
-    this.stepButton.disabled = !paused;
     const position = Math.log10(speed);
     if (Math.abs(Number(this.speedSlider.value) - position) > 0.00051) this.speedSlider.value = String(position);
     const selected = `×${speed.toLocaleString('ru', { maximumFractionDigits: speed < 10 ? 2 : speed < 100 ? 1 : 0 })}`;
     if (this.speedValue.textContent !== selected) this.speedValue.textContent = selected;
     this.speedSlider.setAttribute('aria-valuetext', selected);
     this.speedSlider.style.setProperty('--speed-progress', `${position / 4 * 100}%`);
+    for (const preset of this.speedPresets) {
+      const pressed = String(Math.abs(speed - preset.speed) < preset.speed * 1e-9);
+      if (preset.button.getAttribute('aria-pressed') !== pressed) preset.button.setAttribute('aria-pressed', pressed);
+    }
   }
 
 
@@ -689,10 +765,22 @@ export class Panel {
     this.zoomButton.textContent = relative < 1.005 ? 'Вся чашка' : `×${relative < 10 ? relative.toFixed(1) : Math.round(relative)}`;
   }
 
-  /** Значения точки под курсором выводятся в нижней панели, за пределами карты. */
+  setProbePinned(pinned: boolean): void {
+    document.querySelector<HTMLButtonElement>('.probe-point-release')!.disabled = !pinned;
+    document.querySelector<HTMLElement>('.probe-pin-note')!.textContent = pinned
+      ? 'Точка закреплена. Клик по карте выберет другую точку.'
+      : 'Клик по карте закрепит точку. Её значения продолжат обновляться.';
+  }
+
+  /** Живые значения выбранной точки, в окне хедера или правой панели. */
   setProbe(lines: readonly string[] | null): void {
     const tip = this.roots.tip;
-    if (!lines) { delete tip.dataset.content; tip.textContent = 'Наведите курсор на чашку, чтобы увидеть значения.'; return; }
+    if (!lines) {
+      delete tip.dataset.content;
+      const empty = 'Наведите курсор на чашку, чтобы увидеть значения.';
+      if (tip.textContent !== empty) tip.textContent = empty;
+      return;
+    }
     const content = lines.join('\n');
     if (tip.dataset.content === content) return;
     tip.dataset.content = content;

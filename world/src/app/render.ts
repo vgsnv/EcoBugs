@@ -416,6 +416,8 @@ function puffSprite(c: Rgb): HTMLCanvasElement {
 }
 
 export class WorldRenderer {
+  private probePoint: { x: number; y: number } | null = null;
+  setProbePoint(point: { x: number; y: number } | null): void { this.probePoint = point; this.frameKey = ''; }
   private readonly rulers: CoordinateRulers;
 
   setRulers(enabled: boolean): void {
@@ -703,13 +705,13 @@ export class WorldRenderer {
     const max = Math.max(min, MAX_ZOOM_CSS * this.dpr);
     this.zoom = Math.min(max, Math.max(min, zoom));
     this.fitted = this.zoom <= min * 1.0001;
-    const clampAxis = (c: number, size: number, view: number, alignStart = false) => {
+    const clampAxis = (c: number, size: number, view: number, alignStart = false, alignEnd = false) => {
       const half = view / this.zoom / 2;
       const lo = -this.wall + half, hi = size + this.wall - half;
-      return lo > hi ? (alignStart ? lo : size / 2) : Math.min(hi, Math.max(lo, c));
+      return lo > hi ? (alignStart ? lo : alignEnd ? hi : size / 2) : Math.min(hi, Math.max(lo, c));
     };
     this.cx = clampAxis(cx, this.width, this.canvas.width, true);
-    this.cy = clampAxis(cy, this.height, this.canvas.height);
+    this.cy = clampAxis(cy, this.height, this.canvas.height, false, matchMedia('(min-width: 901px)').matches);
     this.onZoomChange(this.zoom / min);
   }
 
@@ -935,6 +937,15 @@ export class WorldRenderer {
     this.drawVents(animTime);
     if (this.showProcesses) this.drawProcesses();
     this.drawWalls();
+    if (this.probePoint) {
+      const { x, y } = this.probePoint;
+      ctx.save();
+      ctx.beginPath(); ctx.arc(x, y, this.px(7), 0, Math.PI * 2);
+      ctx.strokeStyle = '#172b4d'; ctx.lineWidth = this.px(4); ctx.stroke();
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = this.px(2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, this.px(2), 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.restore();
+    }
     this.rulers.draw(ctx, this.world.dish, this.zoom, this.cx, this.cy, this.dpr);
   }
 
