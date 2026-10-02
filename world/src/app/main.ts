@@ -9,7 +9,6 @@ import {
 import { WorldSummary } from './world-summary.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
 import { WorldRenderer } from './render.ts';
-import { installMovableMinimap } from './minimap-panel.ts';
 import { formatDuration, formatLength, formatMass, formatNumber, formatPercent } from './units.ts';
 import { gramsPerSquareMetre, millimetresPerSecond } from '../core/units.ts';
 import type { SimulationCommand, SimulationReply } from './simulation.ts';
@@ -22,8 +21,7 @@ const GRADATION_NAMES = ['Вода', 'Отмель', 'Суша'];
 const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
 const renderer = new WorldRenderer(canvas);
 const minimap = document.querySelector<HTMLCanvasElement>('.minimap')!;
-installMovableMinimap(document.querySelector<HTMLElement>('.stage')!, document.querySelector<HTMLElement>('#navigation')!,
-  (x, y) => renderer.centerFromMinimap(minimap, x, y));
+minimap.addEventListener('click', event => renderer.centerFromMinimap(minimap, event.clientX, event.clientY));
 const driftArrow = document.querySelector<SVGElement>('.light-drift svg')!;
 const mineralStats = document.querySelector<HTMLElement>('.mineral-stats')!;
 mineralStats.innerHTML = '<details class="mineral-details"><summary><b>Минерал</b><span class="mineral-scale"><span class="mineral-bar" role="img"><i class="depths"></i><i class="out"></i><i class="deposits"></i><i class="medium"></i><i class="threshold"></i></span><span class="mineral-ticks"><span class="mass-zero"></span><span class="mass-half"></span><span class="mass-total"></span></span></span></summary>'
@@ -219,7 +217,7 @@ const endDrag = () => {
   canvas.parentElement!.classList.remove('dragging');
 };
 canvas.addEventListener('pointerup', (e) => {
-  if (drag && !drag.moved && (document.querySelector<HTMLDetailsElement>('.probe-panel')!.open || !$('.probe-dock').hidden)) {
+  if (drag && !drag.moved && !$('.probe-dock').hidden && document.querySelector<HTMLDetailsElement>('.probe-dock')!.open) {
     const at = renderer.toWorld(e.clientX, e.clientY);
     if (at) { pinnedPoint = { x: at[0], y: at[1] }; renderer.setProbePoint(pinnedPoint); panel.setProbePinned(true); }
   }

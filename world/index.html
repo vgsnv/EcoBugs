@@ -17,7 +17,7 @@
       .app:fullscreen { width: 100%; height: 100%; background: var(--bg); }
       .workspace { display: flex; flex: 1; min-height: 0; padding: 0 6px; gap: 6px; }
       .field { flex: 1; min-width: 0; min-height: 0; display: flex; }
-      .stage { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; }
+      .stage { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; border-radius: 8px; background-color: #d5d9d5; background-image: radial-gradient(ellipse at 18% 0%, #ffffff80, transparent 75%), radial-gradient(circle at 1px 1px, #42594a0a 0.6px, transparent 0.8px), linear-gradient(145deg, #e4e7e0, #cbd2cf); background-size: auto, 4px 4px, auto; box-shadow: inset 0 0 0 1px #778e7c26; }
       .app:not(.params-open) #params { display: none; }
       canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
       .stage.rulers-on { padding-left: 28px; padding-bottom: 24px; }
@@ -224,17 +224,18 @@
         .map-column { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
         .workspace { padding: 0; }
         .world-footer { display: flex; flex-direction: column; flex-shrink: 0; }
-        .world-playback { display: flex; align-items: center; gap: 12px; width: 100%; height: 64px; padding: 8px 6px; }
-        .right-panel { display: flex; flex-direction: column; min-height: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+        .world-playback { display: flex; align-items: center; gap: 12px; width: 100%; height: 64px; padding: 8px 0; }
+        .right-panel { display: block; min-height: 0; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
         .right-panel > #observation, .right-panel > #world-summary, .right-panel > #params { width: 100%; flex: 1; min-height: 0; border: 0; border-radius: 0; }
         .right-panel-empty { display: block; margin: 0; padding: 20px 16px; line-height: 1.6; color: var(--muted); }
         .right-panel:has(#observation:not([hidden]), #world-summary:not([hidden])) .right-panel-empty, .app.params-open .right-panel-empty { display: none; }
         .app.focus-mode .right-panel { display: none; }
         .app.focus-mode .app-body { grid-template-columns: minmax(0, 1fr); }
         .bottom-bar { margin-top: 0; padding-inline: 6px; }
-        .world-playback > .focus-toggle { height: 48px; margin-left: auto; }
-        .world-playback .time-controls .run-toggle { width: 98px; flex-basis: 98px; }
-        .world-playback .run-toggle .desktop-control-label { display: inline; }
+        .world-playback > .focus-toggle { width: 48px; height: 48px; }
+        .world-playback .time-controls .run-toggle { width: 48px; flex-basis: 48px; }
+        .world-playback .run-toggle .desktop-control-label { display: none; }
+        .world-playback .speed-control { flex: 1 1 0; width: auto; min-width: 0; padding-inline: 0; }
         .mineral-stats { position: relative; z-index: 4; width: 100%; flex: none; min-width: 0; max-width: none; }
         .mineral-details { position: relative; }
         .mineral-details > summary { padding: 0; gap: 0; border-radius: 0; }
@@ -267,11 +268,11 @@
         .speed-ticks button { padding-top: 6px; min-height: 20px; }
         .speed-ticks button[aria-pressed=true] { color: var(--accent); background: #e8f2ff; font-weight: 600; }
         .toolbar-secondary { gap: 6px; padding-left: 12px; border-left: 1px solid #dce3ec; }
-        .toolbar-secondary > button, #toolbar > .focus-toggle { height: 48px; }
+        .toolbar-secondary > button, #toolbar > .focus-toggle { width: 48px; height: 48px; }
+        #toolbar .probe-panel > summary { width: 48px; }
       }
       @media (min-width: 1280px) {
-        .desktop-panel-label { display: inline; font-size: 12px; }
-        .toolbar-secondary .legend-toggle, .toolbar-secondary .minimap-toggle { display: flex; gap: 6px; align-items: center; width: auto; padding-inline: 9px; }
+        .desktop-panel-label { display: none; }
       }
       @media (min-width: 901px) and (max-width: 1279px) {
         #toolbar { gap: 8px; }
@@ -314,6 +315,30 @@
       @media (max-width: 380px) {
         .world-age { font-size: 11px; }
       }
+      .right-panel .sidebar-section { padding: 0; border-bottom: 1px solid var(--border); }
+      .right-panel .sidebar-section > summary { padding: 12px; color: var(--text); text-transform: none; letter-spacing: 0; }
+      .right-panel .sidebar-section[open] > summary { margin: 0; border-bottom: 1px solid var(--border); }
+      .right-panel #navigation { position: static; width: 100%; max-width: none; border: 0; border-radius: 0; box-shadow: none; background: transparent; }
+      .right-panel .probe-dock { max-height: none; overflow: visible; border-top: 0; }
+      .right-panel .sidebar-main #world-summary, .right-panel .sidebar-main #observation, .right-panel .sidebar-main #params { width: 100%; border: 0; border-radius: 0; overflow: visible; }
+      .right-panel .sidebar-main .legend-head, .right-panel .sidebar-main .params-head { display: none; }
+      .right-panel .sidebar-section > summary { display: flex; align-items: center; gap: 8px; }
+      .right-panel .sidebar-section > summary::before { content: '▸'; color: var(--muted); }
+      .right-panel .sidebar-section[open] > summary::before { content: '▾'; }
+      .section-title { flex: 1; }
+      .section-drag-handle { padding: 2px 6px; cursor: grab; color: var(--muted); font-size: 17px; line-height: 20px; border-radius: 4px; }
+      .section-drag-handle:hover, .section-drag-handle:focus-visible { background: #e8f2ff; color: var(--accent); }
+      .section-dragging { opacity: .5; }
+      .drop-before { box-shadow: inset 0 3px var(--accent); }
+      .drop-after { box-shadow: inset 0 -3px var(--accent); }
+      .sidebar-toggle .sidebar-expand { display: none; }
+      .sidebar-collapsed .sidebar-toggle .sidebar-expand { display: block; }
+      .sidebar-collapsed .sidebar-toggle .sidebar-collapse { display: none; }
+      @media (min-width: 901px) {
+        #toolbar > .sidebar-toggle { width: 48px; height: 48px; }
+        .app.sidebar-collapsed .right-panel { display: none; }
+        .app.sidebar-collapsed .app-body { grid-template-columns: minmax(0, 1fr); }
+      }
     </style>
   </head>
   <body>
@@ -322,26 +347,24 @@
       <div class="app-body"><div class="map-column">
       <div class="workspace">
         <main class="field"><div class="stage"><canvas id="world" aria-label="Карта мира"></canvas>
-          <section id="navigation" hidden aria-label="Миникарта">
-            <div class="legend-head"><h2>Миникарта</h2><button id="navigation-close" aria-label="Закрыть миникарту"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m5 5 10 10 M15 5 5 15"/></svg></button></div>
-            <div class="navigation-body"><canvas class="minimap" aria-label="Мини-карта чашки" title="Клик — перейти сюда. Перетаскивание — переместить миникарту."></canvas></div>
-          </section>
+
         </div></main>
       </div>
       <footer class="world-footer">
       <div class="mineral-stats" title="Где сейчас минерал мира. Сумма постоянна."></div>
       <div class="world-playback" role="toolbar" aria-label="Управление симуляцией"></div>
       <div class="control-staging" hidden>
+        <button class="sidebar-toggle focus-toggle" aria-label="Свернуть правую панель" title="Свернуть правую панель" aria-expanded="true"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="3" width="16" height="14" rx="2"/><path d="M13 3v14"/><path class="sidebar-collapse" d="m6 7 3 3-3 3"/><path class="sidebar-expand" d="m9 7-3 3 3 3"/></svg></button>
         <div id="view-controls"></div>
         <div class="light-drift" title="Куда сдвигается карта света"><svg viewBox="-12 -12 24 24"><circle r="11" /><path d="M -6 0 H 6 M 2 -4 L 6 0 L 2 4" /></svg><span>дрейф света</span><span class="sun-rhythm" title="Ритм солнца: множитель силы солнца сейчас и куда он идёт"></span></div>
-        <details class="probe-panel"><summary aria-label="Точка на карте" title="Точка на карте"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6"/><circle cx="10" cy="10" r="2"/><path d="M10 1v3m0 12v3M1 10h3m12 0h3"/></svg></summary><div class="probe-content"><div class="probe-actions"><button class="probe-window-pin" type="button">В правую панель</button><button class="probe-point-release" type="button" disabled>Снять точку</button></div><span class="probe-pin-note">Клик по карте закрепит точку. Её значения продолжат обновляться.</span><div class="tip">Наведите курсор на чашку, чтобы увидеть значения.</div></div></details>
+        <button class="probe-toggle focus-toggle" aria-label="Точка на карте" title="Точка на карте" aria-expanded="false" aria-controls="probe-section"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6"/><circle cx="10" cy="10" r="2"/><path d="M10 1v3m0 12v3M1 10h3m12 0h3"/></svg></button><div class="probe-content"><div class="probe-actions"><button class="probe-point-release" type="button" disabled>Снять точку</button></div><span class="probe-pin-note">Клик по карте закрепит точку. Её значения продолжат обновляться.</span><div class="tip">Наведите курсор на чашку, чтобы увидеть значения.</div></div>
       </div></footer></div>
       <aside class="right-panel" aria-label="Панель мира">
-        <div id="observation" hidden aria-label="Наблюдение за миром"><section id="legend" hidden aria-label="Легенда карты"></section></div>
+        <details id="main-panel" class="sidebar-section sidebar-main" open><summary>Сводка мира</summary><div id="observation" hidden aria-label="Наблюдение за миром"><section id="legend" hidden aria-label="Легенда карты"></section></div>
         <div id="world-summary" hidden aria-label="Сводка мира"></div>
-        <div id="params"></div>
-        <p class="right-panel-empty">Выбери «Сводка» или «Легенда» в хедере. Параметры нового мира доступны в меню «Мир».</p>
-        <section class="probe-dock" hidden aria-label="Закреплённое окно точки"><h3>Точка на карте</h3></section>
+        <div id="params"></div></details>
+        <details id="navigation" class="sidebar-section" hidden><summary>Миникарта</summary><div class="navigation-body"><canvas class="minimap" aria-label="Мини-карта чашки" title="Клик — перейти сюда"></canvas></div></details>
+        <details id="probe-section" class="sidebar-section probe-dock" hidden><summary>Точка на карте</summary></details>
       </aside></div>
     </div>
     <script type="module" src="/src/app/main.ts"></script>

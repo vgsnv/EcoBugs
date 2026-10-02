@@ -13,8 +13,10 @@ import { insideDish, cellInsideDish, type Dish, ERUPTION_RADIUS, MINERAL_LAYER, 
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
-const GLASS_GLOSS_FROM = 'rgba(205, 228, 245, 0.85)';
-const GLASS_GLOSS_TO = 'rgba(150, 190, 222, 0.45)';
+const GLASS_GLOSS_FROM = 'rgba(244, 253, 255, 0.94)';
+const GLASS_GLOSS_TO = 'rgba(128, 166, 180, 0.48)';
+/** Воздух вокруг чашки, чтобы её тень оставалась видимой в режиме «вся чашка». */
+const TABLE_INSET = 16;
 const GLASS_EDGE = 'rgba(255, 255, 255, 0.9)';
 const GLASS_SHADOW = 'rgba(30, 55, 80, 0.65)';
 
@@ -416,6 +418,8 @@ function puffSprite(c: Rgb): HTMLCanvasElement {
 }
 
 export class WorldRenderer {
+  private readonly dishShadow = document.createElement('canvas');
+  private dishShadowKey = '';
   private probePoint: { x: number; y: number } | null = null;
   setProbePoint(point: { x: number; y: number } | null): void { this.probePoint = point; this.frameKey = ''; }
   private readonly rulers: CoordinateRulers;
@@ -663,12 +667,11 @@ export class WorldRenderer {
 
   /** Подогнать разрешение холстов под размер на экране и плотность пикселей. */
   /** Изменение компоновки сохраняет масштаб, левый край чашки или центр приближенного вида. */
-  resizeKeepingView(): void { this.resize(true); }
+  resizeKeepingView(): void { this.resize(); }
 
-  private resize(keepView = false): void {
+  private resize(): void {
     const w = Math.max(1, Math.round(this.canvas.clientWidth * this.dpr));
     const h = Math.max(1, Math.round(this.canvas.clientHeight * this.dpr));
-    const wasAlignedLeft = !!this.world && Math.abs(this.canvas.width / 2 - (this.cx + this.wall) * this.zoom) < 1e-6;
     const changed = w !== this.canvas.width || h !== this.canvas.height;
     if (changed) {
       this.canvas.width = w; this.canvas.height = h;
@@ -681,14 +684,7 @@ export class WorldRenderer {
       }
     }
     if (!this.world || !changed) return;
-    if (keepView) {
-      // Чашка у левого края сохраняет его при открытии внешних панелей.
-      if (wasAlignedLeft || w + 1e-6 >= (this.width + 2 * this.wall) * this.zoom) {
-        this.cx = -this.wall + w / this.zoom / 2;
-      }
-      this.onZoomChange(this.zoom / this.fitZoom());
-    }
-    else if (this.fitted) this.fit();
+    if (this.fitted) this.fit();
     else this.setView(this.zoom, this.cx, this.cy);
   }
 
@@ -696,7 +692,7 @@ export class WorldRenderer {
 
   /** Масштаб, при котором чашка со стенкой целиком вписана в холст. */
   private fitZoom(): number {
-    return Math.min(this.canvas.width / (this.width + 2 * this.wall), this.canvas.height / (this.height + 2 * this.wall));
+    return Math.min(Math.max(1, this.canvas.width - 2 * TABLE_INSET * this.dpr) / (this.width + 2 * this.wall), Math.max(1, this.canvas.height - 2 * TABLE_INSET * this.dpr) / (this.height + 2 * this.wall));
   }
 
   /** Установить вид: масштаб в допустимых пределах, чашка не уезжает из кадра. */
@@ -705,17 +701,18 @@ export class WorldRenderer {
     const max = Math.max(min, MAX_ZOOM_CSS * this.dpr);
     this.zoom = Math.min(max, Math.max(min, zoom));
     this.fitted = this.zoom <= min * 1.0001;
-    const clampAxis = (c: number, size: number, view: number, alignStart = false, alignEnd = false) => {
+    const clampAxis = (c: number, size: number, view: number) => {
       const half = view / this.zoom / 2;
-      const lo = -this.wall + half, hi = size + this.wall - half;
-      return lo > hi ? (alignStart ? lo : alignEnd ? hi : size / 2) : Math.min(hi, Math.max(lo, c));
+      const inset = TABLE_INSET * this.dpr / this.zoom;
+      const lo = -this.wall - inset + half, hi = size + this.wall + inset - half;
+      return lo > hi ? size / 2 : Math.min(hi, Math.max(lo, c));
     };
-    this.cx = clampAxis(cx, this.width, this.canvas.width, true);
-    this.cy = clampAxis(cy, this.height, this.canvas.height, false, matchMedia('(min-width: 901px)').matches);
+    this.cx = clampAxis(cx, this.width, this.canvas.width);
+    this.cy = clampAxis(cy, this.height, this.canvas.height);
     this.onZoomChange(this.zoom / min);
   }
 
-  /** Показать чашку целиком у левого края, по вертикали — по центру. */
+  /** Показать чашку целиком по центру области карты. */
   fit(): void {
     this.setView(0, this.width / 2, this.height / 2);
   }
@@ -848,6 +845,7 @@ export class WorldRenderer {
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    this.drawDishShadow();
     ctx.save();
     ctx.beginPath();
     ctx.setTransform(...view);
@@ -1896,7 +1894,28 @@ export class WorldRenderer {
     this.setView(this.zoom, x, y);
   }
 
-  /** Стена вокруг чашки и перегородки: одна заливка, одна обводка (в единицах мира). */
+  /** Тень чашки на столе кешируется до изменения камеры или формы чашки. */
+  private drawDishShadow(): void {
+    const key = `${this.world.dish.shape}:${this.width}:${this.height}:${this.wall}:${this.view()}:${this.canvas.width}:${this.canvas.height}:${this.dpr}`;
+    if (key !== this.dishShadowKey) {
+      this.dishShadowKey = key;
+      this.dishShadow.width = this.canvas.width; this.dishShadow.height = this.canvas.height;
+      const ctx = this.dishShadow.getContext('2d')!;
+      ctx.setTransform(...this.view());
+      ctx.beginPath();
+      if (this.world.dish.shape === 'circle') ctx.arc(this.width / 2, this.height / 2, this.width / 2 + this.wall, 0, Math.PI * 2);
+      else ctx.rect(-this.wall, -this.wall, this.width + 2 * this.wall, this.height + 2 * this.wall);
+      ctx.fillStyle = '#bcced2';
+      ctx.shadowColor = 'rgba(31, 53, 47, 0.32)';
+      ctx.shadowBlur = 12 * this.dpr; ctx.shadowOffsetY = 5 * this.dpr;
+      ctx.fill();
+      ctx.shadowBlur = 3 * this.dpr; ctx.shadowOffsetY = 2 * this.dpr;
+      ctx.shadowColor = 'rgba(31, 53, 47, 0.25)'; ctx.fill();
+    }
+    this.ctx.drawImage(this.dishShadow, 0, 0);
+  }
+
+  /** Стеклянный обод чашки и перегородки (в единицах мира). */
   private drawWalls(): void {
     const ctx = this.ctx;
     const W = this.wall;
@@ -1911,14 +1930,34 @@ export class WorldRenderer {
       solid.rect(-W, -W, this.width + 2 * W, this.height + 2 * W);
       solid.rect(0, 0, this.width, this.height);
     }
-    const gloss = ctx.createLinearGradient(-W, -W, this.width + W, this.height + W);
+    const gloss = ctx.createLinearGradient(0, -W, 0, this.height + W);
     gloss.addColorStop(0, GLASS_GLOSS_FROM);
-    gloss.addColorStop(0.5, GLASS_GLOSS_TO);
-    gloss.addColorStop(1, GLASS_GLOSS_FROM);
+    gloss.addColorStop(0.22, 'rgba(211, 238, 244, 0.72)');
+    gloss.addColorStop(0.65, GLASS_GLOSS_TO);
+    gloss.addColorStop(1, 'rgba(188, 214, 224, 0.84)');
     ctx.fillStyle = gloss;
     ctx.fill(solid, 'evenodd');
-    ctx.fillStyle = GLASS_FILL;
-    ctx.save(); ctx.beginPath(); this.traceDish(ctx); ctx.clip(); ctx.fill(this.parts); ctx.restore();
+    ctx.save(); ctx.beginPath(); this.traceDish(ctx); ctx.clip();
+    // Контактная тень перегородок лежит на среде, а стекло остаётся полупрозрачным.
+    ctx.save(); ctx.translate(this.px(1), this.px(2));
+    ctx.fillStyle = 'rgba(18, 48, 66, 0.28)'; ctx.fill(this.parts); ctx.restore();
+    ctx.fillStyle = GLASS_FILL; ctx.fill(this.parts);
+    ctx.clip(this.parts);
+    for (const part of this.world.partitions.partitions) {
+      for (let k = 1; k < part.points.length; k++) {
+        const [ax, ay] = part.points[k - 1], [bx, by] = part.points[k];
+        const x = Math.min(ax, bx) - W / 2, y = Math.min(ay, by) - W / 2;
+        const horizontal = ay === by;
+        const face = horizontal ? ctx.createLinearGradient(0, y, 0, y + W) : ctx.createLinearGradient(x, 0, x + W, 0);
+        face.addColorStop(0, GLASS_GLOSS_FROM);
+        face.addColorStop(0.24, 'rgba(211, 238, 244, 0.72)');
+        face.addColorStop(0.7, GLASS_GLOSS_TO);
+        face.addColorStop(1, 'rgba(188, 214, 224, 0.84)');
+        ctx.fillStyle = face;
+        ctx.fillRect(x, y, Math.abs(bx - ax) + W, Math.abs(by - ay) + W);
+      }
+    }
+    ctx.restore();
 
     const half = this.px(0.5);
     ctx.lineWidth = this.px(1);
@@ -1927,6 +1966,25 @@ export class WorldRenderer {
       ctx.beginPath(); ctx.arc(this.width / 2, this.height / 2, this.width / 2 + W - half, 0, Math.PI * 2); ctx.stroke();
       ctx.beginPath(); this.traceDish(ctx); ctx.stroke();
     } else ctx.strokeRect(-W + half, -W + half, this.width + 2 * W - 2 * half, this.height + 2 * W - 2 * half);
+    // Короткие отражения лампы только на ободе, без бликов поверх среды.
+    const reflection = ctx.createLinearGradient(0, 0, this.width * 0.65, 0);
+    reflection.addColorStop(0, 'rgba(255,255,255,0.1)');
+    reflection.addColorStop(0.35, 'rgba(255,255,255,0.95)');
+    reflection.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.strokeStyle = reflection; ctx.lineWidth = Math.min(W * 0.35, this.px(1.8));
+    ctx.lineCap = 'round'; ctx.beginPath();
+    if (this.world.dish.shape === 'circle') {
+      ctx.arc(this.width / 2, this.height / 2, this.width / 2 + W * 0.55, Math.PI * 1.04, Math.PI * 1.78);
+    } else {
+      ctx.moveTo(this.width * 0.04, -W * 0.55); ctx.lineTo(this.width * 0.62, -W * 0.55);
+    }
+    ctx.stroke(); ctx.lineCap = 'butt';
+    // Внутренняя кромка: контактная тень и тонкий блик дают толщину стекла.
+    ctx.save(); ctx.beginPath(); this.traceDish(ctx); ctx.clip();
+    ctx.strokeStyle = 'rgba(18, 48, 66, 0.55)'; ctx.lineWidth = this.px(3);
+    ctx.beginPath(); this.traceDish(ctx); ctx.stroke();
+    ctx.strokeStyle = 'rgba(237, 252, 255, 0.8)'; ctx.lineWidth = this.px(0.8); ctx.stroke();
+    ctx.restore();
     // Как у стекла: тёмный контур по краю (виден на светлом) и светлый блик
     // поверх него (виден на тёмном).
     ctx.strokeStyle = GLASS_SHADOW;

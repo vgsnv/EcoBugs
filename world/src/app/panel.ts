@@ -8,6 +8,7 @@ import { layoutPartitions, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, va
 import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render.ts';
 import { formatArea, formatDuration, formatLength, formatMultiplier, formatNumber, formatPercent, formatWorldAge } from './units.ts';
 import { gramsPerSquareMetre, secondsFromSteps, stepsFromSeconds } from '../core/units.ts';
+import { Sidebar } from './sidebar.ts';
 
 export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
 
@@ -191,6 +192,7 @@ export class Panel {
   private readonly layoutLabel = el('span', { className: 'value' });
   private readonly layoutPreview = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   private readonly marks: { node: HTMLElement; changed: () => boolean }[] = [];
+  private readonly sidebar: Sidebar;
 
   constructor(roots: PanelRoots, initial: WorldParams, handlers: PanelHandlers) {
     this.roots = roots;
@@ -200,22 +202,23 @@ export class Panel {
     this.buildParams();
     this.buildLegend();
     this.buildToolbar();
-    const probePanel = document.querySelector<HTMLDetailsElement>('.probe-panel')!;
-    const probeContent = document.querySelector<HTMLElement>('.probe-content')!;
-    const probeDock = document.querySelector<HTMLElement>('.probe-dock')!;
-    const pinWindow = document.querySelector<HTMLButtonElement>('.probe-window-pin')!;
-    pinWindow.addEventListener('click', () => {
-      const docked = probeDock.hidden;
-      probeDock.hidden = !docked;
-      probePanel.dataset.docked = String(docked);
-      pinWindow.textContent = docked ? 'Вернуть в хедер' : 'В правую панель';
-      if (docked) { probeDock.append(probeContent); probePanel.open = false; }
-      else { probePanel.append(probeContent); probePanel.open = true; }
-      pinWindow.focus();
-      this.handlers.onLayoutChange();
+    this.sidebar = new Sidebar(roots.app, () => this.handlers.onLayoutChange());
+    const probeDock = document.querySelector<HTMLDetailsElement>('.probe-dock')!;
+    const probeToggle = document.querySelector<HTMLButtonElement>('.probe-toggle')!;
+    probeDock.append(document.querySelector<HTMLElement>('.probe-content')!);
+    probeToggle.addEventListener('click', () => {
+      probeDock.hidden = !probeDock.hidden;
+      if (!probeDock.hidden) { this.toggleFocus(false); this.sidebar.show(); probeDock.open = true; probeDock.scrollIntoView({ block: 'nearest' }); }
+      probeToggle.setAttribute('aria-expanded', String(!probeDock.hidden && probeDock.open));
+      probeToggle.setAttribute('aria-pressed', String(!probeDock.hidden));
     });
-    probePanel.querySelector('summary')!.addEventListener('click', event => {
-      if (!probeDock.hidden) { event.preventDefault(); pinWindow.focus(); }
+    probeDock.addEventListener('toggle', () => {
+      probeToggle.setAttribute('aria-expanded', String(!probeDock.hidden && probeDock.open));
+      probeToggle.setAttribute('aria-pressed', String(!probeDock.hidden));
+    });
+    this.roots.navigation.addEventListener('toggle', () => {
+      this.navigationToggle.setAttribute('aria-expanded', String(!this.roots.navigation.hidden && (this.roots.navigation as HTMLDetailsElement).open));
+      this.navigationToggle.setAttribute('aria-pressed', String(!this.roots.navigation.hidden));
     });
     document.querySelector('.probe-point-release')!.addEventListener('click', () => this.handlers.onUnpinProbe());
     this.roots.summary.querySelector('.legend-head')!.after(el('section', { className: 'summary-section summary-light' },
@@ -223,9 +226,7 @@ export class Panel {
     this.summaryToggle.setAttribute('aria-controls', 'world-summary');
     this.summaryToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3v14h14 M6 13V9 M10 13V5 M14 13V7"/></svg>';
     this.summaryToggle.addEventListener('click', () => this.toggleSummary());
-    this.roots.summary.querySelector('button')!.addEventListener('click', () => this.toggleSummary(false));
     installInfoTips();
-    document.querySelector('#navigation-close')!.addEventListener('click', () => this.toggleNavigation(false));
     this.navigationToggle.addEventListener('click', () => this.toggleNavigation());
     this.navigationToggle.setAttribute('aria-controls', 'navigation');
     this.navigationToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m2 4 5-2 6 2 5-2v14l-5 2-6-2-5 2Z M7 2v14 M13 4v14"/></svg>';
@@ -236,7 +237,7 @@ export class Panel {
     roots.toolbar.after(this.status);
     document.addEventListener('fullscreenchange', () => this.toggleFocus(document.fullscreenElement === roots.app));
     this.refresh();
-    if (matchMedia('(min-width: 901px)').matches) this.toggleSummary(true);
+    this.toggleSummary(true);
   }
 
   /** Мир создан с этими параметрами — черновик совпадает с миром. */
@@ -248,12 +249,26 @@ export class Panel {
   }
 
   /** Открыть или закрыть настройки; черновик сохраняется при закрытии. */
+  private expandMainSection(title: string): void {
+    const section = document.querySelector<HTMLDetailsElement>('.sidebar-main')!;
+    section.querySelector('.section-title')!.textContent = title;
+    section.hidden = false;
+    section.open = true;
+    this.sidebar.show();
+  }
+
+  private syncMainVisibility(): void {
+    document.querySelector<HTMLElement>('.sidebar-main')!.hidden = this.roots.summary.hidden && this.roots.legend.hidden && !this.roots.app.classList.contains('params-open');
+  }
+
   toggleParams(open?: boolean): void {
-    const next = open ?? !this.roots.app.classList.contains('params-open');
-    if (next) { this.toggleFocus(false); this.toggleLegend(false); this.toggleNavigation(false); this.toggleSummary(false); }
+    const next = open ?? true;
+    if (next) { this.toggleFocus(false); this.toggleLegend(false); this.toggleSummary(false); }
+    if (next) this.expandMainSection('Параметры нового мира');
     this.roots.app.classList.toggle('params-open', next);
     this.paramsToggle.setAttribute('aria-expanded', String(next));
     this.roots.params.inert = !next;
+    this.syncMainVisibility();
     this.handlers.onLayoutChange();
     if (!next && this.roots.params.contains(document.activeElement)) this.menuToggle.focus();
   }
@@ -266,7 +281,7 @@ export class Panel {
         this.setFileStatus(['Не удалось выйти из полноэкранного режима. Попробуйте Esc.'], true);
       });
     }
-    if (next) { this.toggleParams(false); this.toggleLegend(false); this.toggleNavigation(false); this.toggleSummary(false); this.closeMenu(); }
+    if (next) this.closeMenu();
     this.roots.app.classList.toggle('focus-mode', next);
     this.focusToggle.setAttribute('aria-pressed', String(next));
     this.focusToggle.ariaLabel = next ? 'Выйти из полноэкранного режима' : 'На весь экран';
@@ -291,35 +306,38 @@ export class Panel {
   toggleLegend(open?: boolean): void {
     const next = open ?? this.roots.legend.hidden;
     if (next) { this.toggleFocus(false); this.toggleParams(false); this.toggleSummary(false); }
+    if (next) this.expandMainSection('Легенда');
     this.roots.legend.hidden = !next;
     this.legendToggle.setAttribute('aria-expanded', String(next));
+    this.legendToggle.setAttribute('aria-pressed', String(next));
     this.syncObservation();
+    this.syncMainVisibility();
     if (!next && this.roots.legend.contains(document.activeElement)) this.legendToggle.focus();
   }
 
   toggleNavigation(open?: boolean): void {
     const next = open ?? this.roots.navigation.hidden;
-    if (next) { this.toggleFocus(false); this.toggleParams(false); }
     this.roots.navigation.hidden = !next;
+    if (next) { this.toggleFocus(false); this.sidebar.show(); (this.roots.navigation as HTMLDetailsElement).open = true; }
+    if (next) this.roots.navigation.scrollIntoView({ block: 'nearest' });
     this.navigationToggle.setAttribute('aria-expanded', String(next));
+    this.navigationToggle.setAttribute('aria-pressed', String(next));
     if (!next && this.roots.navigation.contains(document.activeElement)) this.navigationToggle.focus();
   }
 
   toggleSummary(open?: boolean): void {
     const next = open ?? this.roots.summary.hidden;
     if (next) { this.toggleFocus(false); this.toggleParams(false); this.toggleLegend(false); }
+    if (next) this.expandMainSection('Сводка мира');
     this.roots.summary.hidden = !next;
     this.summaryToggle.setAttribute('aria-expanded', String(next));
+    this.summaryToggle.setAttribute('aria-pressed', String(next));
+    this.syncMainVisibility();
     this.handlers.onLayoutChange();
     if (!next && this.roots.summary.contains(document.activeElement)) this.summaryToggle.focus();
   }
 
   closePanels(): void {
-    document.querySelector<HTMLDetailsElement>('.probe-panel')!.open = false;
-    this.toggleSummary(false);
-    this.toggleParams(false);
-    this.toggleLegend(false);
-    this.toggleNavigation(false);
     this.toggleFocus(false);
     this.closeMenu();
   }
@@ -406,7 +424,7 @@ export class Panel {
     this.paramsToggle.addEventListener('click', () => {
       this.closeMenu();
       this.toggleParams(true);
-      this.roots.params.querySelector<HTMLButtonElement>('.params-close')!.focus();
+      this.roots.params.querySelector<HTMLSelectElement>('select')!.focus();
     });
     this.focusToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path class="focus-enter" d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4"/><path class="focus-exit" d="M3 7h4V3M13 3v4h4M17 13h-4v4M7 17v-4H3"/></svg>';
     this.focusToggle.addEventListener('click', () => { void this.toggleFullscreen(); });
@@ -440,7 +458,8 @@ export class Panel {
       speedControl,
       spacer,
       el('span', { className: 'toolbar-secondary' }, this.legendToggle, this.navigationToggle, this.summaryToggle),
-      document.querySelector<HTMLElement>('.probe-panel')!,
+      document.querySelector<HTMLElement>('.probe-toggle')!,
+      document.querySelector<HTMLElement>('.sidebar-toggle')!,
       this.focusToggle,
       picker,
     );
@@ -462,7 +481,7 @@ export class Panel {
     };
     placePlayback();
     desktop.addEventListener('change', () => { placePlayback(); this.handlers.onLayoutChange(); });
-    for (const disclosure of [document.querySelector<HTMLDetailsElement>('.mineral-details')!, document.querySelector<HTMLDetailsElement>('.probe-panel')!]) {
+    for (const disclosure of [document.querySelector<HTMLDetailsElement>('.mineral-details')!]) {
       disclosure.querySelector('summary')!.addEventListener('click', () => requestAnimationFrame(() => this.handlers.onLayoutChange()));
       disclosure.addEventListener('toggle', () => this.handlers.onLayoutChange());
     }
@@ -474,8 +493,6 @@ export class Panel {
   }
 
   private buildParams(): void {
-    const close = el('button', { className: 'params-close', textContent: '✕', title: 'Закрыть (Esc)', ariaLabel: 'Закрыть настройки' });
-    close.addEventListener('click', () => this.toggleParams(false));
     const open = loadOpenGroups();
     const group = (title: string, fields: HTMLElement[], openByDefault: boolean) => {
       const d = el('details', { open: open[title] ?? openByDefault }, el('summary', { textContent: title }), el('div', { className: 'fields' }, ...fields));
@@ -483,7 +500,7 @@ export class Panel {
       return d;
     };
     this.roots.params.append(
-      el('div', { className: 'params-head' }, el('h2', { textContent: 'Параметры нового мира' }), close),
+      el('div', { className: 'params-head' }, el('h2', { textContent: 'Параметры нового мира' })),
       el('div', { className: 'params-body' },
         group('Мир', this.worldFields(), true),
         ...GROUPS.map((g) => group(g.title, [...g.sliders.map((s) => this.slider(s)), ...(g.title === 'Вязкость' ? this.sharesRows() : [])], g.title === 'Свет')),
@@ -500,7 +517,7 @@ export class Panel {
     this.createButton.addEventListener('click', () => {
       if (validateParams(this.draft).length > 0) return;
       this.handlers.onCreate(structuredClone(this.draft));
-      this.toggleParams(false);
+      this.toggleSummary(true);
     });
     this.toggleParams(false);
   }
@@ -695,13 +712,10 @@ export class Panel {
       el('details', { className: 'legend-extras' }, el('summary', { textContent: 'Блики и нагрев' }),
         el('p', { className: 'note', textContent: 'Блики отмечают воду на свету. Светлые пятна теплее; точные значения температуры доступны в панели «Точка на карте».' })),
     );
-    const close = el('button', { className: 'legend-close', ariaLabel: 'Закрыть легенду', title: 'Закрыть (Esc)' });
-    close.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m5 5 10 10 M15 5 5 15"/></svg>';
-    close.addEventListener('click', () => this.toggleLegend(false));
     this.legendToggle.addEventListener('click', () => this.toggleLegend());
     this.legendToggle.setAttribute('aria-controls', 'legend');
     this.legendToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><rect x="2" y="3" width="4" height="4" rx="1"/><rect x="2" y="12" width="4" height="4" rx="1"/><path d="M10 5h8 M10 14h8"/></svg>';
-    this.roots.legend.append(el('div', { className: 'legend-head' }, el('h2', { textContent: 'Легенда' }), close), this.legendBody, detail);
+    this.roots.legend.append(el('div', { className: 'legend-head' }, el('h2', { textContent: 'Легенда' })), this.legendBody, detail);
 
   }
 

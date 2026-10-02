@@ -12,7 +12,7 @@ export class WorldSummary {
   private readonly values = new Map<string, HTMLElement>();
   constructor(privateRoot: HTMLElement) {
     this.root = privateRoot;
-    privateRoot.innerHTML = '<div class="legend-head"><h2>Сводка мира</h2><button class="legend-close" aria-label="Закрыть сводку"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10 M15 5 5 15"/></svg></button></div>';
+    privateRoot.innerHTML = '<div class="legend-head"><h2>Сводка мира</h2></div>';
     const groups: [string, [string, string][]][] = [
       ['Мир', [['size', 'Размеры'], ['area', 'Площадь'], ['age', 'Возраст'], ['water', 'Вода'], ['shallows', 'Отмель'], ['land', 'Суша']]],
       ['Минерал', [['total', 'Всего без грунта'], ['depths', 'В недрах'], ['medium', 'В среде'], ['deposits', 'В залежах'], ['transit', 'В извержениях']]],
