@@ -14,9 +14,10 @@
  * пересчитывается раз в DRIFT_PERIOD шагов, между пересчётами — плавный
  * переход.
  */
-import { DISH_HEIGHT, DISH_WIDTH, DRIFT_CELL, DRIFT_DRAG, DRIFT_MAX, DRIFT_PERIOD, DRIFT_SPEED, LIGHT_DRIFT_SPEED } from './constants.ts';
+import { DRIFT_CELL, DRIFT_DRAG, DRIFT_MAX, DRIFT_PERIOD, DRIFT_SPEED, LIGHT_DRIFT_SPEED } from './constants.ts';
 import { lightDriftVelocity, rasterizeSpotIntensity, sunAt, type LightMap } from './light.ts';
 import type { WorldParams } from './params.ts';
+import { cellInsideDish } from './dish.ts';
 import { isBlocked, type PartitionLayout } from './partitions.ts';
 import { multiplierForLevel, smoothLevelAt, type ViscosityMap } from './viscosity.ts';
 
@@ -69,7 +70,7 @@ function groundOf(world: Sources, cols: number, rows: number, cell: number): Gro
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
       const x = (i + 0.5) * cell, y = (j + 0.5) * cell;
-      blocked[k] = isBlocked(world.partitions, x, y) ? 1 : 0;
+      blocked[k] = !cellInsideDish(world.partitions.dish, i * cell, j * cell, cell) || isBlocked(world.partitions, x, y) ? 1 : 0;
       cond[k] = blocked[k] ? 0 : 1 / multiplierForLevel(smoothLevelAt(world.viscosity, x, y));
     }
   }
@@ -183,12 +184,10 @@ const DRIFT_COARSE_ITERATIONS = 600;
 const DRIFT_FINE_ITERATIONS = 30;
 const DRIFT_OMEGA = 1.7;
 
-const COLS = Math.ceil(DISH_WIDTH / DRIFT_CELL);
-const ROWS = Math.ceil(DISH_HEIGHT / DRIFT_CELL);
-
 /** Течения в шаге t. */
-export function computeDriftField(world: Sources, t: number, ground: Ground = groundOf(world, COLS, ROWS, DRIFT_CELL)): DriftField {
-  const cell = DRIFT_CELL, cols = COLS, rows = ROWS, n = cols * rows;
+export function computeDriftField(world: Sources, t: number, ground?: Ground): DriftField {
+  const cell = DRIFT_CELL, cols = Math.ceil(world.partitions.dish.width / cell), rows = Math.ceil(world.partitions.dish.height / cell), n = cols * rows;
+  ground ??= groundOf(world, cols, rows, cell);
   const vx = new Float32Array(n);
   const vy = new Float32Array(n);
   const sun = sunAt(world.light, t);
@@ -275,7 +274,7 @@ export class Drift {
   private node(k: number): DriftField {
     let f = this.cache.get(k);
     if (!f) {
-      this.ground ??= groundOf(this.world, COLS, ROWS, DRIFT_CELL);
+      this.ground ??= groundOf(this.world, Math.ceil(this.world.partitions.dish.width / DRIFT_CELL), Math.ceil(this.world.partitions.dish.height / DRIFT_CELL), DRIFT_CELL);
       f = computeDriftField(this.world, k * DRIFT_PERIOD, this.ground);
       this.cache.set(k, f);
       while (this.cache.size > 3) this.cache.delete(this.cache.keys().next().value!);

@@ -13,7 +13,7 @@ export type SimulationCommand =
 export interface SimulationSnapshot {
   type: 'snapshot';
   epoch: number;
-  initial?: Pick<World, 'params' | 'light' | 'partitions'>;
+  initial?: Pick<World, 'dish' | 'params' | 'light' | 'partitions'>;
   step: number;
   mineral: MineralState;
   terrain: TerrainState;

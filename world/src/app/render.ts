@@ -6,7 +6,7 @@
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
-import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, DRIFT_REFERENCE, multiplierForLevel, eruptionRate, eruptionBursts, ventPush, BURST_WIDTH, flowAt, hash3, isBlocked, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, VOLCANO_BIRTH, VOLCANO_POWER, type MineralProcesses, type Volcano, type World } from '../core/index.ts';
+import { insideDish, cellInsideDish, type Dish, ERUPTION_RADIUS, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, DRIFT_REFERENCE, multiplierForLevel, eruptionRate, eruptionBursts, ventPush, BURST_WIDTH, flowAt, hash3, isBlocked, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, VOLCANO_BIRTH, VOLCANO_POWER, type MineralProcesses, type Volcano, type World } from '../core/index.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
@@ -337,12 +337,13 @@ const MAX_ZOOM_CSS = 24;
 
 /** Цвет местности в точке мира: вязкость и фактура камня, посчитанные один раз на мир. */
 function terrainSampler(world: World): (x: number, y: number, out: Uint8ClampedArray, k: number) => void {
+  const { width, height } = world.dish;
   const seed = world.params.seed;
   // Фактура камня в единицах мира — узор только для глаза, на модель не влияет.
-  const fbm = periodicFbm(seed ^ 0x51a7e, Math.ceil(DISH_WIDTH / 40), Math.ceil(DISH_HEIGHT / 40), 4);
-  const mottle = gridField(DISH_WIDTH, DISH_HEIGHT, 4, (x, y) => fbm(x / 40, y / 40));
-  const grain = gridField(DISH_WIDTH, DISH_HEIGHT, 1.25, (x, y) => hash3(seed ^ 0x6a41, Math.round(x * 0.8), Math.round(y * 0.8)) / 2147483648 - 1);
-  const edge = cellEdges(seed ^ 0xc4ac, Math.ceil(DISH_WIDTH / STONE_SLAB), Math.ceil(DISH_HEIGHT / STONE_SLAB));
+  const fbm = periodicFbm(seed ^ 0x51a7e, Math.ceil(width / 40), Math.ceil(height / 40), 4);
+  const mottle = gridField(width, height, 4, (x, y) => fbm(x / 40, y / 40));
+  const grain = gridField(width, height, 1.25, (x, y) => hash3(seed ^ 0x6a41, Math.round(x * 0.8), Math.round(y * 0.8)) / 2147483648 - 1);
+  const edge = cellEdges(seed ^ 0xc4ac, Math.ceil(width / STONE_SLAB), Math.ceil(height / STONE_SLAB));
   const m = world.mineral;
   const stock = world.params.mineralStock;
   /** Залежи в точке относительно средней плотности запаса — билинейно по клеткам. */
@@ -356,6 +357,7 @@ function terrainSampler(world: World): (x: number, y: number, out: Uint8ClampedA
     return (a + (b - a) * v) / (m.cell * m.cell) / stock;
   };
   return (x, y, out, k) => {
+    if (!insideDish(world.dish, x, y)) return;
     const L = smoothLevelAt(world.viscosity, x, y);
     const crack = 1 - smoothstep(0.02, 0.07, edge(x / STONE_SLAB, y / STONE_SLAB));
     const v = STONE_BASE + STONE_MOTTLE * mottle(x, y) + STONE_GRAIN * grain(x, y) - STONE_CRACK * crack;
@@ -385,7 +387,9 @@ function terrainSampler(world: World): (x: number, y: number, out: Uint8ClampedA
 }
 
 /** Кусок местности [x0, x0 + w) × [y0, y0 + h) единиц мира в масштабе `scale`; вне чашки — прозрачно. */
-function renderTerrain(sample: ReturnType<typeof terrainSampler>, x0: number, y0: number, pw: number, ph: number, scale: number): HTMLCanvasElement {
+function renderTerrain(sample: ReturnType<typeof terrainSampler>, x0: number, y0: number, pw: number, ph: number, scale: number, dish: Dish): HTMLCanvasElement {
+  const { width, height } = dish;
+  pw = Math.ceil(pw); ph = Math.ceil(ph);
   const c = document.createElement('canvas');
   c.width = pw;
   c.height = ph;
@@ -393,10 +397,10 @@ function renderTerrain(sample: ReturnType<typeof terrainSampler>, x0: number, y0
   const img = tctx.createImageData(pw, ph);
   for (let j = 0; j < ph; j++) {
     const y = y0 + (j + 0.5) / scale;
-    if (y < 0 || y >= DISH_HEIGHT) continue;
+    if (y < 0 || y >= height) continue;
     for (let i = 0; i < pw; i++) {
       const x = x0 + (i + 0.5) / scale;
-      if (x < 0 || x >= DISH_WIDTH) continue;
+      if (x < 0 || x >= width) continue;
       sample(x, y, img.data, (j * pw + i) * 4);
     }
   }
@@ -425,6 +429,13 @@ function puffSprite(c: Rgb): HTMLCanvasElement {
 }
 
 export class WorldRenderer {
+  private get width(): number { return this.world.dish.width; }
+  private get height(): number { return this.world.dish.height; }
+  private traceDish(ctx: CanvasRenderingContext2D): void {
+    if (this.world.dish.shape === 'circle') ctx.arc(this.width / 2, this.height / 2, this.width / 2, 0, Math.PI * 2);
+    else ctx.rect(0, 0, this.width, this.height);
+  }
+
   showProcesses = false;
   processes: MineralProcesses | null = null;
   private readonly processCanvas = document.createElement('canvas');
@@ -508,8 +519,8 @@ export class WorldRenderer {
   /** Кромка стекла (в единицах мира) — строится один раз на мир. */
   private edges = new Path2D();
   /** Камера: центр вида в единицах мира и пикселей устройства на единицу мира. */
-  private cx = DISH_WIDTH / 2;
-  private cy = DISH_HEIGHT / 2;
+  private cx = 0;
+  private cy = 0;
   private zoom = 1;
   /** Вид «вся чашка»: при изменении размера окна остаётся вписанным. */
   private fitted = true;
@@ -537,7 +548,7 @@ export class WorldRenderer {
     this.linesKey = '';
     this.wall = world.partitions.thickness;
     this.sample = terrainSampler(world);
-    this.base = renderTerrain(this.sample, 0, 0, DISH_WIDTH * TILE_SCALE_MIN, DISH_HEIGHT * TILE_SCALE_MIN, TILE_SCALE_MIN);
+    this.base = renderTerrain(this.sample, 0, 0, this.width * TILE_SCALE_MIN, this.height * TILE_SCALE_MIN, TILE_SCALE_MIN, world.dish);
     this.tiles.clear();
     this.edges = this.buildEdges();
     this.parts = this.buildParts();
@@ -584,7 +595,7 @@ export class WorldRenderer {
       this.redrawQueue.delete(b);
       const x0 = (b % this.redrawCols) * REDRAW_BLOCK, y0 = Math.floor(b / this.redrawCols) * REDRAW_BLOCK;
       const px = REDRAW_BLOCK * TILE_SCALE_MIN;
-      bctx.drawImage(renderTerrain(this.sample, x0, y0, px, px, TILE_SCALE_MIN), x0 * TILE_SCALE_MIN, y0 * TILE_SCALE_MIN);
+      bctx.drawImage(renderTerrain(this.sample, x0, y0, px, px, TILE_SCALE_MIN, this.world.dish), x0 * TILE_SCALE_MIN, y0 * TILE_SCALE_MIN);
       wctx.putImageData(this.waterMaskBlock(x0, y0), x0 / WATER_MASK_STEP, y0 / WATER_MASK_STEP);
       if (performance.now() - start > REDRAW_BUDGET_MS) break;
     }
@@ -659,7 +670,7 @@ export class WorldRenderer {
 
   /** Масштаб, при котором чашка со стенкой целиком вписана в холст. */
   private fitZoom(): number {
-    return Math.min(this.canvas.width / (DISH_WIDTH + 2 * this.wall), this.canvas.height / (DISH_HEIGHT + 2 * this.wall));
+    return Math.min(this.canvas.width / (this.width + 2 * this.wall), this.canvas.height / (this.height + 2 * this.wall));
   }
 
   /** Установить вид: масштаб в допустимых пределах, чашка не уезжает из кадра. */
@@ -673,14 +684,14 @@ export class WorldRenderer {
       const lo = -this.wall + half, hi = size + this.wall - half;
       return lo > hi ? size / 2 : Math.min(hi, Math.max(lo, c));
     };
-    this.cx = clampAxis(cx, DISH_WIDTH, this.canvas.width);
-    this.cy = clampAxis(cy, DISH_HEIGHT, this.canvas.height);
+    this.cx = clampAxis(cx, this.width, this.canvas.width);
+    this.cy = clampAxis(cy, this.height, this.canvas.height);
     this.onZoomChange(this.zoom / min);
   }
 
   /** Показать чашку целиком. */
   fit(): void {
-    this.setView(0, DISH_WIDTH / 2, DISH_HEIGHT / 2);
+    this.setView(0, this.width / 2, this.height / 2);
   }
 
   /** Приблизить (factor > 1) или отдалить так, чтобы точка экрана осталась на месте; без точки — центр. */
@@ -706,7 +717,7 @@ export class WorldRenderer {
   toWorld(clientX: number, clientY: number): [number, number] | null {
     const rect = this.canvas.getBoundingClientRect();
     const [x, y] = this.screenToWorld((clientX - rect.left) * this.dpr, (clientY - rect.top) * this.dpr);
-    return x >= 0 && y >= 0 && x < DISH_WIDTH && y < DISH_HEIGHT ? [x, y] : null;
+    return insideDish(this.world.dish, x, y) ? [x, y] : null;
   }
 
   /** Перенос мира на экран: ctx.setTransform с этими числами. */
@@ -727,14 +738,14 @@ export class WorldRenderer {
     const ctx = this.ctx;
     ctx.setTransform(...this.view());
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(this.base, 0, 0, DISH_WIDTH, DISH_HEIGHT);
+    ctx.drawImage(this.base, 0, 0, this.width, this.height);
     const scale = Math.min(TILE_SCALE_MAX, Math.max(TILE_SCALE_MIN, 2 ** Math.ceil(Math.log2(this.zoom))));
     if (scale <= TILE_SCALE_MIN) return;
     const span = TILE / scale;
     const [x0, y0] = this.screenToWorld(0, 0);
     const [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
-    const i0 = Math.max(0, Math.floor(x0 / span)), i1 = Math.min(Math.ceil(DISH_WIDTH / span) - 1, Math.floor(x1 / span));
-    const j0 = Math.max(0, Math.floor(y0 / span)), j1 = Math.min(Math.ceil(DISH_HEIGHT / span) - 1, Math.floor(y1 / span));
+    const i0 = Math.max(0, Math.floor(x0 / span)), i1 = Math.min(Math.ceil(this.width / span) - 1, Math.floor(x1 / span));
+    const j0 = Math.max(0, Math.floor(y0 / span)), j1 = Math.min(Math.ceil(this.height / span) - 1, Math.floor(y1 / span));
     const missing: [number, number][] = [];
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
@@ -757,7 +768,7 @@ export class WorldRenderer {
     const start = performance.now();
     for (const [i, j] of missing) {
       if (performance.now() - start > TILE_BUDGET_MS) break;
-      const tile = renderTerrain(this.sample, i * span, j * span, TILE, TILE, scale);
+      const tile = renderTerrain(this.sample, i * span, j * span, TILE, TILE, scale, this.world.dish);
       this.tiles.set(`${scale}:${i}:${j}`, tile);
       ctx.drawImage(tile, i * span, j * span, span, span);
     }
@@ -791,7 +802,7 @@ export class WorldRenderer {
     ctx.save();
     ctx.beginPath();
     ctx.setTransform(...view);
-    ctx.rect(0, 0, DISH_WIDTH, DISH_HEIGHT);
+    this.traceDish(ctx);
     ctx.clip();
     this.drawTerrain();
 
@@ -810,7 +821,7 @@ export class WorldRenderer {
       const spotsPath = new Path2D();
       // Отрезков в контуре — столько, чтобы при любом масштабе край оставался гладким.
       const segments = Math.min(360, Math.max(48, Math.round(p.spotSize * z)));
-      for (const poly of spotOutlines(w.light, w.step, DISH_WIDTH, DISH_HEIGHT, segments)) {
+      for (const poly of spotOutlines(w.light, w.step, this.width, this.height, segments)) {
         spotsPath.moveTo(poly[0], poly[1]);
         for (let i = 2; i < poly.length; i += 2) spotsPath.lineTo(poly[i], poly[i + 1]);
         spotsPath.closePath();
@@ -886,7 +897,7 @@ export class WorldRenderer {
     const m = this.world.mineral;
     const ctx = this.ctx;
     ctx.save();
-    ctx.beginPath(); ctx.rect(0, 0, DISH_WIDTH, DISH_HEIGHT); ctx.clip();
+    ctx.beginPath(); this.traceDish(ctx); ctx.clip();
     if (this.processDrawn !== d) {
       this.processDrawn = d;
       const c = this.processCanvas;
@@ -948,7 +959,7 @@ export class WorldRenderer {
       const c = this.mineralCanvas;
       if (c.width !== m.cols || c.height !== m.rows) { c.width = m.cols; c.height = m.rows; }
       const mctx = c.getContext('2d')!;
-      if (!this.hazeScratch || this.hazeScratch.smooth.length !== m.field.length) {
+      if (!this.hazeScratch || this.hazeScratch.image.width !== m.cols || this.hazeScratch.image.height !== m.rows) {
         this.hazeScratch = { smooth: new Float32Array(m.field.length), tmp: new Float32Array(m.field.length),
           image: mctx.createImageData(m.cols, m.rows), dark: mctx.createImageData(m.cols, m.rows), held: mctx.createImageData(m.cols, m.rows) };
       }
@@ -1007,7 +1018,7 @@ export class WorldRenderer {
     }
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, 0, DISH_WIDTH, DISH_HEIGHT);
+    this.traceDish(ctx);
     ctx.clip();
     ctx.imageSmoothingEnabled = true;
     ctx.globalAlpha = 1;
@@ -1066,7 +1077,7 @@ export class WorldRenderer {
         // Новое зерно — в случайной клетке, тем вероятнее, чем больше там
         // минерала движется (количество × скорость): видно и тонкие реки.
         // Не прижилось — попробует в следующем кадре.
-        const x = Math.random() * DISH_WIDTH, y = Math.random() * DISH_HEIGHT;
+        const x = Math.random() * this.width, y = Math.random() * this.height;
         g[o + 3] = 1;
         g[o + 2] = 1;
         const f = flux(x, y);
@@ -1136,7 +1147,7 @@ export class WorldRenderer {
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, 0, DISH_WIDTH, DISH_HEIGHT);
+    this.traceDish(ctx);
     ctx.clip();
     ctx.globalCompositeOperation = 'screen';
 
@@ -1616,7 +1627,7 @@ export class WorldRenderer {
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'destination-in';
     g.imageSmoothingEnabled = true;
-    g.drawImage(this.foamCanvas, 0, 0, DISH_WIDTH, DISH_HEIGHT);
+    g.drawImage(this.foamCanvas, 0, 0, this.width, this.height);
     g.globalCompositeOperation = 'source-over';
     const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1679,7 +1690,7 @@ export class WorldRenderer {
     });
     g.globalCompositeOperation = 'destination-in';
     g.imageSmoothingEnabled = true;
-    g.drawImage(this.waterMask, 0, 0, DISH_WIDTH, DISH_HEIGHT);
+    g.drawImage(this.waterMask, 0, 0, this.width, this.height);
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.drawImage(this.spots, 0, 0);
     g.globalCompositeOperation = 'source-over';
@@ -1734,16 +1745,16 @@ export class WorldRenderer {
     const [vx1, vy1] = this.screenToWorld(this.canvas.width, this.canvas.height);
     // На мелком масштабе начала реже, иначе линии сливаются в рябь.
     const spacing = LINE_SEED_SPACING * Math.max(1, 0.8 / (this.zoom / this.dpr));
-    const gc = Math.ceil(DISH_WIDTH / LINE_CELL), gr = Math.ceil(DISH_HEIGHT / LINE_CELL);
+    const gc = Math.ceil(this.width / LINE_CELL), gr = Math.ceil(this.height / LINE_CELL);
     const taken = new Int32Array(gc * gr).fill(-1);
     const v: [number, number] = [0, 0];
     let id = 0;
-    for (let sy = spacing / 2; sy < DISH_HEIGHT; sy += spacing) {
-      for (let sx = spacing / 2; sx < DISH_WIDTH; sx += spacing) {
+    for (let sy = spacing / 2; sy < this.height; sy += spacing) {
+      for (let sx = spacing / 2; sx < this.width; sx += spacing) {
         let x = sx + (hash3(0x11ae, Math.round(sx), Math.round(sy)) / 4294967296 - 0.5) * spacing * 0.8;
         let y = sy + (hash3(0x22be, Math.round(sx), Math.round(sy)) / 4294967296 - 0.5) * spacing * 0.8;
         if (x < vx0 - spacing || x > vx1 + spacing || y < vy0 - spacing || y > vy1 + spacing) continue;
-        if (x < 0 || y < 0 || x >= DISH_WIDTH || y >= DISH_HEIGHT || isBlocked(w.partitions, x, y)) continue;
+        if (x < 0 || y < 0 || x >= this.width || y >= this.height || isBlocked(w.partitions, x, y)) continue;
         id++;
         let last = -1;
         for (let n = 0; n < LINE_MAX_POINTS; n++) {
@@ -1754,7 +1765,7 @@ export class WorldRenderer {
           const sp = Math.hypot(v[0], v[1]);
           if (sp < minSpeed) break;
           const nx = x + (v[0] / sp) * LINE_STEP, ny = y + (v[1] / sp) * LINE_STEP;
-          if (nx < 0 || ny < 0 || nx >= DISH_WIDTH || ny >= DISH_HEIGHT || isBlocked(w.partitions, nx, ny)) break;
+          if (nx < 0 || ny < 0 || nx >= this.width || ny >= this.height || isBlocked(w.partitions, nx, ny)) break;
           const c = sp < ref * LINE_CLASSES[0] ? 0 : sp < ref * LINE_CLASSES[1] ? 1 : 2;
           if (c !== last) { paths[c].moveTo(x, y); last = c; }
           paths[c].lineTo(nx, ny);
@@ -1774,17 +1785,20 @@ export class WorldRenderer {
     const h = Math.round(mini.clientHeight * this.dpr);
     if (mini.width !== w || mini.height !== h) { mini.width = w; mini.height = h; }
     const m = mini.getContext('2d')!;
-    const s = w / DISH_WIDTH;
-    m.setTransform(s, 0, 0, s, 0, 0);
+    const s = Math.min(w / this.width, h / this.height);
+    const ox = (w - s * this.width) / 2, oy = (h - s * this.height) / 2;
+    m.setTransform(1, 0, 0, 1, 0, 0); m.clearRect(0, 0, w, h);
+    m.setTransform(s, 0, 0, s, ox, oy);
+    m.save(); m.beginPath(); this.traceDish(m); m.clip();
     m.globalCompositeOperation = 'source-over';
-    m.drawImage(this.base, 0, 0, DISH_WIDTH, DISH_HEIGHT);
+    m.drawImage(this.base, 0, 0, this.width, this.height);
     m.globalCompositeOperation = 'multiply';
     m.fillStyle = rgb(SHADE_COLOR);
-    m.fillRect(0, 0, DISH_WIDTH, DISH_HEIGHT);
+    m.fillRect(0, 0, this.width, this.height);
     m.globalCompositeOperation = 'source-over';
     m.save();
     m.clip(this.lastSpots);
-    m.drawImage(this.base, 0, 0, DISH_WIDTH, DISH_HEIGHT);
+    m.drawImage(this.base, 0, 0, this.width, this.height);
     m.restore();
     m.fillStyle = 'rgba(214, 230, 245, 0.9)';
     m.fill(this.parts);
@@ -1792,14 +1806,17 @@ export class WorldRenderer {
     const [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
     m.lineWidth = 2 * this.dpr / s;
     m.strokeStyle = '#ffffff';
-    m.strokeRect(Math.max(0, x0), Math.max(0, y0), Math.min(DISH_WIDTH, x1) - Math.max(0, x0), Math.min(DISH_HEIGHT, y1) - Math.max(0, y0));
+    m.strokeRect(Math.max(0, x0), Math.max(0, y0), Math.min(this.width, x1) - Math.max(0, x0), Math.min(this.height, y1) - Math.max(0, y0));
+    m.restore();
   }
 
   /** Точка мини-карты (координаты окна) → центр вида там. */
   centerFromMinimap(mini: HTMLCanvasElement, clientX: number, clientY: number): void {
     const r = mini.getBoundingClientRect();
-    const x = ((clientX - r.left) / r.width) * DISH_WIDTH;
-    const y = ((clientY - r.top) / r.height) * DISH_HEIGHT;
+    const s = Math.min(r.width / this.width, r.height / this.height);
+    const x = (clientX - r.left - (r.width - s * this.width) / 2) / s;
+    const y = (clientY - r.top - (r.height - s * this.height) / 2) / s;
+    if (!insideDish(this.world.dish, x, y)) return;
     this.setView(this.zoom, x, y);
   }
 
@@ -1810,29 +1827,38 @@ export class WorldRenderer {
     const solid = new Path2D();
     // Обод чашки: внешний прямоугольник минус внутренний (правило even-odd),
     // стекло с бликом — светлее к углам.
-    solid.rect(-W, -W, DISH_WIDTH + 2 * W, DISH_HEIGHT + 2 * W);
-    solid.rect(0, 0, DISH_WIDTH, DISH_HEIGHT);
-    const gloss = ctx.createLinearGradient(-W, -W, DISH_WIDTH + W, DISH_HEIGHT + W);
+    if (this.world.dish.shape === 'circle') {
+      solid.arc(this.width / 2, this.height / 2, this.width / 2 + W, 0, Math.PI * 2);
+      solid.moveTo(this.width, this.height / 2);
+      solid.arc(this.width / 2, this.height / 2, this.width / 2, 0, Math.PI * 2);
+    } else {
+      solid.rect(-W, -W, this.width + 2 * W, this.height + 2 * W);
+      solid.rect(0, 0, this.width, this.height);
+    }
+    const gloss = ctx.createLinearGradient(-W, -W, this.width + W, this.height + W);
     gloss.addColorStop(0, GLASS_GLOSS_FROM);
     gloss.addColorStop(0.5, GLASS_GLOSS_TO);
     gloss.addColorStop(1, GLASS_GLOSS_FROM);
     ctx.fillStyle = gloss;
     ctx.fill(solid, 'evenodd');
     ctx.fillStyle = GLASS_FILL;
-    ctx.fill(this.parts);
+    ctx.save(); ctx.beginPath(); this.traceDish(ctx); ctx.clip(); ctx.fill(this.parts); ctx.restore();
 
     const half = this.px(0.5);
     ctx.lineWidth = this.px(1);
     ctx.strokeStyle = GLASS_EDGE;
-    ctx.strokeRect(-W + half, -W + half, DISH_WIDTH + 2 * W - 2 * half, DISH_HEIGHT + 2 * W - 2 * half);
+    if (this.world.dish.shape === 'circle') {
+      ctx.beginPath(); ctx.arc(this.width / 2, this.height / 2, this.width / 2 + W - half, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); this.traceDish(ctx); ctx.stroke();
+    } else ctx.strokeRect(-W + half, -W + half, this.width + 2 * W - 2 * half, this.height + 2 * W - 2 * half);
     // Как у стекла: тёмный контур по краю (виден на светлом) и светлый блик
     // поверх него (виден на тёмном).
     ctx.strokeStyle = GLASS_SHADOW;
     ctx.lineWidth = this.px(2);
-    ctx.stroke(this.edges);
+    ctx.save(); ctx.beginPath(); this.traceDish(ctx); ctx.clip(); ctx.stroke(this.edges); ctx.restore();
     ctx.strokeStyle = GLASS_EDGE;
     ctx.lineWidth = this.px(0.75);
-    ctx.stroke(this.edges);
+    ctx.save(); ctx.beginPath(); this.traceDish(ctx); ctx.clip(); ctx.stroke(this.edges); ctx.restore();
   }
 
   /** Перегородки — прямоугольники-отрезки толщиной стенки с квадратными концами. */
@@ -1852,11 +1878,11 @@ export class WorldRenderer {
   /** Маска воды для бликов: непрозрачна в воде, гаснет к отмели, пуста на суше и перегородках. */
   private buildWaterMask(): HTMLCanvasElement {
     const c = document.createElement('canvas');
-    c.width = DISH_WIDTH / WATER_MASK_STEP;
-    c.height = DISH_HEIGHT / WATER_MASK_STEP;
+    c.width = this.width / WATER_MASK_STEP;
+    c.height = this.height / WATER_MASK_STEP;
     const mctx = c.getContext('2d')!;
-    for (let y0 = 0; y0 < DISH_HEIGHT; y0 += REDRAW_BLOCK) {
-      for (let x0 = 0; x0 < DISH_WIDTH; x0 += REDRAW_BLOCK) mctx.putImageData(this.waterMaskBlock(x0, y0), x0 / WATER_MASK_STEP, y0 / WATER_MASK_STEP);
+    for (let y0 = 0; y0 < this.height; y0 += REDRAW_BLOCK) {
+      for (let x0 = 0; x0 < this.width; x0 += REDRAW_BLOCK) mctx.putImageData(this.waterMaskBlock(x0, y0), x0 / WATER_MASK_STEP, y0 / WATER_MASK_STEP);
     }
     return c;
   }
@@ -1869,7 +1895,7 @@ export class WorldRenderer {
     for (let j = 0; j < n; j++) {
       for (let i = 0; i < n; i++) {
         const x = x0 + (i + 0.5) * step, y = y0 + (j + 0.5) * step;
-        const inside = x < DISH_WIDTH && y < DISH_HEIGHT;
+        const inside = x < this.width && y < this.height;
         const water = !inside || isBlocked(this.world.partitions, x, y) ? 0 : 1 - smoothstep(0.35, 0.95, smoothLevelAt(this.world.viscosity, x, y));
         const k = (j * n + i) * 4;
         img.data[k] = img.data[k + 1] = img.data[k + 2] = 255;
@@ -1894,14 +1920,14 @@ export class WorldRenderer {
     for (let j = 0; j < lay.rows; j++) {
       for (let i = 0; i < lay.cols; i++) {
         if (solid(i, j)) continue;
-        const x = Math.min(i * c, DISH_WIDTH);
-        const y = Math.min(j * c, DISH_HEIGHT);
-        const x1 = Math.min((i + 1) * c, DISH_WIDTH);
-        const y1 = Math.min((j + 1) * c, DISH_HEIGHT);
-        if (solid(i - 1, j)) { path.moveTo(x, y); path.lineTo(x, y1); }
-        if (solid(i + 1, j)) { path.moveTo(x1, y); path.lineTo(x1, y1); }
-        if (solid(i, j - 1)) { path.moveTo(x, y); path.lineTo(x1, y); }
-        if (solid(i, j + 1)) { path.moveTo(x, y1); path.lineTo(x1, y1); }
+        const x = Math.min(i * c, this.width);
+        const y = Math.min(j * c, this.height);
+        const x1 = Math.min((i + 1) * c, this.width);
+        const y1 = Math.min((j + 1) * c, this.height);
+        if (solid(i - 1, j) && cellInsideDish(lay.dish, (i - 1) * c, j * c, c)) { path.moveTo(x, y); path.lineTo(x, y1); }
+        if (solid(i + 1, j) && cellInsideDish(lay.dish, (i + 1) * c, j * c, c)) { path.moveTo(x1, y); path.lineTo(x1, y1); }
+        if (solid(i, j - 1) && cellInsideDish(lay.dish, i * c, (j - 1) * c, c)) { path.moveTo(x, y); path.lineTo(x1, y); }
+        if (solid(i, j + 1) && cellInsideDish(lay.dish, i * c, (j + 1) * c, c)) { path.moveTo(x, y1); path.lineTo(x1, y1); }
       }
     }
     return path;

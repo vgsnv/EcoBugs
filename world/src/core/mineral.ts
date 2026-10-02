@@ -12,7 +12,7 @@
  * назначения; в перегородки не попадает.
  */
 import {
-  DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_BURST, ERUPTION_TAIL_AREA, ERUPTION_BURSTS_MAX, BURST_WIDTH, BURST_FROM, THROW_RAYS, THROW_SAMPLES, MINERAL_SPREAD,
+  ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_BURST, ERUPTION_TAIL_AREA, ERUPTION_BURSTS_MAX, BURST_WIDTH, BURST_FROM, THROW_RAYS, THROW_SAMPLES, MINERAL_SPREAD,
   MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_SINK_SETTLE, MINERAL_LAYER, MINERAL_MOBILITY, TRANSPORT_SUBSTEPS, DRIFT_REFERENCE, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
   FUNNEL_DEPOSIT, FUNNEL_SHAPE, FUNNEL_MIN_CELLS, FUNNEL_HOLE_SHARE, FUNNEL_RAMP, FUNNEL_REACH, FUNNEL_DRAW, FUNNEL_LIFT, FUNNEL_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
   VOLCANO_MIN_GAP, VOLCANO_POWER, VOLCANO_BIRTH, VOLCANO_MATURE, VOLCANO_EXTINCT_CHANCE, VOLCANO_WAKE_CHANCE, VOLCANO_DORMANT_LIFE, VOLCANO_FADE, VOLCANO_DEPOSIT_AVOID,
@@ -21,6 +21,7 @@ import type { Drift } from './drift.ts';
 import { sunAt, type LightMap } from './light.ts';
 import { moveGround, type TerrainState } from './terrain.ts';
 import type { WorldParams } from './params.ts';
+import { cellInsideDish, dishOf } from './dish.ts';
 import { freeRegions, isBlocked, type PartitionLayout } from './partitions.ts';
 import { Rng, deriveSeed, hash3 } from './prng.ts';
 import { multiplierForLevel } from './viscosity.ts';
@@ -105,7 +106,7 @@ export function volcanoFromNumbers(m: MineralState, params: WorldParams, n: unkn
   if (!Array.isArray(n) || n.length !== 14 || !n.every((x) => typeof x === 'number' && Number.isFinite(x))) return null;
   const [id, x, y, power, stage, stageAt, stageUntil, fresh, k, begin, until, total, left, rate] = n as number[];
   if (!Number.isSafeInteger(id) || !Number.isInteger(stage) || stage < 0 || stage > 3 || (fresh !== 0 && fresh !== 1) || !Number.isSafeInteger(k)) return null;
-  if (x < 0 || y < 0 || x > DISH_WIDTH || y > DISH_HEIGHT || power <= 0 || total < 0 || left < 0) return null;
+  if (x < 0 || y < 0 || x >= dishOf(params).width || y >= dishOf(params).height || power <= 0 || total < 0 || left < 0) return null;
   const v: Volcano = { id, x, y, power, stage: VOLCANO_STAGES[stage], stageAt, stageUntil, fresh: fresh === 1, radius: 0, k, begin, until, total, left, rate };
   // Радиус выброса не хранится — выводится из объёма идущего извержения.
   if (v.stage === 'erupting') v.radius = eruptionRadius(m, params, v.total);
@@ -211,38 +212,36 @@ function mobilityFor(level: Float32Array): Float64Array {
 /** Насколько далеко (клеток) от преграды проверять путь переноса: дальше, чем течение уносит за обновление. */
 const NEAR_WALL = 6;
 
-function nearWalls(blocked: Uint8Array): Uint8Array {
+function nearWalls(blocked: Uint8Array, cols: number, rows: number): Uint8Array {
   const out = new Uint8Array(blocked.length);
-  for (let j = 0; j < ROWS; j++) {
-    for (let i = 0; i < COLS; i++) {
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) {
       let near = 0;
       for (let dj = -NEAR_WALL; dj <= NEAR_WALL && !near; dj++) {
         for (let di = -NEAR_WALL; di <= NEAR_WALL; di++) {
           const a = i + di, b = j + dj;
-          if (a < 0 || b < 0 || a >= COLS || b >= ROWS || blocked[b * COLS + a]) { near = 1; break; }
+          if (a < 0 || b < 0 || a >= cols || b >= rows || blocked[b * cols + a]) { near = 1; break; }
         }
       }
-      out[j * COLS + i] = near;
+      out[j * cols + i] = near;
     }
   }
   return out;
 }
 
-const COLS = Math.ceil(DISH_WIDTH / MINERAL_CELL);
-const ROWS = Math.ceil(DISH_HEIGHT / MINERAL_CELL);
-
 export function createMineral(params: WorldParams, partitions: PartitionLayout): MineralState {
   const cell = MINERAL_CELL;
-  const n = COLS * ROWS;
+  const cols = Math.ceil(partitions.dish.width / cell), rows = Math.ceil(partitions.dish.height / cell);
+  const n = cols * rows;
   const blocked = new Uint8Array(n);
   const region = new Int32Array(n).fill(-1);
   const { labels } = freeRegions(partitions);
   let freeCells = 0;
-  for (let j = 0; j < ROWS; j++) {
-    for (let i = 0; i < COLS; i++) {
-      const k = j * COLS + i;
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) {
+      const k = j * cols + i;
       const x = (i + 0.5) * cell, y = (j + 0.5) * cell;
-      if (isBlocked(partitions, x, y)) { blocked[k] = 1; continue; }
+      if (!cellInsideDish(partitions.dish, i * cell, j * cell, cell) || isBlocked(partitions, x, y)) { blocked[k] = 1; continue; }
       region[k] = labels[Math.floor(y / partitions.cell) * partitions.cols + Math.floor(x / partitions.cell)];
       freeCells++;
     }
@@ -255,7 +254,7 @@ export function createMineral(params: WorldParams, partitions: PartitionLayout):
   const field = new Float64Array(n);
 
   const threshold = total * ERUPTION_PRESSURE * (0.5 + hash3(deriveSeed(params.seed, 'eruptions'), -1, 4) / 4294967296);
-  return { cols: COLS, rows: ROWS, cell, field, depths: total, threshold, eruptions: 0, genesis: true, volcanoes: [], births: 0, funnels: [], funnelBirths: 0, flow: null, version: 0, blocked, nearWall: nearWalls(blocked), region, freeArea };
+  return { cols: cols, rows: rows, cell, field, depths: total, threshold, eruptions: 0, genesis: true, volcanoes: [], births: 0, funnels: [], funnelBirths: 0, flow: null, version: 0, blocked, nearWall: nearWalls(blocked, cols, rows), region, freeArea };
 }
 
 /**

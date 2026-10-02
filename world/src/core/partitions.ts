@@ -7,6 +7,7 @@
  * Конец перегородки прикреплён, если лежит на стенке или на другой перегородке.
  */
 import { PARTITION_CELL, PARTITION_THICKNESS } from './constants.ts';
+import { cellInsideDish, insideDish, type Dish } from './dish.ts';
 import { deriveSeed } from './prng.ts';
 
 /** Вершина ломаной в долях ширины и высоты чашки. */
@@ -110,6 +111,7 @@ export interface Partition {
 
 export interface PartitionLayout {
   readonly preset: LayoutPreset;
+  readonly dish: Dish;
   readonly partitions: readonly Partition[];
   readonly thickness: number;
   /** Растр: 1 — ячейка занята перегородкой. */
@@ -130,7 +132,8 @@ export function distToSegment(px: number, py: number, ax: number, ay: number, bx
   return Math.hypot(px - (ax + dx * u), py - (ay + dy * u));
 }
 
-function onWall(p: readonly [number, number], width: number, height: number): boolean {
+function onWall(p: readonly [number, number], width: number, height: number, circle: boolean): boolean {
+  if (circle) return Math.abs(Math.hypot(p[0] - width / 2, p[1] - height / 2) - width / 2) <= EPS;
   return p[0] <= EPS || p[1] <= EPS || p[0] >= width - EPS || p[1] >= height - EPS;
 }
 
@@ -154,12 +157,26 @@ export function densify(points: readonly (readonly [number, number])[], step: nu
   return out;
 }
 
-export function buildLayout(preset: LayoutPreset, width: number, height: number): PartitionLayout {
+/** Геометрия планировки, общая для модели и лёгкой схемы в интерфейсе. */
+export function layoutPartitions(preset: LayoutPreset, dish: Dish): readonly Partition[] {
+  const { width, height } = dish;
+  const circle = dish.shape === 'circle';
   // Вершины выравниваются по сетке растра (стенки чашки — точно по краю):
   // тогда растр перегородок совпадает с их геометрией без зазоров.
   const cell = PARTITION_CELL;
   const snap = (f: number, size: number) => (f <= 0 ? 0 : f >= 1 ? size : Math.min(size, Math.round((f * size) / cell) * cell));
-  const polylines = preset.partitions.map((verts) => verts.map(([u, v]) => [snap(u, width), snap(v, height)] as [number, number]));
+  const inset = (f: number) => circle ? 0.5 + (f - 0.5) / Math.SQRT2 : f;
+  const polylines = preset.partitions.map((verts) => {
+    const points = verts.map(([u, v]) => [snap(inset(u), width), snap(inset(v), height)] as [number, number]);
+    if (circle) for (const end of [0, points.length - 1]) {
+      const [u, v] = verts[end];
+      const p = points[end], near = points[end === 0 ? 1 : end - 1];
+      const r = width / 2;
+      if ((u === 0 || u === 1) && p[1] === near[1]) p[0] = r + (u === 0 ? -1 : 1) * Math.sqrt(r * r - (p[1] - r) ** 2);
+      else if ((v === 0 || v === 1) && p[0] === near[0]) p[1] = r + (v === 0 ? -1 : 1) * Math.sqrt(r * r - (p[0] - r) ** 2);
+    }
+    return points;
+  });
   polylines.forEach((pts, pi) => {
     for (let s = 1; s < pts.length; s++) {
       const horizontal = Math.abs(pts[s][1] - pts[s - 1][1]) <= EPS;
@@ -169,13 +186,23 @@ export function buildLayout(preset: LayoutPreset, width: number, height: number)
   });
   const partitions: Partition[] = polylines.map((pts, pi) => {
     const others = polylines.filter((_, k) => k !== pi);
-    const attachedEnd = (p: readonly [number, number]) => onWall(p, width, height) || others.some((o) => onPolyline(p, o));
+    const attachedEnd = (p: readonly [number, number]) => onWall(p, width, height, circle) || others.some((o) => onPolyline(p, o));
     return { points: pts, attached: [attachedEnd(pts[0]), attachedEnd(pts[pts.length - 1])] };
   });
 
+  return partitions;
+}
+
+export function buildLayout(preset: LayoutPreset, dish: Dish): PartitionLayout {
+  const { width, height } = dish;
+  const cell = PARTITION_CELL;
+  const partitions = layoutPartitions(preset, dish);
   const cols = Math.ceil(width / cell);
   const rows = Math.ceil(height / cell);
   const blocked = new Uint8Array(cols * rows);
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    if (!cellInsideDish(dish, i * cell, j * cell, cell)) blocked[j * cols + i] = 1;
+  }
   const reach = PARTITION_THICKNESS / 2;
   for (const part of partitions) {
     for (let s = 1; s < part.points.length; s++) {
@@ -193,7 +220,7 @@ export function buildLayout(preset: LayoutPreset, width: number, height: number)
       for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) blocked[j * cols + i] = 1;
     }
   }
-  return { preset, partitions, thickness: PARTITION_THICKNESS, cols, rows, cell, blocked };
+  return { preset, dish, partitions, thickness: PARTITION_THICKNESS, cols, rows, cell, blocked };
 }
 
 /**
@@ -230,6 +257,7 @@ export function freeRegions(layout: PartitionLayout): { labels: Int32Array; size
 
 /** Занята ли точка чашки перегородкой (по растру); за пределами чашки — стена. */
 export function isBlocked(layout: PartitionLayout, x: number, y: number): boolean {
+  if (!insideDish(layout.dish, x, y)) return true;
   const i = Math.floor(x / layout.cell);
   const j = Math.floor(y / layout.cell);
   if (i < 0 || j < 0 || i >= layout.cols || j >= layout.rows) return true;

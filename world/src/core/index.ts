@@ -16,3 +16,5 @@ export * from './mineral.ts';
 export * from './terrain.ts';
 export * from './save.ts';
 export * from './world.ts';
+
+export * from './dish.ts';

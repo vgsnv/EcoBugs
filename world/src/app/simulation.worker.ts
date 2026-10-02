@@ -24,7 +24,7 @@ function publish(initial = false, force = false): void {
   const drift = key !== driftKey || initial ? world.drift.nodes(world.step) : undefined;
   const message: SimulationSnapshot = structuredClone({
     type: 'snapshot', epoch,
-    ...(initial ? { initial: { params: world.params, light: world.light, partitions: world.partitions } } : {}),
+    ...(initial ? { initial: { dish: world.dish, params: world.params, light: world.light, partitions: world.partitions } } : {}),
     ...(showProcesses ? { processes: mineralProcesses(world.mineral) } : {}),
     step: world.step, mineral: world.mineral, terrain: world.terrain, viscosity: world.viscosity,
     ...(drift ? { drift: { a: drift.a, b: drift.b } } : {}), rate: paused ? 0 : rate, behind,

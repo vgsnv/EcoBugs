@@ -1,7 +1,7 @@
 /**
  * Мир: параметры + номер шага. Всё остальное строится из сида детерминированно.
  */
-import { DISH_HEIGHT, DISH_WIDTH } from './constants.ts';
+import { dishOf, type Dish } from './dish.ts';
 import { mix32 } from './prng.ts';
 import { type WorldParams, validateParams } from './params.ts';
 import { type LightMap, createLightMap, lightAt } from './light.ts';
@@ -14,6 +14,7 @@ import { applyLevels } from './viscosity.ts';
 import { createMineral, transparencyAt, updateMineral, volcanoNumbers, funnelNumbers, type MineralState } from './mineral.ts';
 
 export interface World {
+  readonly dish: Dish;
   readonly params: Readonly<WorldParams>;
   /** Возраст мира — число прошедших шагов, отсчёт с нуля. */
   step: number;
@@ -45,13 +46,14 @@ export function createWorld(params: WorldParams): World {
   const own = structuredClone(params);
   const light = createLightMap(own);
   const viscosity = createViscosityMap(own);
-  const partitions = buildLayout(layoutForSeed(own.seed), DISH_WIDTH, DISH_HEIGHT);
+  const dish = dishOf(own);
+  const partitions = buildLayout(layoutForSeed(own.seed), dish);
   const mineral = createMineral(own, partitions);
   const terrain = createTerrain(own, viscosity, mineral.cols, mineral.rows, mineral.cell, mineral.blocked);
   // С самого начала карта собрана из уровня грунта — как и после каждой пересборки.
   applyLevels(viscosity, terrain.applied, mineral.cols, mineral.rows, mineral.cell);
   return {
-    params: own, step: 0, light, viscosity, partitions,
+    dish, params: own, step: 0, light, viscosity, partitions,
     drift: new Drift({ params: own, light, viscosity, partitions }),
     mineral,
     terrain,
@@ -114,10 +116,11 @@ export function hashNumbers(values: Iterable<number>): number {
 }
 
 /** Контрольная сумма состояния: одинаковые миры дают одинаковую сумму. */
-export function worldHash(world: World): number {
+export function worldHash(world: World, legacyV18 = false): number {
   const p = world.params;
   return hashNumbers([
-    p.seed, DISH_WIDTH, DISH_HEIGHT, p.sun, p.lightDrift, p.sunRhythm, p.sunPeriod, p.backgroundLevel, p.illumination, p.spotSize,
+    p.seed, world.dish.width, world.dish.height,
+    ...(legacyV18 ? [] : [p.shape === 'circle' ? 1 : 0, p.aspectRatio]), p.sun, p.lightDrift, p.sunRhythm, p.sunPeriod, p.backgroundLevel, p.illumination, p.spotSize,
     p.baseTemperature, p.spotHeat,
     p.viscosityShares.water, p.viscosityShares.shallows, p.viscosityShares.land,
     p.viscosityZoneSize, p.mineralStock, p.terrainSpeed, p.quakeInterval,

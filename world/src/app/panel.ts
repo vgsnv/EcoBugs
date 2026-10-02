@@ -4,7 +4,7 @@
  * они задаются при сотворении, поэтому правки копятся в черновике и
  * применяются кнопкой «Создать мир».
  */
-import { LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type WorldParams } from '../core/index.ts';
+import { layoutPartitions, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type WorldParams } from '../core/index.ts';
 import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render.ts';
 
 export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
@@ -293,6 +293,60 @@ export class Panel {
   }
 
   private worldFields(): HTMLElement[] {
+    const shape = el('select', { ariaLabel: 'Форма чашки' });
+    shape.append(el('option', { value: 'rectangle', textContent: 'Прямоугольник' }), el('option', { value: 'circle', textContent: 'Круг' }));
+    const ratios = el('select', { ariaLabel: 'Пропорции чашки' });
+    const pairs = [[4, 3], [16, 9], [1, 1], [9, 16], [3, 4]];
+    for (const [w, h] of pairs) ratios.append(el('option', { value: String(w / h), textContent: `${w}:${h}` }));
+    ratios.append(el('option', { value: 'custom', textContent: 'Свои пропорции' }));
+    const rw = el('input', { type: 'number', min: '0.1', step: 'any', ariaLabel: 'Ширина пропорции' });
+    const rh = el('input', { type: 'number', min: '0.1', step: 'any', ariaLabel: 'Высота пропорции' });
+    const custom = el('span', { className: 'row' }, rw, el('span', { textContent: ':' }), rh);
+    const screen = el('button', { textContent: 'По области карты', title: 'Взять пропорции текущей области карты; после создания они останутся постоянными' });
+    const size = el('span', { className: 'note' });
+    let rectangleRatio = 4 / 3;
+    const syncShape = () => {
+      shape.value = this.draft.shape;
+      const r = this.draft.aspectRatio;
+      const pair = pairs.find(([w, h]) => Math.abs(w / h - r) < 1e-9);
+      ratios.value = pair ? String(pair[0] / pair[1]) : 'custom';
+      let shown = pair;
+      if (!shown) for (let h = 1; h <= 1000; h++) {
+        const w = Math.round(r * h);
+        if (Math.abs(w / h - r) < 1e-10) { shown = [w, h]; break; }
+      }
+      rw.value = String(shown ? shown[0] : r); rh.value = String(shown ? shown[1] : 1);
+      ratios.disabled = screen.disabled = this.draft.shape === 'circle';
+      custom.hidden = this.draft.shape === 'circle' || !!pair;
+      if (this.draft.shape === 'rectangle') rectangleRatio = r;
+    };
+    shape.addEventListener('change', () => {
+      this.draft.shape = shape.value as WorldParams['shape'];
+      this.draft.aspectRatio = this.draft.shape === 'circle' ? 1 : rectangleRatio;
+      syncShape(); this.refresh();
+    });
+    ratios.addEventListener('change', () => {
+      if (ratios.value === 'custom') { custom.hidden = false; return; }
+      this.draft.aspectRatio = Number(ratios.value); syncShape(); this.refresh();
+    });
+    const customRatio = () => { this.draft.aspectRatio = rectangleRatio = Number(rw.value) / Number(rh.value); this.refresh(); };
+    rw.addEventListener('input', customRatio); rh.addEventListener('input', customRatio);
+    screen.addEventListener('click', () => {
+      const rect = document.querySelector('.stage')!.getBoundingClientRect();
+      this.draft.aspectRatio = Math.min(4, Math.max(0.25, rect.width / rect.height));
+      syncShape(); this.refresh();
+    });
+    this.inputs.push(syncShape);
+    const updateSize = () => {
+      const r = this.draft.aspectRatio;
+      if (!Number.isFinite(r) || r < 0.25 || r > 4) { size.textContent = 'Пропорции от 1:4 до 4:1'; return; }
+      const d = dishOf(this.draft);
+      size.textContent = this.draft.shape === 'circle' ? `Диаметр ${Math.round(d.width)} · площадь 1 920 000` : `${Math.round(d.width)} × ${Math.round(d.height)} · площадь 1 920 000`;
+    };
+    shape.addEventListener('change', updateSize); ratios.addEventListener('change', updateSize);
+    rw.addEventListener('input', updateSize); rh.addEventListener('input', updateSize); screen.addEventListener('click', updateSize);
+    this.inputs.push(updateSize);
+    syncShape(); updateSize();
     const seed = el('input', { type: 'number', min: '0', max: String(0xffffffff), step: '1' });
     const random = el('button', { textContent: 'Случайный' });
 
@@ -306,6 +360,8 @@ export class Panel {
       seed.value = String(this.draft.seed);
     });
     return [
+      this.mark(el('label', {}, this.caption('Форма чашки', 'Круглая или прямоугольная граница мира. Площадь одинакова; форма фиксируется при создании.'), shape), () => this.draft.shape !== this.current.shape),
+      this.mark(el('label', {}, this.caption('Пропорции', 'Ширина к высоте, от 1:4 до 4:1. У круга всегда 1:1; изменение окна не меняет созданный мир.'), ratios, custom, screen, size), () => this.draft.aspectRatio !== this.current.aspectRatio),
       this.mark(el('label', {}, this.caption('Сид', 'Из него строится вся случайность мира: один сид — один и тот же мир.'), el('span', { className: 'row' }, seed, random)),
         () => this.draft.seed !== this.current.seed),
       el('div', { className: 'layout' },
@@ -420,7 +476,10 @@ export class Panel {
   private showLayout(): void {
     const seed = this.draft.seed;
     const svg = this.layoutPreview;
-    const W = 160, H = 120;
+    const ratio = this.draft.aspectRatio;
+    if (!Number.isFinite(ratio) || ratio < 0.25 || ratio > 4) { svg.replaceChildren(); this.layoutLabel.textContent = '—'; return; }
+    const dish = dishOf(this.draft);
+    const W = 160, H = 160 * dish.height / dish.width;
     svg.setAttribute('viewBox', `-3 -3 ${W + 6} ${H + 6}`);
     if (!Number.isInteger(seed) || seed < 0 || seed > 0xffffffff) {
       this.layoutLabel.textContent = '—';
@@ -436,8 +495,8 @@ export class Panel {
       return node;
     };
     svg.replaceChildren(
-      make('rect', { x: 0, y: 0, width: W, height: H, class: 'dish' }),
-      ...preset.partitions.map((verts) => make('polyline', { points: verts.map(([u, v]) => `${u * W},${v * H}`).join(' '), class: 'wall' })),
+      this.draft.shape === 'circle' ? make('circle', { cx: W / 2, cy: H / 2, r: W / 2, class: 'dish' }) : make('rect', { x: 0, y: 0, width: W, height: H, class: 'dish' }),
+      ...layoutPartitions(preset, dish).map((part) => make('polyline', { points: part.points.map(([x, y]) => `${x * W / dish.width},${y * H / dish.height}`).join(' '), class: 'wall' })),
     );
   }
 

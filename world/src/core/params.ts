@@ -16,6 +16,9 @@ export interface ViscosityShares {
 export interface WorldParams {
   /** Вся случайность мира. */
   seed: number;
+  shape: 'rectangle' | 'circle';
+  /** Ширина / высота; у круга всегда 1. */
+  aspectRatio: number;
   /** Яркость света в пятнах. */
   sun: number;
   /** Скорость дрейфа света: множитель общего сдвига карты и собственного дрейфа пятен; 0 — свет стоит. */
@@ -48,6 +51,8 @@ export interface WorldParams {
 
 export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
   seed: 1,
+  shape: 'rectangle',
+  aspectRatio: 4 / 3,
   sun: 1,
   lightDrift: 1,
   sunRhythm: 0.4,
@@ -69,6 +74,7 @@ export function makeParams(overrides: Partial<WorldParams> = {}): WorldParams {
   return {
     ...DEFAULT_PARAMS,
     ...overrides,
+    ...(overrides.shape === 'circle' ? { aspectRatio: 1 } : {}),
     viscosityShares: { ...DEFAULT_PARAMS.viscosityShares, ...overrides.viscosityShares },
   };
 }
@@ -76,6 +82,8 @@ export function makeParams(overrides: Partial<WorldParams> = {}): WorldParams {
 /** Названия параметров для сообщений об ошибках. */
 export const PARAM_LABELS: Readonly<Record<string, string>> = {
   'seed': 'Сид',
+  'shape': 'Форма чашки',
+  'aspectRatio': 'Пропорции чашки',
   'sun': 'Солнце',
   'backgroundLevel': 'Яркость фона',
   'illumination': 'Освещённость',
@@ -117,6 +125,9 @@ export function validateParams(p: WorldParams): string[] {
   if (!Number.isInteger(p.seed) || p.seed < 0 || p.seed > 0xffffffff) {
     errors.push(`Сид: ожидается целое от 0 до ${0xffffffff}`);
   }
+  if (p.shape !== 'rectangle' && p.shape !== 'circle') errors.push('Форма чашки: ожидается прямоугольник или круг');
+  inRange('aspectRatio', p.aspectRatio, 0.25, 4);
+  if (p.shape === 'circle' && p.aspectRatio !== 1) errors.push('Пропорции круглой чашки: ожидается 1:1');
   inRange('sun', p.sun, 0, 100, true);
   inRange('backgroundLevel', p.backgroundLevel, 0, 1, true);
   inRange('illumination', p.illumination, 0, 1, true);

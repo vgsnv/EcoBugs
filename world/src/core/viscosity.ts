@@ -1,3 +1,4 @@
+import { dishOf, insideDish } from './dish.ts';
 /**
  * Карта вязкости (спецификация, раздел «Вязкость»): три градации — вода, отмель,
  * суша; названия условны. Градация задаёт месту два свойства: сопротивление
@@ -9,7 +10,6 @@
  * TERRAIN_PERIOD шагов карта пересобирается из уровня грунта (applyLevels).
  */
 import {
-  DISH_HEIGHT, DISH_WIDTH,
   LIGHT_ABSORPTION, SHALLOWS_RING_MIN, VISCOSITY_BLUR, VISCOSITY_CELL, VISCOSITY_MULTIPLIERS,
 } from './constants.ts';
 import { periodicFbm } from './noise.ts';
@@ -22,6 +22,7 @@ export const LAND = 2;
 export type Gradation = typeof WATER | typeof SHALLOWS | typeof LAND;
 
 export interface ViscosityMap {
+  readonly active: Uint8Array;
   readonly cols: number;
   readonly rows: number;
   /** Размер ячейки, единиц мира. */
@@ -99,22 +100,26 @@ function boxBlur(src: Float32Array, cols: number, rows: number, radius: number):
 }
 
 export function createViscosityMap(params: WorldParams): ViscosityMap {
+  const dish = dishOf(params);
+  const { width, height } = dish;
   const cell = VISCOSITY_CELL;
-  const cols = Math.ceil(DISH_WIDTH / cell);
-  const rows = Math.ceil(DISH_HEIGHT / cell);
+  const cols = Math.ceil(width / cell);
+  const rows = Math.ceil(height / cell);
   const n = cols * rows;
 
   // Плавное поле с масштабом «размера зон»: одна ячейка решётки шума ≈ две зоны.
-  const cellsX = Math.max(1, Math.round(DISH_WIDTH / (params.viscosityZoneSize * 2)));
-  const cellsY = Math.max(1, Math.round(DISH_HEIGHT / (params.viscosityZoneSize * 2)));
+  const cellsX = Math.max(1, Math.round(width / (params.viscosityZoneSize * 2)));
+  const cellsY = Math.max(1, Math.round(height / (params.viscosityZoneSize * 2)));
   const noise = periodicFbm(deriveSeed(params.seed, 'viscosity'), cellsX, cellsY, 4);
   const field = new Float32Array(n);
   for (let j = 0; j < rows; j++) {
     for (let i = 0; i < cols; i++) {
-      field[j * cols + i] = noise(((i + 0.5) * cell / DISH_WIDTH) * cellsX, ((j + 0.5) * cell / DISH_HEIGHT) * cellsY);
+      field[j * cols + i] = noise(((i + 0.5) * cell / width) * cellsX, ((j + 0.5) * cell / height) * cellsY);
     }
   }
-  const sorted = Float32Array.from(field).sort();
+  const active = Uint8Array.from(field, (_, k) => insideDish(dish, (k % cols + 0.5) * cell, (Math.floor(k / cols) + 0.5) * cell) ? 1 : 0);
+  const activeCount = active.reduce((a, b) => a + b, 0);
+  const sorted = Float32Array.from(field.filter((_, k) => active[k])).sort();
   const { land, shallows } = params.viscosityShares;
 
   // 1. Суша — самые высокие места поля.
@@ -128,12 +133,12 @@ export function createViscosityMap(params: WorldParams): ViscosityMap {
 
   // 3. Остальная отмель — следующие по высоте места; порог подбирается так,
   //    чтобы кольцо вместе с ними дало нужную долю.
-  const target = Math.round(n * shallows);
+  const target = Math.round(activeCount * shallows);
   let lo = -2;
   let hi = landThr === Infinity ? 2 : landThr;
   const countShallows = (thr: number) => {
     let c = 0;
-    for (let k = 0; k < n; k++) if (levels[k] !== LAND && (ring(k) || field[k] >= thr)) c++;
+    for (let k = 0; k < n; k++) if (active[k] && levels[k] !== LAND && (ring(k) || field[k] >= thr)) c++;
     return c;
   };
   if (shallows <= 0) {
@@ -155,10 +160,10 @@ export function createViscosityMap(params: WorldParams): ViscosityMap {
   const smooth = boxBlur(boxBlur(raw, cols, rows, VISCOSITY_BLUR), cols, rows, VISCOSITY_BLUR);
 
   const counts = [0, 0, 0];
-  for (let k = 0; k < n; k++) counts[levels[k]]++;
+  for (let k = 0; k < n; k++) if (active[k]) counts[levels[k]]++;
   return {
-    cols, rows, cell, levels, smooth,
-    shares: { water: counts[0] / n, shallows: counts[1] / n, land: counts[2] / n },
+    active, cols, rows, cell, levels, smooth,
+    shares: { water: counts[0] / activeCount, shallows: counts[1] / activeCount, land: counts[2] / activeCount },
     version: 0,
   };
 }
@@ -169,7 +174,7 @@ export function createViscosityMap(params: WorldParams): ViscosityMap {
  * непрерывен, поэтому между водой и сушей всегда проходит отмель.
  */
 export function applyLevels(map: ViscosityMap, level: Float32Array, cols: number, rows: number, cell: number): void {
-  const n = map.cols * map.rows;
+  const n = map.active.reduce((a, b) => a + b, 0);
   const counts = [0, 0, 0];
   for (let j = 0; j < map.rows; j++) {
     const fy = Math.min(rows - 1, Math.max(0, ((j + 0.5) * map.cell) / cell - 0.5));
@@ -184,7 +189,7 @@ export function applyLevels(map: ViscosityMap, level: Float32Array, cols: number
       map.smooth[k] = L;
       const g = L < 0.5 ? WATER : L < 1.5 ? SHALLOWS : LAND;
       map.levels[k] = g;
-      counts[g]++;
+      if (map.active[k]) counts[g]++;
     }
   }
   map.shares = { water: counts[0] / n, shallows: counts[1] / n, land: counts[2] / n };

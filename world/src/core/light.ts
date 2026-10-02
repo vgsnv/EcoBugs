@@ -1,3 +1,4 @@
+import { dishOf } from './dish.ts';
 /**
  * Карта света (спецификация, раздел «Свет»): светлые пятна на тёмном фоне.
  *
@@ -11,7 +12,6 @@
  * Всё движение — формулы от номера шага: свет на любом шаге считается сразу.
  */
 import {
-  DISH_HEIGHT, DISH_WIDTH,
   LIGHT_DRIFT_SPEED, LIGHT_MAP_SCALE, LIGHT_TURN_PERIOD, SPOT_ASPECT_MAX, SPOT_EDGE, SPOT_EDGE_WAVE, SPOT_MAX_BLOBS, SPOT_SPIN_PERIOD,
   SPOT_MIN_RADIUS, SPOT_OWN_DRIFT, SPOT_SIZE_MAX, SPOT_SIZE_MIN, SPOT_SIZE_SPREAD,
   SPOT_WOBBLE_PERIOD, SPOT_WOBBLE_REACH,
@@ -244,9 +244,10 @@ function spotIntensityOnMap(spots: readonly Spot[], x: number, y: number, t: num
 }
 
 export function createLightMap(params: WorldParams): LightMap {
+  const { width, height } = dishOf(params);
   const rng = new Rng(deriveSeed(params.seed, 'light'));
-  const mapW = DISH_WIDTH * LIGHT_MAP_SCALE;
-  const mapH = DISH_HEIGHT * LIGHT_MAP_SCALE;
+  const mapW = width * LIGHT_MAP_SCALE;
+  const mapH = height * LIGHT_MAP_SCALE;
 
   // Пятна добавляются, пока доля карты под пятнами не достигнет освещённости.
   const spots: Spot[] = [];

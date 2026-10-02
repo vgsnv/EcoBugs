@@ -1,3 +1,4 @@
+import { dishOf } from './dish.ts';
 /**
  * Местность (спецификация, раздел «Местность»): уровень местности — толщина
  * грунта, а грунт — минерал. Намыв (растворённый минерал оседает в грунт, тем
@@ -11,7 +12,7 @@
  * в файле мира, поэтому ход мира не зависит от того, когда что пересчитано.
  */
 import {
-  DISH_HEIGHT, DISH_WIDTH, GROUND_PER_LEVEL, MOVE_AMPLITUDE, MOVE_BAND_LENGTH, MOVE_BAND_WIDTH,
+  GROUND_PER_LEVEL, MOVE_AMPLITUDE, MOVE_BAND_LENGTH, MOVE_BAND_WIDTH,
   MOVE_DURATION, MOVE_GAP, MOVE_SPOT_RADIUS, QUAKE_AMPLITUDE, QUAKE_DURATION, QUAKE_RADIUS,
 } from './constants.ts';
 import type { WorldParams } from './params.ts';
@@ -61,11 +62,14 @@ const rnd = (seed: number, n: number, k: number) => hash3(seed, n, k) / 42949672
 const span = (r: readonly [number, number], u: number) => r[0] + (r[1] - r[0]) * u;
 
 /** Подвижка (quake = false) или толчок номер n, начинающийся на шаге start, — целиком из сида. */
-export function movement(seed: number, quake: boolean, n: number, start: number): Movement {
+export function movement(params: WorldParams, quake: boolean, n: number, start: number): Movement {
+  const { seed } = params;
+  const dish = dishOf(params);
   const s = deriveSeed(seed, quake ? 'quakes' : 'moves');
   const sign = rnd(s, n, 1) < 0.5 ? -1 : 1;
-  const x = rnd(s, n, 2) * DISH_WIDTH;
-  const y = rnd(s, n, 3) * DISH_HEIGHT;
+  const r = dish.width / 2 * Math.sqrt(rnd(s, n, 2)), angle0 = rnd(s, n, 3) * Math.PI * 2;
+  const x = dish.shape === 'circle' ? dish.width / 2 + r * Math.cos(angle0) : rnd(s, n, 2) * dish.width;
+  const y = dish.shape === 'circle' ? dish.height / 2 + r * Math.sin(angle0) : rnd(s, n, 3) * dish.height;
   if (quake) {
     return {
       n, quake, band: false, x, y, angle: 0, size: span(QUAKE_RADIUS, rnd(s, n, 4)), width: 0,
@@ -172,12 +176,12 @@ export function moveGround(
 ): number {
   const seed = params.seed;
   while (t.nextMoveStep <= to) {
-    t.active.push(movement(seed, false, t.nextMove, t.nextMoveStep));
+    t.active.push(movement(params, false, t.nextMove, t.nextMoveStep));
     t.nextMove++;
     t.nextMoveStep += gap(seed, false, t.nextMove, params.quakeInterval);
   }
   while (t.nextQuakeStep <= to) {
-    t.active.push(movement(seed, true, t.nextQuake, t.nextQuakeStep));
+    t.active.push(movement(params, true, t.nextQuake, t.nextQuakeStep));
     t.nextQuake++;
     t.nextQuakeStep += gap(seed, true, t.nextQuake, params.quakeInterval);
   }

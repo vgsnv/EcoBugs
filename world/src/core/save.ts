@@ -11,11 +11,11 @@ import { funnelFromNumbers, funnelNumbers, volcanoFromNumbers, volcanoNumbers } 
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 18;
+export const WORLD_FORMAT_VERSION = 19;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
-  1: 'тогда размер чашки был параметром, теперь чашка всегда 1600×1200',
+  1: 'тогда размер чашки задавался по прежним правилам и состояние мира имело другой состав',
   2: 'тогда планировка была параметром, теперь её выбирает сид',
   3: 'тогда в мире не было сноса',
   4: 'тогда в мире не было минерала',
@@ -140,7 +140,7 @@ function fromBase64(text: string): Uint8Array {
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 /** Параметры из файла: берутся только известные поля, типы проверяются дальше. */
-function readParams(raw: unknown, problems: string[]): WorldParams | null {
+function readParams(raw: unknown, problems: string[], legacyV18 = false): WorldParams | null {
   if (!isObject(raw)) {
     problems.push('Нет параметров мира');
     return null;
@@ -149,6 +149,8 @@ function readParams(raw: unknown, problems: string[]): WorldParams | null {
   const defaults = makeParams();
   const params: WorldParams = {
     seed: raw.seed as number,
+    shape: legacyV18 ? 'rectangle' : raw.shape as WorldParams['shape'],
+    aspectRatio: legacyV18 ? 4 / 3 : raw.aspectRatio as number,
     sun: raw.sun as number,
     lightDrift: raw.lightDrift as number,
     sunRhythm: raw.sunRhythm as number,
@@ -165,6 +167,7 @@ function readParams(raw: unknown, problems: string[]): WorldParams | null {
     quakeInterval: raw.quakeInterval as number,
   };
   for (const key of Object.keys(defaults) as (keyof WorldParams)[]) {
+    if (legacyV18 && (key === 'shape' || key === 'aspectRatio')) continue;
     if (!(key in raw)) problems.push(`Нет параметра «${key}»`);
   }
   return params;
@@ -195,7 +198,7 @@ export function parseWorldFile(text: string): World {
   }
 
   const problems: string[] = [];
-  const params = readParams(data.params, problems);
+  const params = readParams(data.params, problems, data.version === 18);
   if (params) problems.push(...validateParams(params));
   const step = data.step;
   if (typeof step !== 'number' || !Number.isSafeInteger(step) || step < 0) {
@@ -210,7 +213,7 @@ export function parseWorldFile(text: string): World {
   world.step = step as number;
   const mineralProblems = [...restoreMineral(world, data.mineral), ...restoreTerrain(world, data.terrain)];
   if (mineralProblems.length > 0) throw new WorldFileError(mineralProblems);
-  if (worldHash(world) !== parseInt(data.checksum as string, 16)) {
+  if (worldHash(world, data.version === 18) !== parseInt(data.checksum as string, 16)) {
     throw new WorldFileError(['Контрольная сумма не совпадает — файл повреждён или изменён вручную']);
   }
   return world;
@@ -277,7 +280,7 @@ function restoreTerrain(world: World, raw: unknown): string[] {
   const active = [];
   for (const entry of raw.active as unknown[]) {
     if (!Array.isArray(entry) || entry.length !== 3 || !entry.every((x) => Number.isSafeInteger(x) && x >= 0)) return ['Местность: подвижка повреждена'];
-    active.push(movement(world.params.seed, entry[1] === 1, entry[0] as number, entry[2] as number));
+    active.push(movement(world.params, entry[1] === 1, entry[0] as number, entry[2] as number));
   }
   t.ground = new Float64Array(ground.buffer, ground.byteOffset, t.ground.length).slice();
   t.deposits = new Float64Array(deposits.buffer, deposits.byteOffset, t.deposits.length).slice();
@@ -286,4 +289,3 @@ function restoreTerrain(world: World, raw: unknown): string[] {
   applyTerrain(world, new Float32Array(applied.buffer, applied.byteOffset, t.applied.length).slice());
   return [];
 }
-
