@@ -6,6 +6,7 @@
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
+import { advanceFlowMarker, type FlowMarker } from './flow-markers.ts';
 import { CoordinateRulers } from './rulers.ts';
 import { insideDish, cellInsideDish, type Dish, ERUPTION_RADIUS, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, DRIFT_REFERENCE, multiplierForLevel, eruptionRate, eruptionBursts, ventPush, BURST_WIDTH, flowAt, hash3, isBlocked, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, VOLCANO_BIRTH, VOLCANO_POWER, type MineralProcesses, type Volcano, type World } from '../core/index.ts';
 
@@ -133,8 +134,8 @@ const GLINT_LAYERS = [
  * рисуются только течения не слабее такой доли от DRIFT_REFERENCE × солнце;
  * линия обрывается, войдя в занятую другой линией клетку (размер, ед. мира).
  * Скорость видна трижды: участки делятся на классы по скорости (границы — доли
- * от того же мерила), у быстрых — ярче и толще, и пунктир бежит со скоростью
- * течения (CSS px в секунду на единицу доли). Перестраиваются не чаще, мс.
+ * от того же мерила), у быстрых — ярче и толще. Светлые метки движутся
+ * с фактической скоростью в координатах мира. Перестраиваются не чаще, мс.
  */
 const LINE_SEED_SPACING = 70;
 const LINE_STEP = 4;
@@ -143,13 +144,13 @@ const LINE_MIN_SHARE = 0.25;
 const LINE_CELL = 20;
 const LINE_CLASSES = [0.6, 1.2] as const;
 const LINE_STYLES = [
-  { color: 'rgba(110, 165, 230, 0.45)', width: 1, speed: 0.4 },
-  { color: 'rgba(135, 190, 245, 0.6)', width: 1.4, speed: 0.9 },
-  { color: 'rgba(170, 215, 255, 0.75)', width: 1.9, speed: 1.6 },
+  { color: 'rgba(110, 165, 230, 0.45)', width: 1 },
+  { color: 'rgba(135, 190, 245, 0.6)', width: 1.4 },
+  { color: 'rgba(170, 215, 255, 0.75)', width: 1.9 },
 ] as const;
 const LINE_DASH = 6;
 const LINE_GAP = 6;
-const LINE_SPEED_CSS = 22;
+const FLOW_MARKER_LIMIT = 200;
 const LINE_RETRACE_MS = 150;
 
 /** Бесшовная текстура ряби: тонкая светлая сетка там, где шум близок к нулю. */
@@ -468,8 +469,12 @@ export class WorldRenderer {
   private parts = new Path2D();
   /** Линии течений и ключ вида, для которого они проведены. */
   private lines: Path2D[] = [];
+  private markerAnchors: { x: number; y: number }[] = [];
+  private flowMarkers: FlowMarker[] = [];
+  private markerStep = -1;
   private linesKey = '';
   private linesTracedAt = 0;
+  private linesStep = -1;
   /** Дымка минерала (клетка поля — пиксель) и версия поля, по которой она построена. */
   private readonly mineralCanvas = document.createElement('canvas');
   /** Затемнение от мутности (серый для умножения), той же сетки. */
@@ -556,6 +561,7 @@ export class WorldRenderer {
     this.hazeDrawnAt = -Infinity;
     this.funnelDrawn = -1;
     this.linesKey = '';
+    this.flowMarkers = []; this.markerStep = -1;
     this.wall = world.partitions.thickness;
     this.sample = terrainSampler(world);
     this.base = renderTerrain(this.sample, 0, 0, this.width * TILE_SCALE_MIN, this.height * TILE_SCALE_MIN, TILE_SCALE_MIN, world.dish);
@@ -810,7 +816,7 @@ export class WorldRenderer {
   // ── Кадр ──────────────────────────────────────────────────────────────
 
   /** Кадр; `animTime` — секунды анимации бликов (стоит на паузе). */
-  draw(animTime = 0): void {
+  draw(animTime = 0, flowStep = this.world.step): void {
     this.refreshTerrain();
     this.drainRedraw();
     const w = this.world;
@@ -905,7 +911,7 @@ export class WorldRenderer {
 
     ctx.setTransform(...view);
     this.drawMineral(animTime);
-    if (!this.showProcesses) this.drawDriftLines(animTime);
+    if (!this.showProcesses) this.drawDriftLines(flowStep);
     // Жерла — отверстия в недра: поверх течений, ничто не проходит сквозь них.
     this.drawVents(animTime);
     if (this.showProcesses) this.drawProcesses();
@@ -1725,21 +1731,20 @@ export class WorldRenderer {
   }
 
   /**
-   * Линии течений — часть пятен света: от точек на внешнем краю каждого пятна
-   * по течению до его конца, бегущим пунктиром, на конце — наконечник. Точки
-   * движутся вместе с пятнами, поэтому линии не пропадают, а плавно меняются
-   * вслед за светом; где течения нет, линия нулевой длины.
+   * Кешированные линии показывают форму потока. Светлые метки переносятся
+   * суммарным течением по фактическому времени мира, независимо от класса линии.
    */
-  private drawDriftLines(animTime: number): void {
+  private drawDriftLines(flowStep: number): void {
     const w = this.world;
-    const sun = sunAt(w.light, w.step);
-    if (sun <= 0) return;
+    const sun = Math.max(1e-9, sunAt(w.light, w.step));
     // Вид изменился — перестроить сразу; шагнул мир — не чаще LINE_RETRACE_MS.
     const view = `${this.zoom.toFixed(4)}:${this.cx.toFixed(1)}:${this.cy.toFixed(1)}:${this.canvas.width}x${this.canvas.height}`;
     const now = performance.now();
-    if (view !== this.linesKey || now - this.linesTracedAt >= LINE_RETRACE_MS) {
+    if (view !== this.linesKey || (w.step !== this.linesStep && now - this.linesTracedAt >= LINE_RETRACE_MS)) {
+      if (view !== this.linesKey) this.flowMarkers = [];
       this.linesKey = view;
       this.linesTracedAt = now;
+      this.linesStep = w.step;
       this.lines = this.traceDriftLines(sun);
     }
     const ctx = this.ctx;
@@ -1751,11 +1756,40 @@ export class WorldRenderer {
     LINE_STYLES.forEach((st, c) => {
       ctx.lineWidth = this.px(st.width);
       ctx.strokeStyle = st.color;
-      // Пунктир бежит со скоростью течения своего класса.
-      ctx.lineDashOffset = -this.px(animTime * LINE_SPEED_CSS * st.speed * sun);
+      ctx.lineDashOffset = 0;
       ctx.stroke(this.lines[c]);
     });
     ctx.setLineDash([]);
+    this.drawFlowMarkers(flowStep);
+  }
+
+  private drawFlowMarkers(step: number): void {
+    const elapsed = this.markerStep < 0 ? 0 : Math.max(0, step - this.markerStep);
+    this.markerStep = step;
+    const w = this.world;
+    const [x0, y0] = this.screenToWorld(0, 0), [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
+    const allowed = (x: number, y: number) => x >= x0 && x <= x1 && y >= y0 && y <= y1 && insideDish(w.dish, x, y) && !isBlocked(w.partitions, x, y);
+    const velocity = (x: number, y: number, out: [number, number]) => flowAt(w, x, y, out);
+    this.flowMarkers.length = Math.min(this.flowMarkers.length, this.markerAnchors.length);
+    while (this.flowMarkers.length < this.markerAnchors.length) {
+      const p = this.markerAnchors[this.flowMarkers.length];
+      this.flowMarkers.push({ ...p, vx: 0, vy: 0 });
+    }
+    const ctx = this.ctx;
+    ctx.save(); ctx.beginPath(); this.traceDish(ctx); ctx.clip();
+    ctx.fillStyle = 'rgba(225,245,255,.9)';
+    ctx.beginPath();
+    for (let i = 0; i < this.flowMarkers.length; i++) {
+      const marker = this.flowMarkers[i];
+      if (elapsed > 0 && !advanceFlowMarker(marker, elapsed, velocity, allowed)) {
+        const anchor = this.markerAnchors[i % this.markerAnchors.length];
+        if (!anchor) continue;
+        Object.assign(marker, anchor, { vx: 0, vy: 0 });
+      }
+      ctx.moveTo(marker.x + this.px(1.7), marker.y);
+      ctx.arc(marker.x, marker.y, this.px(1.7), 0, Math.PI * 2);
+    }
+    ctx.fill(); ctx.restore();
   }
 
   /** Линии течений по классам скорости — по сетке начал, без наложения. */
@@ -1764,6 +1798,8 @@ export class WorldRenderer {
     const ref = DRIFT_REFERENCE * sun;
     const minSpeed = ref * LINE_MIN_SHARE;
     const paths = LINE_STYLES.map(() => new Path2D());
+    this.markerAnchors = [];
+    let candidates = 0;
     const [vx0, vy0] = this.screenToWorld(0, 0);
     const [vx1, vy1] = this.screenToWorld(this.canvas.width, this.canvas.height);
     // На мелком масштабе начала реже, иначе линии сливаются в рябь.
@@ -1792,6 +1828,11 @@ export class WorldRenderer {
           const c = sp < ref * LINE_CLASSES[0] ? 0 : sp < ref * LINE_CLASSES[1] ? 1 : 2;
           if (c !== last) { paths[c].moveTo(x, y); last = c; }
           paths[c].lineTo(nx, ny);
+          if (n % 8 === 0 && x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1 && insideDish(w.dish, x, y)) {
+            candidates++;
+            const slot = this.markerAnchors.length < FLOW_MARKER_LIMIT ? this.markerAnchors.length : hash3(0x123a, candidates, id) % candidates;
+            if (slot < FLOW_MARKER_LIMIT) this.markerAnchors[slot] = { x, y };
+          }
           x = nx; y = ny;
         }
       }

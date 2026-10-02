@@ -37,6 +37,7 @@ const sunLabel = document.querySelector<HTMLElement>('.sun-rhythm')!;
 let mineralStatsVersion = -1;
 /** Время анимации (блики), секунды; стоит на паузе. */
 let animTime = 0;
+let flowStep = 0;
 /** Сколько шагов в секунду мир делает на самом деле. */
 let actualRate = 0;
 /** Частота отрисованных кадров за последнюю секунду, независимо от расчёта мира. */
@@ -169,6 +170,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function setWorld(next: World): void {
+  flowStep = next.step;
   worldSummary.reset(next);
   world = next;
   renderer.setWorld(world);
@@ -305,7 +307,8 @@ function frame(now: number): void {
   if (!paused) animTime += dt;
   if (!ready) { requestAnimationFrame(frame); return; }
   worldSummary.render(world, now);
-  renderer.draw(animTime);
+  flowStep = paused ? world.step : Math.min(world.step, flowStep + dt * (actualRate || 10 * speed));
+  renderer.draw(animTime, flowStep);
   if (fpsWindowStart === null) {
     fpsWindowStart = now;
   } else {
