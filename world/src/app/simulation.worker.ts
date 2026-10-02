@@ -1,5 +1,5 @@
 /** Мир считает шаги независимо от кадров; показ получает не больше 20 снимков/с. */
-import { createWorld, DRIFT_PERIOD, parseWorldFile, serializeWorld, stepWorld, WorldFileError, type World } from '../core/index.ts';
+import { createWorld, mineralProcesses, DRIFT_PERIOD, parseWorldFile, serializeWorld, stepWorld, WorldFileError, type World } from '../core/index.ts';
 import type { SimulationCommand, SimulationReply, SimulationSnapshot } from './simulation.ts';
 
 // Отдельный интерфейс сохраняет проверку типов без подключения DOM + WebWorker lib вместе.
@@ -14,6 +14,7 @@ let world: World | null = null;
 let epoch = 0, paused = false, speed = 1, active = true;
 let carry = 0, lastTime = performance.now(), lastSnapshot = 0;
 let rate = 0, behind = false, inFlight = false, driftKey = '';
+let showProcesses = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
 
 /** Копии передаются с отдачей буферов; массивы самого мира никогда не отсоединяются. */
@@ -24,6 +25,7 @@ function publish(initial = false, force = false): void {
   const message: SimulationSnapshot = structuredClone({
     type: 'snapshot', epoch,
     ...(initial ? { initial: { params: world.params, light: world.light, partitions: world.partitions } } : {}),
+    ...(showProcesses ? { processes: mineralProcesses(world.mineral) } : {}),
     step: world.step, mineral: world.mineral, terrain: world.terrain, viscosity: world.viscosity,
     ...(drift ? { drift: { a: drift.a, b: drift.b } } : {}), rate: paused ? 0 : rate, behind,
   });
@@ -99,6 +101,10 @@ host.onmessage = ({ data: command }) => {
         break;
       case 'save':
         if (world) host.postMessage({ type: 'saved', epoch, id: command.id, text: serializeWorld(world, new Date()), step: world.step, seed: world.params.seed });
+        break;
+      case 'processes':
+        showProcesses = command.enabled;
+        publish(false, true);
         break;
       case 'ack':
         inFlight = false;

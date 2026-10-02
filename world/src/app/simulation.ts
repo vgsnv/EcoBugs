@@ -1,5 +1,5 @@
 /** Сообщения между показом и единственным владельцем состояния — Worker. */
-import type { DriftField, MineralState, TerrainState, ViscosityMap, World, WorldParams } from '../core/index.ts';
+import type { DriftField, MineralProcesses, MineralState, TerrainState, ViscosityMap, World, WorldParams } from '../core/index.ts';
 
 export type SimulationCommand =
   | { type: 'create'; epoch: number; params: WorldParams }
@@ -7,7 +7,8 @@ export type SimulationCommand =
   | { type: 'save'; epoch: number; id: number }
   | { type: 'control'; epoch: number; paused: boolean; speed: number; active: boolean }
   | { type: 'step'; epoch: number }
-  | { type: 'ack'; epoch: number };
+  | { type: 'ack'; epoch: number }
+  | { type: 'processes'; epoch: number; enabled: boolean };
 
 export interface SimulationSnapshot {
   type: 'snapshot';
@@ -18,6 +19,7 @@ export interface SimulationSnapshot {
   terrain: TerrainState;
   viscosity: ViscosityMap;
   drift?: { a: DriftField; b: DriftField };
+  processes?: MineralProcesses;
   rate: number;
   behind: boolean;
 }

@@ -19,6 +19,7 @@ export interface PanelHandlers {
   onZoomIn(): void;
   onZoomOut(): void;
   onZoomFit(): void;
+  onProcesses(enabled: boolean): void;
 }
 
 export interface PanelRoots {
@@ -170,9 +171,9 @@ export class Panel {
     this.handlers = handlers;
     this.draft = structuredClone(initial);
     this.current = structuredClone(initial);
-    this.buildToolbar();
     this.buildParams();
     this.buildLegend();
+    this.buildToolbar();
     installInfoTips();
     roots.scrim.addEventListener('click', () => this.toggleParams(false));
     this.refresh();
@@ -223,12 +224,24 @@ export class Panel {
     zoomOut.addEventListener('click', () => this.handlers.onZoomOut());
     zoomIn.addEventListener('click', () => this.handlers.onZoomIn());
     this.zoomButton.addEventListener('click', () => this.handlers.onZoomFit());
+    const processes = el('button', { textContent: 'Процессы', title: 'Общее течение, размыв, оседание и уход в недра', ariaPressed: 'false' });
+    const processLegend = el('span', { className: 'process-legend', hidden: true, title: 'Цвет показывает количество минерала за последнее обновление (100 шагов); ярче — больше. При одновременных процессах цвета смешиваются.' });
+    processLegend.innerHTML = '<span style="color:#e88536">■ размыв</span> · <span style="color:#32c995">■ оседание</span> · <span style="color:#c27bff">■ воронка → недра</span> · стрелки — общее течение';
+    this.roots.legend.append(processLegend);
+    processes.addEventListener('click', () => {
+      const enabled = processes.getAttribute('aria-pressed') !== 'true';
+      processes.setAttribute('aria-pressed', String(enabled));
+      processes.classList.toggle('active', enabled);
+      processLegend.hidden = !enabled;
+      this.handlers.onProcesses(enabled);
+    });
     const toggle = el('button', { className: 'params-toggle', textContent: 'Параметры' });
     toggle.addEventListener('click', () => this.toggleParams(true));
     this.roots.toolbar.append(
       el('span', { className: 'group' }, this.pauseButton, this.stepButton),
       speeds,
       this.timeLabel,
+      processes,
       el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn),
       el('span', { className: 'spacer' }),
       this.status,

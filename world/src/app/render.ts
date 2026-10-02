@@ -6,7 +6,7 @@
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
-import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, DRIFT_REFERENCE, multiplierForLevel, eruptionRate, eruptionBursts, ventPush, BURST_WIDTH, flowAt, hash3, isBlocked, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, VOLCANO_BIRTH, VOLCANO_POWER, type Volcano, type World } from '../core/index.ts';
+import { DISH_HEIGHT, DISH_WIDTH, ERUPTION_RADIUS, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, DRIFT_REFERENCE, multiplierForLevel, eruptionRate, eruptionBursts, ventPush, BURST_WIDTH, flowAt, hash3, isBlocked, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, VOLCANO_BIRTH, VOLCANO_POWER, type MineralProcesses, type Volcano, type World } from '../core/index.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
 const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
@@ -425,6 +425,11 @@ function puffSprite(c: Rgb): HTMLCanvasElement {
 }
 
 export class WorldRenderer {
+  showProcesses = false;
+  processes: MineralProcesses | null = null;
+  private readonly processCanvas = document.createElement('canvas');
+  private processDrawn: MineralProcesses | null = null;
+
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   /** Маска пятен света одним цветом, в пикселях экрана. */
@@ -523,6 +528,8 @@ export class WorldRenderer {
 
   setWorld(world: World): void {
     this.world = world;
+    this.processes = null;
+    this.processDrawn = null;
     this.lightViewKey = '';
     this.mineralVersion = -1;
     this.hazeDrawnAt = -Infinity;
@@ -865,10 +872,67 @@ export class WorldRenderer {
 
     ctx.setTransform(...view);
     this.drawMineral(animTime);
-    this.drawDriftLines(animTime);
+    if (!this.showProcesses) this.drawDriftLines(animTime);
     // Жерла — отверстия в недра: поверх течений, ничто не проходит сквозь них.
     this.drawVents(animTime);
+    if (this.showProcesses) this.drawProcesses();
     this.drawWalls();
+  }
+
+  /** Цвет — реальные обмены за последний промежуток; стрелки — использованная сумма течений. */
+  private drawProcesses(): void {
+    const d = this.processes;
+    if (!d) return;
+    const m = this.world.mineral;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, DISH_WIDTH, DISH_HEIGHT); ctx.clip();
+    if (this.processDrawn !== d) {
+      this.processDrawn = d;
+      const c = this.processCanvas;
+      if (c.width !== m.cols || c.height !== m.rows) { c.width = m.cols; c.height = m.rows; }
+      const dc = c.getContext('2d')!;
+      const image = dc.createImageData(m.cols, m.rows);
+      const reference = this.world.params.mineralStock * m.cell * m.cell;
+      for (let k = 0; k < m.field.length; k++) {
+        const e = d.erosion[k], s = d.settling[k], n = d.sinking[k];
+        const total = e + s + n;
+        if (total <= 0) continue;
+        const o = k * 4;
+        image.data[o] = (232 * e + 50 * s + 194 * n) / total;
+        image.data[o + 1] = (133 * e + 201 * s + 123 * n) / total;
+        image.data[o + 2] = (54 * e + 149 * s + 255 * n) / total;
+        image.data[o + 3] = 210 * Math.min(1, Math.log1p(total / reference * 100) / Math.log(11));
+      }
+      dc.putImageData(image, 0, 0);
+    }
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.processCanvas, 0, 0, m.cols * m.cell, m.rows * m.cell);
+    // Сетка стрелок редкая и сохраняет читаемость при любом масштабе.
+    const stride = Math.max(1, Math.ceil(this.px(42) / m.cell));
+    const [x0, y0] = this.screenToWorld(0, 0);
+    const [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
+    const imin = Math.max(0, Math.floor(x0 / m.cell / stride) * stride);
+    const jmin = Math.max(0, Math.floor(y0 / m.cell / stride) * stride);
+    ctx.lineWidth = this.px(1.3);
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.beginPath();
+    for (let j = jmin; j < Math.min(m.rows, Math.ceil(y1 / m.cell)); j += stride) {
+      for (let i = imin; i < Math.min(m.cols, Math.ceil(x1 / m.cell)); i += stride) {
+        const k = j * m.cols + i;
+        const speed = Math.hypot(d.vx[k], d.vy[k]);
+        if (m.blocked[k] || speed < 1e-5) continue;
+        const ux = d.vx[k] / speed, uy = d.vy[k] / speed;
+        const length = this.px(7 + 17 * speed / (speed + DRIFT_REFERENCE));
+        const x = (i + 0.5) * m.cell, y = (j + 0.5) * m.cell;
+        const ex = x + ux * length / 2, ey = y + uy * length / 2, head = this.px(4);
+        ctx.moveTo(x - ux * length / 2, y - uy * length / 2); ctx.lineTo(ex, ey);
+        ctx.moveTo(ex - ux * head - uy * head * 0.6, ey - uy * head + ux * head * 0.6);
+        ctx.lineTo(ex, ey);
+        ctx.lineTo(ex - ux * head + uy * head * 0.6, ey - uy * head - ux * head * 0.6);
+      }
+    }
+    ctx.stroke(); ctx.restore();
   }
 
   /** Дымка минерала, вулканы и кольца извержений. */

@@ -3,7 +3,7 @@
  * Скорость показа — дело приложения; мир знает только номер шага.
  */
 import {
-  Drift, lightDriftVelocity, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInDeposits, mineralInMedium, smoothLevelAt, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
+  Drift, flowAt, lightDriftVelocity, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInDeposits, mineralInMedium, smoothLevelAt, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
   resistanceAt, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
@@ -67,6 +67,10 @@ const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#pa
   onZoomIn: () => renderer.zoomBy(ZOOM_STEP),
   onZoomOut: () => renderer.zoomBy(1 / ZOOM_STEP),
   onZoomFit: () => renderer.fit(),
+  onProcesses: (enabled) => {
+    renderer.showProcesses = enabled;
+    send({ type: 'processes', epoch, enabled });
+  },
 });
 renderer.onZoomChange = (relative) => panel.setZoom(relative);
 
@@ -104,6 +108,7 @@ simulation.onmessage = ({ data }: MessageEvent<SimulationReply>) => {
         Object.assign(world.viscosity, data.viscosity);
         if (data.drift) world.drift.acceptNodes(data.step, data.drift.a, data.drift.b);
       }
+      renderer.processes = data.processes ?? null;
       actualRate = data.rate;
       behind = data.behind;
       send({ type: 'ack', epoch });
@@ -263,14 +268,20 @@ function probe(): void {
     return;
   }
   const temp = temperatureAt(p, world.light, x, y, world.step);
+  const processes = renderer.showProcesses ? renderer.processes : null;
+  const k = Math.floor(y / world.mineral.cell) * world.mineral.cols + Math.floor(x / world.mineral.cell);
   panel.setProbe([
     `${GRADATION_NAMES[gradationAt(world.viscosity, x, y)]} · уровень ${smoothLevelAt(world.viscosity, x, y).toFixed(2)} · ${where}`,
     `Свет ${worldLightAt(world, x, y).toFixed(3)} · усваивается ${absorptionAt(world.viscosity, x, y).toFixed(2)}`,
     `Температура ${temp.toFixed(2)} · мутации ${mutationStrength(temp).toFixed(2)}`,
     `Сопротивление движению ${resistanceAt(world.viscosity, x, y).toFixed(2)}`,
-    `Снос ${Math.hypot(...world.drift.at(x, y, world.step)).toFixed(3)} за шаг`,
+    `Снос ${Math.hypot(...flowAt(world, x, y)).toFixed(3)} за шаг`,
     `Минерал ×${mineralDensityAt(world.mineral, p.mineralStock, x, y).toFixed(2)} от среднего · прозрачность ${transparencyAt(world.mineral, x, y).toFixed(2)}`,
     `Залежи ×${depositsAt(world, x, y).toFixed(2)} от среднего запаса`,
+    ...(processes && processes.step > 0 ? [
+      `Последний расчёт: шаг ${processes.step.toLocaleString('ru')} · за 100 шагов`,
+      `Размыв ${processes.erosion[k].toPrecision(3)} · оседание ${processes.settling[k].toPrecision(3)} · воронка → недра ${processes.sinking[k].toPrecision(3)}`,
+    ] : []),
   ], clientX, clientY);
 }
 
