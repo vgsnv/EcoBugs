@@ -124,24 +124,25 @@ export const TRANSPORT_SUBSTEPS = 64;
 export const MINERAL_MOBILITY = 20;
 
 /**
- * Воронки: скопление — связное место, где залежей не меньше FUNNEL_SHAPE
- * средних плотностей запаса, с ядром не меньше FUNNEL_DEPOSIT, не меньше
- * FUNNEL_MIN_CELLS клеток. Одна воронка на ареол — скопление + FUNNEL_REACH
- * (единиц мира); отверстие — FUNNEL_HOLE_SHARE скопления вокруг самой густой
- * клетки. Тяга — течение в воронку со всего ареола: забирает за шаг
- * FUNNEL_DRAW площади его круга; залежи в отверстии поднимаются в среду —
- * FUNNEL_LIFT за шаг; растворённое в отверстии уходит в недра — FUNNEL_SINK за шаг.
+ * Воронки: рождаются у скопления — связного места, где залежей не меньше
+ * FUNNEL_SHAPE средних плотностей запаса, с ядром не меньше FUNNEL_DEPOSIT,
+ * не меньше FUNNEL_MIN_CELLS клеток; ареол — радиус скопления + FUNNEL_REACH
+ * (единиц мира), в нём другая не рождается; отверстие — FUNNEL_HOLE_SHARE
+ * скопления вокруг самой густой клетки, место и форма потом не меняются.
+ * Тяга — течение в воронку: FUNNEL_DRAW площади круга ареола за шаг × сила.
+ * Забирает только избыток сверх FUNNEL_SHAPE: залежи ареола поднимаются —
+ * FUNNEL_LIFT за шаг, растворённое в отверстии уходит в недра — FUNNEL_SINK.
  */
-export const FUNNEL_DEPOSIT = 4;
+export const FUNNEL_DEPOSIT = 6;
 export const FUNNEL_SHAPE = 1.5;
-export const FUNNEL_MIN_CELLS = 20;
+export const FUNNEL_MIN_CELLS = 30;
 export const FUNNEL_HOLE_SHARE = 0.1;
-/** Тяга воронки считается от стока на грубой сетке через столько клеток (расчёт кешируется). */
-export const FUNNEL_SNAP = 3;
-export const FUNNEL_REACH = 40;
+/** Воронка сгущается от нуля до полной силы (и тает обратно) за столько шагов. */
+export const FUNNEL_RAMP = 60_000;
+export const FUNNEL_REACH = 80;
 export const FUNNEL_DRAW = 1e-4;
-export const FUNNEL_LIFT = 1e-5;
-export const FUNNEL_SINK = 1e-4;
+export const FUNNEL_LIFT = 3e-4;
+export const FUNNEL_SINK = 1e-3;
 
 /** Залежи понемногу растворяются обратно в среду на месте: доля за шаг (живут сотни тысяч шагов). */
 export const DEPOSIT_DISSOLVE = 3e-6;

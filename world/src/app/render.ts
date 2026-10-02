@@ -273,8 +273,33 @@ const SPRING_COUNT = 70;
 const SPRING_DOT_CSS = 1.8;
 const SPRING_REACH = 2.2;
 /** Воронка: цвет отверстия и его непрозрачность (край мягкий — от сглаживания сетки). */
-const FUNNEL_COLOR: Rgb = [16, 10, 28];
-const FUNNEL_ALPHA = 0.85;
+const FUNNEL_COLOR: Rgb = [58, 30, 92];
+/** Центр отверстия — глубина: тёмно-синий. */
+const FUNNEL_DEEP: Rgb = [8, 14, 46];
+const FUNNEL_ALPHA = 0.6;
+/** Отверстия рисуются во столько раз детальнее сетки поля; уступов глубины от кромки к центру. */
+const FUNNEL_RES = 3;
+const FUNNEL_STEPS = 4;
+/** С такой силы воронка видна полностью; слабее — проявляется. */
+const FUNNEL_SHOWN = 0.25;
+/** Кромка отверстия: цвет и непрозрачность. */
+const FUNNEL_RIM_COLOR: Rgb = [190, 150, 240];
+const FUNNEL_RIM_ALPHA = 0.75;
+/** Стекающие крупинки: сколько на воронку и сколько живут, с. */
+const FUNNEL_GRAINS = 40;
+const FUNNEL_GRAIN_LIFE = 6;
+/** Попав в отверстие, крупинка зависает и тает за столько секунд. */
+const SINK_S = 1.5;
+/** Свечение недр из отверстия: цвет, размер (в радиусах отверстия), не меньше CSS px, яркость при полной силе. */
+const FUNNEL_GLOW: Rgb = [110, 80, 220];
+const FUNNEL_GLOW_SIZE = 2.2;
+const FUNNEL_GLOW_MIN_CSS = 10;
+const FUNNEL_GLOW_ALPHA = 0.7;
+/** Искра ушедшей крупинки: сколько живёт, с, и размер, CSS px. */
+const SPARK_S = 0.35;
+const SPARK_CSS = 4;
+/** Размер стекающей крупинки вдали от отверстия, CSS px (к отверстию — до точки). */
+const FUNNEL_GRAIN_CSS = 2.4;
 const VENT_ERUPT_CSS: readonly [number, number] = [5, 11];
 const VENT_VOLUME_FROM = 0.35;
 const BAR_OUT: Rgb = [226, 200, 255];
@@ -435,6 +460,14 @@ export class WorldRenderer {
   private springs = new Map<number, { p: Float32Array; step: number }>();
   /** Отверстия воронок (клетка поля — пиксель). */
   private readonly funnelCanvas = document.createElement('canvas');
+  /** Показанные воронки: место ядра, отверстие, ареол, проявленность 0…1, жива ли, крупинки (x, y, возраст; −1 — нет). */
+  private funnelViews: { id: number; x: number; y: number; cells: Int32Array; reach: number; alpha: number; alive: boolean; grains: Float32Array }[] = [];
+  private funnelTime = -1;
+  /** Версия мира, по которой нарисованы отверстия воронок. */
+  private funnelDrawn = -1;
+  /** Искры крупинок, ушедших в недра: где и когда (время анимации). */
+  private funnelSparks: { x: number; y: number; t: number }[] = [];
+  private funnelStep = 0;
   /** Вспышки начала извержений: где, когда (время анимации), размах. */
   private shocks: { x: number; y: number; t: number; scale: number }[] = [];
   /** Сколько раз извергался каждый вулкан на прошлом кадре. */
@@ -505,6 +538,10 @@ export class WorldRenderer {
     this.seenBursts = new Map(world.mineral.volcanoes.filter((v) => v.stage === 'erupting')
       .map((v) => [`${v.id}:${v.k}`, eruptionBursts(world.params, v).filter((b) => b.at <= Math.max(0, (world.step - v.begin) / Math.max(1, v.until - v.begin))).length]));
     this.springs.clear();
+    this.funnelViews = [];
+    this.funnelSparks = [];
+    this.funnelTime = -1;
+    this.funnelStep = world.step;
 
     this.grains.fill(0);
     this.grainTime = -1;
@@ -973,16 +1010,24 @@ export class WorldRenderer {
         const hop = Math.hypot(dx, dy);
         if (hop > maxHop) { dx *= maxHop / hop; dy *= maxHop / hop; }
         if (isBlocked(w.partitions, g[o] + dx, g[o + 1] + dy)) { g[o + 2] = g[o + 3]; continue; }
-        // Затекло в отверстие воронки — ушло в недра.
-        const ci = Math.min(m.cols - 1, Math.max(0, Math.floor((g[o] + dx) / m.cell)));
-        const cj = Math.min(m.rows - 1, Math.max(0, Math.floor((g[o + 1] + dy) / m.cell)));
-        if (holes[cj * m.cols + ci]) { g[o + 2] = g[o + 3]; continue; }
-        g[o] += dx;
-        g[o + 1] += dy;
+        // В отверстии воронки зерно не уносится: зависает и тает (уходит вниз).
+        const hi = Math.min(m.cols - 1, Math.max(0, Math.floor(g[o] / m.cell)));
+        const hj = Math.min(m.rows - 1, Math.max(0, Math.floor(g[o + 1] / m.cell)));
+        if (!holes[hj * m.cols + hi]) {
+          g[o] += dx;
+          g[o + 1] += dy;
+        }
+      }
+      const ci = Math.min(m.cols - 1, Math.max(0, Math.floor(g[o] / m.cell)));
+      const cj = Math.min(m.rows - 1, Math.max(0, Math.floor(g[o + 1] / m.cell)));
+      let sz = size;
+      if (holes[cj * m.cols + ci]) {
+        g[o + 3] = Math.min(g[o + 3], g[o + 2] + SINK_S);
+        sz = size * Math.max(0.1, (g[o + 3] - g[o + 2]) / SINK_S);
       }
       const f = g[o + 2] / g[o + 3];
       ctx.globalAlpha = Math.min(1, f * 6, (1 - f) * 3) * GRAIN_ALPHA;
-      ctx.fillRect(g[o] - size / 2, g[o + 1] - size / 2, size, size);
+      ctx.fillRect(g[o] - sz / 2, g[o + 1] - sz / 2, sz, sz);
     }
     ctx.globalAlpha = 1;
   }
@@ -1106,7 +1151,7 @@ export class WorldRenderer {
       }
     }
     for (const id of this.springs.keys()) if (!m.volcanoes.some((v) => v.id === id && v.stage === 'erupting')) this.springs.delete(id);
-    this.drawFunnels();
+    this.drawFunnels(animTime);
     ctx.globalAlpha = 1;
   }
 
@@ -1147,48 +1192,201 @@ export class WorldRenderer {
       const f = p[o + 1] / (disk * SPRING_REACH);
       if (f >= 1) { p[o + 2] = -1; continue; }
       ctx.globalAlpha = (1 - f) * (0.6 + 0.35 * after) * Math.min(1, 0.55 + strength * 3);
-      ctx.fillRect(v.x + Math.cos(p[o]) * p[o + 1] - size / 2, v.y + Math.sin(p[o]) * p[o + 1] - size / 2, size, size);
+      // Рождается точкой в жерле и растёт, отходя от него.
+      const sz = size * (0.15 + 0.85 * smoothstep(0, disk * 1.2, p[o + 1]));
+      ctx.fillRect(v.x + Math.cos(p[o]) * p[o + 1] - sz / 2, v.y + Math.sin(p[o]) * p[o + 1] - sz / 2, sz, sz);
     }
     ctx.globalAlpha = 1;
   }
 
   /**
-   * Воронки — отверстия в недра формы скопления залежей (чуть ужатой): тёмная
-   * фигура с мягким краем. Вещество затекает в неё само — дымка по модели,
-   * зёрна по течению в воронку (и исчезают в отверстии, см. drawGrains).
+   * Воронки — отверстия в недра. Отверстие — светлая кромка по краю и уступы
+   * вниз к центру (темнее и синее, между уступами — тонкие светлые линии) —
+   * плоско, без теней; свечение недр из него по силе воронки; ушедшая вниз
+   * крупинка мелькает искрой. Сгущаются и тают по модели (проявленность — сила воронки).
+   * Светлые крупинки в ареоле идут по сумме
+   * течений — прямо или по спирали, если рядом течение; дойдя до отверстия,
+   * зависают и тают (у жерла наоборот: рождаются точкой и растут).
    */
-  private drawFunnels(): void {
-    const m = this.world.mineral;
-    if (m.funnels.length === 0) return;
+  private drawFunnels(animTime: number): void {
+    const w = this.world;
+    const m = w.mineral;
+    const dt = this.funnelTime < 0 ? 0 : Math.min(0.1, Math.max(0, animTime - this.funnelTime));
+    this.funnelTime = animTime;
+    const steps = Math.max(0, w.step - this.funnelStep);
+    this.funnelStep = w.step;
+    // Воронки модели — по номеру; проявленность — их сила (сгущаются и тают по модели).
+    const views = new Map(this.funnelViews.map((e) => [e.id, e]));
+    this.funnelViews = m.funnels.map((f) => {
+      const e = views.get(f.id) ?? { id: f.id, x: f.x, y: f.y, cells: f.cells, reach: f.reach, alpha: 0, alive: true, grains: new Float32Array(FUNNEL_GRAINS * 4).fill(-1) };
+      e.alpha = f.strength;
+      e.alive = f.forming;
+      return e;
+    });
+    if (this.funnelViews.length === 0) return;
+    // Отверстия: форма (размытая), сила, глубина от края к центру — на сетке
+    // поля; рисуются в FUNNEL_RES раз детальнее, только когда мир изменился.
+    const n = m.field.length;
+    const holes = new Uint8Array(n);
+    for (const e of this.funnelViews) if (e.alpha > 0) for (const k of e.cells) holes[k] = 1;
     const c = this.funnelCanvas;
-    if (c.width !== m.cols) { c.width = m.cols; c.height = m.rows; }
-    const fctx = c.getContext('2d')!;
-    const img = fctx.createImageData(m.cols, m.rows);
-    // Маска отверстий, размытая (два прохода [1 2 1]) — мягкий край вместо ступенек клеток.
-    const mask = new Float32Array(m.field.length);
-    for (const f of m.funnels) for (const k of f.cells) mask[k] = 1;
-    const tmp = new Float32Array(mask.length);
-    for (let pass = 0; pass < 2; pass++) {
-      for (let k = 0; k < mask.length; k++) {
-        const i = k % m.cols;
-        tmp[k] = ((i > 0 ? mask[k - 1] : mask[k]) + 2 * mask[k] + (i < m.cols - 1 ? mask[k + 1] : mask[k])) / 4;
+    const S = FUNNEL_RES;
+    if (c.width !== m.cols * S) { c.width = m.cols * S; c.height = m.rows * S; this.funnelDrawn = -1; }
+    if (this.funnelDrawn !== m.version) {
+      this.funnelDrawn = m.version;
+      const shape = new Float32Array(n), power = new Float32Array(n), depth = new Float32Array(n);
+      for (const e of this.funnelViews) {
+        // Глубина клетки отверстия — расстояние от её центра до края отверстия (в клетках), к центру — 1.
+        const inHole = new Set<number>(Array.from(e.cells));
+        const edges: number[] = [];
+        for (const k of e.cells) {
+          const i = k % m.cols, j = (k - i) / m.cols;
+          for (const [di, dj] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+            const qi = i + di, qj = j + dj;
+            if (qi < 0 || qj < 0 || qi >= m.cols || qj >= m.rows || !inHole.has(qj * m.cols + qi)) edges.push(i + di / 2, j + dj / 2);
+          }
+        }
+        const dist = new Map<number, number>();
+        for (const k of e.cells) {
+          const i = k % m.cols, j = (k - i) / m.cols;
+          let best = Infinity;
+          for (let q = 0; q < edges.length; q += 2) best = Math.min(best, Math.hypot(edges[q] - i, edges[q + 1] - j));
+          dist.set(k, best);
+        }
+        const deepest = Math.max(0.5, ...dist.values());
+        for (const k of e.cells) {
+          shape[k] = 1;
+          power[k] = Math.max(power[k], e.alpha);
+          depth[k] = Math.max(depth[k], (dist.get(k) ?? 0.5) / deepest);
+        }
       }
-      for (let k = 0; k < mask.length; k++) {
-        mask[k] = ((k >= m.cols ? tmp[k - m.cols] : tmp[k]) + 2 * tmp[k] + (k + m.cols < mask.length ? tmp[k + m.cols] : tmp[k])) / 4;
+      const blur = (a: Float32Array, passes: number) => {
+        const tmp = new Float32Array(n);
+        for (let pass = 0; pass < passes; pass++) {
+          for (let k = 0; k < n; k++) {
+            const i = k % m.cols;
+            tmp[k] = ((i > 0 ? a[k - 1] : a[k]) + 2 * a[k] + (i < m.cols - 1 ? a[k + 1] : a[k])) / 4;
+          }
+          for (let k = 0; k < n; k++) a[k] = ((k >= m.cols ? tmp[k - m.cols] : tmp[k]) + 2 * tmp[k] + (k + m.cols < n ? tmp[k + m.cols] : tmp[k])) / 4;
+        }
+      };
+      blur(shape, 1);
+      blur(power, 2);
+      blur(depth, 1);
+      const W = m.cols * S, H = m.rows * S;
+      const fctx = c.getContext('2d')!;
+      fctx.clearRect(0, 0, W, H);
+      const at = (a: Float32Array, fx: number, fy: number) => {
+        const x = Math.min(m.cols - 1, Math.max(0, fx)), y = Math.min(m.rows - 1, Math.max(0, fy));
+        const i0 = Math.floor(x), j0 = Math.floor(y), i1 = Math.min(m.cols - 1, i0 + 1), j1 = Math.min(m.rows - 1, j0 + 1);
+        const u = x - i0, v = y - j0;
+        return (a[j0 * m.cols + i0] * (1 - u) + a[j0 * m.cols + i1] * u) * (1 - v) + (a[j1 * m.cols + i0] * (1 - u) + a[j1 * m.cols + i1] * u) * v;
+      };
+      for (const e of this.funnelViews) {
+        if (e.alpha <= 0) continue;
+        let i0 = m.cols, i1 = 0, j0 = m.rows, j1 = 0;
+        for (const k of e.cells) { const i = k % m.cols, j = (k - i) / m.cols; i0 = Math.min(i0, i); i1 = Math.max(i1, i); j0 = Math.min(j0, j); j1 = Math.max(j1, j); }
+        i0 = Math.max(0, i0 - 2); j0 = Math.max(0, j0 - 2); i1 = Math.min(m.cols - 1, i1 + 2); j1 = Math.min(m.rows - 1, j1 + 2);
+        const bw = (i1 - i0 + 1) * S, bh = (j1 - j0 + 1) * S;
+        const img = fctx.getImageData(i0 * S, j0 * S, bw, bh);
+        for (let py = 0; py < bh; py++) {
+          for (let px = 0; px < bw; px++) {
+            const fx = i0 + (px + 0.5) / S - 0.5, fy = j0 + (py + 0.5) / S - 0.5;
+            const sh = at(shape, fx, fy);
+            const st = at(power, fx, fy);
+            if (sh <= 0.05 || st <= 0) continue;
+            // Кромка — светлая линия по краю; внутри — уступы вниз: темнее и синее к центру, между уступами — тонкие светлые линии.
+            const inside = smoothstep(0.35, 0.6, sh);
+            const rim = Math.max(0, 1 - Math.abs(sh - 0.45) / 0.14);
+            const d = at(depth, fx, fy) * inside;
+            const ds = d * FUNNEL_STEPS;
+            const level = Math.min(1, Math.floor(ds) / (FUNNEL_STEPS - 1));
+            const frac = ds - Math.floor(ds);
+            const contour = level > 0 && frac < 0.18 ? 1 : 0;
+            let col = mix(FUNNEL_COLOR, FUNNEL_DEEP, level);
+            col = mix(col, FUNNEL_RIM_COLOR, Math.max(rim, contour * 0.3));
+            const a = Math.max(inside * FUNNEL_ALPHA, rim * FUNNEL_RIM_ALPHA) * smoothstep(0, FUNNEL_SHOWN, st);
+            const o = (py * bw + px) * 4;
+            img.data[o] = col[0];
+            img.data[o + 1] = col[1];
+            img.data[o + 2] = col[2];
+            img.data[o + 3] = Math.max(img.data[o + 3], 255 * a);
+          }
+        }
+        fctx.putImageData(img, i0 * S, j0 * S);
       }
     }
-    for (let k = 0; k < mask.length; k++) {
-      if (mask[k] <= 0) continue;
-      img.data[k * 4] = FUNNEL_COLOR[0];
-      img.data[k * 4 + 1] = FUNNEL_COLOR[1];
-      img.data[k * 4 + 2] = FUNNEL_COLOR[2];
-      img.data[k * 4 + 3] = 255 * FUNNEL_ALPHA * smoothstep(0.15, 0.75, mask[k]);
-    }
-    fctx.putImageData(img, 0, 0);
     const ctx = this.ctx;
     ctx.globalAlpha = 1;
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(c, 0, 0, m.cols * m.cell, m.rows * m.cell);
+    // Свечение недр из отверстия — по силе воронки: рождающаяся тлеет, полная светится, тающая гаснет.
+    const glow = puffSprite(FUNNEL_GLOW);
+    ctx.globalCompositeOperation = 'screen';
+    for (const e of this.funnelViews) {
+      if (e.alpha <= 0) continue;
+      let cx = 0, cy = 0;
+      for (const k of e.cells) { const i = k % m.cols; cx += (i + 0.5) * m.cell; cy += ((k - i) / m.cols + 0.5) * m.cell; }
+      cx /= e.cells.length; cy /= e.cells.length;
+      const r = Math.max(this.px(FUNNEL_GLOW_MIN_CSS), Math.sqrt((e.cells.length * m.cell * m.cell) / Math.PI) * FUNNEL_GLOW_SIZE);
+      ctx.globalAlpha = FUNNEL_GLOW_ALPHA * e.alpha;
+      ctx.drawImage(glow, cx - r, cy - r, r * 2, r * 2);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    // Крупинки стекают в отверстие по сумме течений.
+    const v: [number, number] = [0, 0];
+    const size = this.px(FUNNEL_GRAIN_CSS);
+    const maxHop = this.px(10);
+    ctx.fillStyle = rgb(VENT_SPARK);
+    for (const e of this.funnelViews) {
+      const p = e.grains;
+      for (let q = 0; q < FUNNEL_GRAINS; q++) {
+        const o = q * 4;
+        if (p[o + 2] < 0) {
+          if (Math.random() > 0.15 * e.alpha) continue;
+          const a = Math.random() * Math.PI * 2, r = e.reach * (0.3 + 0.7 * Math.sqrt(Math.random()));
+          p[o] = e.x + Math.cos(a) * r; p[o + 1] = e.y + Math.sin(a) * r; p[o + 2] = 0; p[o + 3] = -1;
+        }
+        p[o + 2] += dt;
+        const ci = Math.min(m.cols - 1, Math.max(0, Math.floor(p[o] / m.cell)));
+        const cj = Math.min(m.rows - 1, Math.max(0, Math.floor(p[o + 1] / m.cell)));
+        if (holes[cj * m.cols + ci]) {
+          // В отверстии течение вещество не уносит: крупинка зависает и тает — уходит вниз.
+          if (p[o + 3] < 0) p[o + 3] = 0;
+          p[o + 3] += dt;
+        } else if (steps > 0) {
+          // По сумме течений: тяга внутрь + солнечное течение вбок — прямо или по спирали.
+          flowAt(w, p[o], p[o + 1], v);
+          let dx = v[0] * steps, dy = v[1] * steps;
+          const hop = Math.hypot(dx, dy);
+          if (hop > maxHop) { dx *= maxHop / hop; dy *= maxHop / hop; }
+          p[o] += dx; p[o + 1] += dy;
+        }
+        const sinking = p[o + 3] < 0 ? 1 : 1 - p[o + 3] / SINK_S;
+        if (sinking <= 0) {
+          // Ушла вниз — на её месте мелькает искра.
+          this.funnelSparks.push({ x: p[o], y: p[o + 1], t: animTime });
+          p[o + 2] = -1;
+          continue;
+        }
+        if (p[o + 2] > FUNNEL_GRAIN_LIFE) { p[o + 2] = -1; continue; }
+        const sz = size * (0.1 + 0.9 * sinking);
+        ctx.globalAlpha = e.alpha * Math.min(1, p[o + 2] * 3) * 0.9;
+        ctx.fillRect(p[o] - sz / 2, p[o + 1] - sz / 2, sz, sz);
+      }
+    }
+    // Искры — крупинки, ушедшие в недра: короткая вспышка, расширяется и гаснет.
+    this.funnelSparks = this.funnelSparks.filter((sp) => animTime - sp.t < SPARK_S);
+    ctx.globalCompositeOperation = 'screen';
+    const spark = puffSprite(VENT_SPARK);
+    for (const sp of this.funnelSparks) {
+      const f = (animTime - sp.t) / SPARK_S;
+      const r = this.px(SPARK_CSS) * (0.6 + 0.8 * f);
+      ctx.globalAlpha = (1 - f) ** 2;
+      ctx.drawImage(spark, sp.x - r, sp.y - r, r * 2, r * 2);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
   }
 
   /** Сплошной непрозрачный диск. */

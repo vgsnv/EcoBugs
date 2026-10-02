@@ -11,7 +11,7 @@ import { Drift } from './drift.ts';
 import { MINERAL_CELL, MINERAL_PERIOD, TERRAIN_PERIOD } from './constants.ts';
 import { createTerrain, levelFromGround, type TerrainState } from './terrain.ts';
 import { applyLevels } from './viscosity.ts';
-import { createMineral, transparencyAt, updateMineral, volcanoNumbers, type MineralState } from './mineral.ts';
+import { createMineral, transparencyAt, updateMineral, volcanoNumbers, funnelNumbers, type MineralState } from './mineral.ts';
 
 export interface World {
   readonly params: Readonly<WorldParams>;
@@ -131,6 +131,8 @@ export function worldHash(world: World): number {
     world.mineral.threshold, world.mineral.eruptions, world.mineral.genesis ? 1 : 0,
     world.mineral.births, world.mineral.volcanoes.length,
     ...world.mineral.volcanoes.flatMap(volcanoNumbers),
+    world.mineral.funnelBirths, world.mineral.funnels.length,
+    ...world.mineral.funnels.flatMap(funnelNumbers),
     ...world.mineral.field,
   ]);
 }

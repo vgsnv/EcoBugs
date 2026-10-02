@@ -14,7 +14,7 @@
 import {
   DISH_HEIGHT, DISH_WIDTH, ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_BURST, ERUPTION_TAIL_AREA, ERUPTION_BURSTS_MAX, BURST_WIDTH, BURST_FROM, THROW_RAYS, THROW_SAMPLES, MINERAL_SPREAD,
   MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_SINK_SETTLE, MINERAL_LAYER, MINERAL_MOBILITY, TRANSPORT_SUBSTEPS, DRIFT_REFERENCE, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
-  FUNNEL_DEPOSIT, FUNNEL_SHAPE, FUNNEL_MIN_CELLS, FUNNEL_HOLE_SHARE, FUNNEL_SNAP, FUNNEL_REACH, FUNNEL_DRAW, FUNNEL_LIFT, FUNNEL_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
+  FUNNEL_DEPOSIT, FUNNEL_SHAPE, FUNNEL_MIN_CELLS, FUNNEL_HOLE_SHARE, FUNNEL_RAMP, FUNNEL_REACH, FUNNEL_DRAW, FUNNEL_LIFT, FUNNEL_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
   VOLCANO_MIN_GAP, VOLCANO_POWER, VOLCANO_BIRTH, VOLCANO_MATURE, VOLCANO_EXTINCT_CHANCE, VOLCANO_WAKE_CHANCE, VOLCANO_DORMANT_LIFE, VOLCANO_FADE, VOLCANO_DEPOSIT_AVOID,
 } from './constants.ts';
 import type { Drift } from './drift.ts';
@@ -62,18 +62,37 @@ export interface Volcano {
   rate: number;
 }
 
-/** Воронка — отверстие в недра там, где скопились залежи: форма скопления, чуть ужатая. */
+/**
+ * Воронка — отверстие в недра в плоскости дна там, где скопилось
+ * сверхплотное. Место и форма — с рождения; сила медленно растёт (сгущается)
+ * и спадает (тает).
+ */
 export interface Funnel {
-  /** Самая густая клетка скопления — для узнавания воронки на показе. */
+  /** Номер рождения — постоянный, чтобы показ узнавал воронку. */
+  readonly id: number;
+  /** Ядро — самая густая клетка скопления при рождении; ареол — радиус от ядра. */
   readonly x: number;
   readonly y: number;
-  /** Клетки отверстия (форма) и его площадь; сколько залежей в скоплении. */
-  readonly cells: Int32Array;
-  readonly area: number;
-  readonly mass: number;
-  /** Докуда (вязкое расстояние от формы) тянет; сколько площади забирает за шаг. */
   readonly reach: number;
-  readonly draw: number;
+  /** Клетки отверстия. */
+  readonly cells: Int32Array;
+  /** Сила 0…1; сгущается (в ареоле есть сверхплотное) или тает. */
+  strength: number;
+  forming: boolean;
+}
+
+/** Числа воронки — для файла мира и контрольной суммы. */
+export function funnelNumbers(f: Funnel): number[] {
+  return [f.id, f.x, f.y, f.reach, f.strength, f.forming ? 1 : 0, ...f.cells];
+}
+
+/** Воронка из чисел funnelNumbers; null — числа негодные. */
+export function funnelFromNumbers(m: MineralState, n: unknown): Funnel | null {
+  if (!Array.isArray(n) || n.length < 7 || !n.every((x) => typeof x === 'number' && Number.isFinite(x))) return null;
+  const [id, x, y, reach, strength, forming, ...cells] = n as number[];
+  if (!Number.isSafeInteger(id) || reach <= 0 || strength < 0 || strength > 1 || (forming !== 0 && forming !== 1)) return null;
+  if (!cells.every((k) => Number.isInteger(k) && k >= 0 && k < m.field.length && !m.blocked[k])) return null;
+  return { id, x, y, reach, cells: Int32Array.from(cells), strength, forming: forming === 1 };
 }
 
 /** Числа вулкана — для файла мира и контрольной суммы (без клеток круга — они выводятся). */
@@ -109,8 +128,9 @@ export interface MineralState {
   /** Живые вулканы (и потухшие, пока не исчезли); сколько раз выбирали следующий вулкан — счётчик случайности. */
   volcanoes: Volcano[];
   births: number;
-  /** Воронки — выводятся из залежей при каждом обновлении (не хранятся). */
+  /** Воронки; сколько их родилось — счётчик номеров. */
   funnels: Funnel[];
+  funnelBirths: number;
   /**
    * Течения от вулканов и воронок (из жерла и в воронку) на сетке минерала —
    * складываются с течениями от света; пересчитываются при каждом обновлении
@@ -175,7 +195,7 @@ export function createMineral(params: WorldParams, partitions: PartitionLayout):
   const field = new Float64Array(n);
 
   const threshold = total * ERUPTION_PRESSURE * (0.5 + hash3(deriveSeed(params.seed, 'eruptions'), -1, 4) / 4294967296);
-  return { cols: COLS, rows: ROWS, cell, field, depths: total, threshold, eruptions: 0, genesis: true, volcanoes: [], births: 0, funnels: [], flow: null, version: 0, blocked, nearWall: nearWalls(blocked), region, freeArea };
+  return { cols: COLS, rows: ROWS, cell, field, depths: total, threshold, eruptions: 0, genesis: true, volcanoes: [], births: 0, funnels: [], funnelBirths: 0, flow: null, version: 0, blocked, nearWall: nearWalls(blocked), region, freeArea };
 }
 
 /**
@@ -197,7 +217,7 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
   const flowX = new Float32Array(src.length), flowY = new Float32Array(src.length);
 
   // Воронки и течения от вулканов и воронок — по состоянию на начало промежутка.
-  m.funnels = findFunnels(m, params, terrain);
+  updateFunnels(m, params, terrain, P);
   m.flow = pushFlow(m, params, terrain, tMid);
 
   // Сумма течений (свет + вулканы и воронки) по клеткам — для переноса шажками.
@@ -711,23 +731,44 @@ function spill(out: Float64Array, blocked: Uint8Array, cols: number, rows: numbe
   out[home] += mass * kept;
 }
 
+/** Клетки ареола воронки — свободные клетки не дальше её радиуса от ядра. */
+function basinCells(m: MineralState, f: Funnel): number[] {
+  const { cols, rows, cell, blocked } = m;
+  const ci = Math.floor(f.x / cell), cj = Math.floor(f.y / cell), r = Math.ceil(f.reach / cell);
+  const out: number[] = [];
+  for (let j = Math.max(0, cj - r); j <= Math.min(rows - 1, cj + r); j++) {
+    for (let i = Math.max(0, ci - r); i <= Math.min(cols - 1, ci + r); i++) {
+      const k = j * cols + i;
+      if (!blocked[k] && Math.hypot(i - ci, j - cj) * cell <= f.reach) out.push(k);
+    }
+  }
+  return out;
+}
+
 /**
- * Воронки — по местам скопления залежей: связное место, где залежей не
- * меньше FUNNEL_SHAPE средних плотностей, с ядром не меньше FUNNEL_DEPOSIT;
- * не меньше FUNNEL_MIN_CELLS клеток. Одна воронка на ареол (скопление +
- * FUNNEL_REACH): в ареоле массивной воронки другой нет. Отверстие —
- * FUNNEL_HOLE_SHARE скопления вокруг самой густой клетки; тяга — на весь
- * ареол, забирает за шаг FUNNEL_DRAW площади его круга.
+ * Воронки за обновление. Жизнь: если в ареоле есть сверхплотное (залежи
+ * не меньше, чем у ядра при рождении, — FUNNEL_DEPOSIT средних) — сгущается, иначе тает (FUNNEL_RAMP шагов от
+ * нуля до полной силы); растаяла — исчезает. Рождение: связное место, где
+ * залежей не меньше FUNNEL_SHAPE средних, с ядром не меньше FUNNEL_DEPOSIT,
+ * не меньше FUNNEL_MIN_CELLS клеток, — если его ядро не в ареоле живой
+ * воронки (сначала самые массивные). Ареол — радиус скопления + FUNNEL_REACH;
+ * отверстие — FUNNEL_HOLE_SHARE скопления вокруг самой густой клетки.
  */
-function findFunnels(m: MineralState, params: WorldParams, terrain: TerrainState): Funnel[] {
+function updateFunnels(m: MineralState, params: WorldParams, terrain: TerrainState, P: number): void {
   const { cols, rows, cell, blocked } = m;
   const area = cell * cell;
   const core = FUNNEL_DEPOSIT * params.mineralStock * area;
   const limit = FUNNEL_SHAPE * params.mineralStock * area;
   const dep = terrain.deposits;
+  const ramp = (P / FUNNEL_RAMP) * params.terrainSpeed;
+  for (const f of m.funnels) {
+    f.forming = basinCells(m, f).some((k) => dep[k] > core);
+    f.strength = Math.max(0, Math.min(1, f.strength + (f.forming ? ramp : -ramp)));
+  }
+  m.funnels = m.funnels.filter((f) => f.forming || f.strength > 0);
+  // Рождение новых.
   const seen = new Uint8Array(dep.length);
   const inside = (k: number) => !blocked[k] && dep[k] >= limit;
-  const out: Funnel[] = [];
   const candidates: { best: number; members: number[]; mass: number }[] = [];
   const stack: number[] = [];
   for (let k0 = 0; k0 < dep.length; k0++) {
@@ -745,19 +786,16 @@ function findFunnels(m: MineralState, params: WorldParams, terrain: TerrainState
       const next = [i > 0 ? k - 1 : -1, i < cols - 1 ? k + 1 : -1, j > 0 ? k - cols : -1, j < rows - 1 ? k + cols : -1];
       for (const n of next) if (n >= 0 && !seen[n] && inside(n)) { seen[n] = 1; stack.push(n); }
     }
-    // Воронка — только у заметного скопления с ядром.
     if (members.length < FUNNEL_MIN_CELLS || dep[best] < core) continue;
     candidates.push({ best, members, mass });
   }
-  // Одна воронка на ареол: сначала самые массивные; скопление, чьё ядро в
-  // ареоле уже принятой воронки, своей не получает (входит в её водосбор).
   candidates.sort((a, b) => b.mass - a.mass || a.best - b.best);
   for (const c of candidates) {
     const i = c.best % cols, j = (c.best - i) / cols;
     const x = (i + 0.5) * cell, y = (j + 0.5) * cell;
     const halo = Math.sqrt((c.members.length * area) / Math.PI) + FUNNEL_REACH;
-    if (out.some((f) => Math.hypot(f.x - x, f.y - y) < Math.max(halo, f.reach))) continue;
-    // Отверстие — FUNNEL_HOLE_SHARE скопления: растёт от самой густой клетки по самым густым соседям.
+    if (m.funnels.some((f) => Math.hypot(f.x - x, f.y - y) < Math.max(halo, f.reach))) continue;
+    // Отверстие растёт от самой густой клетки по самым густым соседям до доли скопления.
     const want = Math.max(1, Math.round(c.members.length * FUNNEL_HOLE_SHARE));
     const member = new Set(c.members);
     const hole = new Set<number>([c.best]);
@@ -776,33 +814,8 @@ function findFunnels(m: MineralState, params: WorldParams, terrain: TerrainState
       hole.add(pick);
       grow(pick);
     }
-    const cells = Int32Array.from([...hole].sort((a, b) => a - b));
-    out.push({
-      x, y, cells, area: cells.length * area, mass: c.mass, reach: halo,
-      draw: FUNNEL_DRAW * params.terrainSpeed * Math.PI * halo * halo,
-    });
+    m.funnels.push({ id: m.funnelBirths++, x, y, reach: halo, cells: Int32Array.from([...hole].sort((a, b) => a - b)), strength: 0, forming: true });
   }
-  return out;
-}
-
-/**
- * Течения от вулканов и воронок в шаг t: толчок извергающихся вулканов (сила
- * — ventPush) и тяга воронок (сила — сколько забирает) × их единичные течения
- * (см. push.ts): гаснут по вязкости, огибают перегородки. null — нет ни того, ни другого.
- */
-/** Круг примерно из `count` свободных клеток вокруг клетки `core` (по расстоянию, при равенстве — по номеру). */
-function sinkDisk(m: MineralState, core: number, count: number): number[] {
-  const ci = core % m.cols, cj = (core - ci) / m.cols;
-  const r = Math.ceil(Math.sqrt(count / Math.PI)) + 1;
-  const near: [number, number][] = [];
-  for (let j = Math.max(0, cj - r); j <= Math.min(m.rows - 1, cj + r); j++) {
-    for (let i = Math.max(0, ci - r); i <= Math.min(m.cols - 1, ci + r); i++) {
-      const k = j * m.cols + i;
-      if (!m.blocked[k]) near.push([(i - ci) ** 2 + (j - cj) ** 2, k]);
-    }
-  }
-  near.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  return near.slice(0, Math.max(1, count)).map((e) => e[1]);
 }
 
 function pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, t: number): { vx: Float32Array; vy: Float32Array } | null {
@@ -824,38 +837,36 @@ function pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, t
     const vent = Math.floor(vol.y / m.cell) * m.cols + Math.floor(vol.x / m.cell);
     add(pushField(m, terrain.applied, `v${vent}`, [vent]), q);
   }
+  // Тяга воронки — сила × единичное течение её отверстия (место и форма постоянны — кеш по номеру).
   for (const f of m.funnels) {
-    // Сток — компактный круг у самой густой клетки, размер по ступеням (×2 по
-    // площади): единичное течение зависит только от ключа и местности — кеш
-    // работает, загрузка точна.
-    // Ядро — на грубой сетке (FUNNEL_SNAP клеток): мелкие колебания самой густой клетки не пересчитывают течение.
-    const si = Math.min(m.cols - 1, Math.floor(Math.floor(f.x / m.cell) / FUNNEL_SNAP) * FUNNEL_SNAP + (FUNNEL_SNAP >> 1));
-    const sj = Math.min(m.rows - 1, Math.floor(Math.floor(f.y / m.cell) / FUNNEL_SNAP) * FUNNEL_SNAP + (FUNNEL_SNAP >> 1));
-    const core = sj * m.cols + si;
-    const tier = Math.max(0, Math.round(Math.log2(f.cells.length)));
-    add(pushField(m, terrain.applied, `f${core}:${tier}`, sinkDisk(m, core, 2 ** tier)), -f.draw);
+    if (f.strength <= 0) continue;
+    add(pushField(m, terrain.applied, `f${f.id}`, Array.from(f.cells)), -FUNNEL_DRAW * params.terrainSpeed * Math.PI * f.reach * f.reach * f.strength);
   }
   return { vx, vy };
 }
 
 /**
- * Отверстие воронки за обновление: растворённый минерал в нём уходит в недра
- * (FUNNEL_SINK за шаг);
- * залежи в нём понемногу поднимаются в среду (и в следующий раз — тоже вниз).
+ * Воронка забирает только сверхплотное — избыток сверх FUNNEL_SHAPE средних:
+ * залежи ареола поднимаются в среду (FUNNEL_LIFT за шаг), растворённое в
+ * отверстии уходит в недра (FUNNEL_SINK за шаг); всё — с силой воронки.
  * Возвращает, сколько ушло в недра.
  */
 function sinkFunnel(m: MineralState, params: WorldParams, terrain: TerrainState, f: Funnel, P: number): number {
-  const lift = (1 - (1 - FUNNEL_LIFT) ** P) * params.terrainSpeed;
+  if (f.strength <= 0) return 0;
+  const limit = FUNNEL_SHAPE * params.mineralStock * m.cell * m.cell;
+  const lift = (1 - (1 - FUNNEL_LIFT) ** P) * params.terrainSpeed * f.strength;
+  const take = (1 - (1 - FUNNEL_SINK) ** P) * params.terrainSpeed * f.strength;
   const dep = terrain.deposits;
-  const take = (1 - (1 - FUNNEL_SINK) ** P) * params.terrainSpeed;
-  let sunk = 0;
-  for (const k of f.cells) {
-    const g0 = m.field[k] * take;
-    sunk += g0;
-    m.field[k] -= g0;
-    const g = dep[k] * lift;
+  for (const k of basinCells(m, f)) {
+    const g = Math.max(0, dep[k] - limit) * lift;
     dep[k] -= g;
     m.field[k] += g;
+  }
+  let sunk = 0;
+  for (const k of f.cells) {
+    const g = Math.max(0, m.field[k] - limit) * take;
+    sunk += g;
+    m.field[k] -= g;
   }
   return sunk;
 }

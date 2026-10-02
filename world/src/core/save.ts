@@ -7,11 +7,11 @@
 import { makeParams, validateParams, type WorldParams } from './params.ts';
 import { applyTerrain, createWorld, worldHash, type World } from './world.ts';
 import { movement } from './terrain.ts';
-import { volcanoFromNumbers, volcanoNumbers } from './mineral.ts';
+import { funnelFromNumbers, funnelNumbers, volcanoFromNumbers, volcanoNumbers } from './mineral.ts';
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 16;
+export const WORLD_FORMAT_VERSION = 17;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -30,6 +30,7 @@ const OLD_FORMATS: Record<number, string> = {
   13: 'тогда минерал при сотворении лежал в среде, а извержения не были ограничены',
   14: 'тогда вулканы стояли на местах из сида, а извержение выбрасывало минерал в круг постоянного радиуса',
   15: 'тогда течения были лучами от пятен, с параметрами силы и длины',
+  16: 'тогда минерал уходил в недра без воронок, а вулкан выбрасывал одним залпом',
 };
 
 export interface MineralFile {
@@ -42,6 +43,9 @@ export interface MineralFile {
   /** Сколько раз выбирали следующий вулкан; вулканы — числа volcanoNumbers (номер, место, мощность, стадия, её начало и конец, впервые ли готовится, извержений, идущее извержение). */
   births: number;
   volcanoes: number[][];
+  /** Воронки — числа funnelNumbers (номер, ядро, радиус ареола, сила, сгущается ли, клетки отверстия); сколько родилось. */
+  funnels: number[][];
+  funnelBirths: number;
   /** Растворённый минерал по клеткам: Float64, little-endian, base64. */
   field: string;
 }
@@ -97,6 +101,8 @@ export function worldToFile(world: World, savedAt?: Date): WorldFile {
       genesis: world.mineral.genesis ? 1 : 0,
       births: world.mineral.births,
       volcanoes: world.mineral.volcanoes.map(volcanoNumbers),
+      funnels: world.mineral.funnels.map(funnelNumbers),
+      funnelBirths: world.mineral.funnelBirths,
       field: toBase64(new Uint8Array(world.mineral.field.buffer.slice(0))),
     },
     terrain: {
@@ -233,6 +239,15 @@ function restoreMineral(world: World, raw: unknown): string[] {
   }
   m.volcanoes = volcanoes;
   m.births = raw.births as number;
+  if (!Array.isArray(raw.funnels) || !Number.isSafeInteger(raw.funnelBirths) || (raw.funnelBirths as number) < 0) return ['Нет воронок'];
+  const funnels = [];
+  for (const [i, entry] of (raw.funnels as unknown[]).entries()) {
+    const f = funnelFromNumbers(m, entry);
+    if (!f) return [`Воронка ${i + 1}: числа повреждены`];
+    funnels.push(f);
+  }
+  m.funnels = funnels;
+  m.funnelBirths = raw.funnelBirths as number;
   m.field = field;
   m.depths = raw.depths;
   if (typeof raw.threshold !== 'number' || !(raw.threshold > 0) || !Number.isSafeInteger(raw.eruptions) || (raw.genesis !== 0 && raw.genesis !== 1)) return ['Давление недр повреждено'];
