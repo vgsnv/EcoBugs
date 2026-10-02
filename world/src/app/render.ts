@@ -1,3 +1,4 @@
+import { finishCalculation, type Calculation } from '../core/task.ts';
 /**
  * Отрисовка мира на холсте в разрешении экрана — как освещённая местность,
  * с камерой: масштаб и перемещение. Вязкость — сама местность: вода синяя,
@@ -296,7 +297,7 @@ const REDRAW_BLOCK = 64;
 const REDRAW_LEVEL = 0.02;
 const REDRAW_DEPOSIT = 0.3;
 /** Сколько мс кадра можно тратить на дорисовку подложки. */
-const REDRAW_BUDGET_MS = 4;
+
 /** Шаг маски воды для бликов, единиц мира. */
 const WATER_MASK_STEP = 4;
 /** Дымку минерала пересобирать не чаще, мс. */
@@ -311,8 +312,8 @@ const TILE_SCALE_MIN = 0.5;
 const TILE_SCALE_MAX = 32;
 /** Сколько плиток держать в памяти (≈256 КБ каждая). */
 const TILE_CACHE = 240;
-/** Сколько миллисекунд кадра можно тратить на новые плитки. */
-const TILE_BUDGET_MS = 8;
+/** Общий бюджет кадра на подложку и новые плитки, мс. */
+const TERRAIN_WORK_BUDGET_MS = 4;
 /** Наибольшее приближение — пикселей экрана (CSS) на единицу мира. */
 const MAX_ZOOM_CSS = 24;
 
@@ -369,6 +370,10 @@ function terrainSampler(world: World): (x: number, y: number, out: Uint8ClampedA
 
 /** Кусок местности [x0, x0 + w) × [y0, y0 + h) единиц мира в масштабе `scale`; вне чашки — прозрачно. */
 function renderTerrain(sample: ReturnType<typeof terrainSampler>, x0: number, y0: number, pw: number, ph: number, scale: number, dish: Dish): HTMLCanvasElement {
+  return finishCalculation(renderTerrainTask(sample, x0, y0, pw, ph, scale, dish));
+}
+
+function* renderTerrainTask(sample: ReturnType<typeof terrainSampler>, x0: number, y0: number, pw: number, ph: number, scale: number, dish: Dish): Calculation<HTMLCanvasElement> {
   const { width, height } = dish;
   pw = Math.ceil(pw); ph = Math.ceil(ph);
   const c = document.createElement('canvas');
@@ -377,6 +382,7 @@ function renderTerrain(sample: ReturnType<typeof terrainSampler>, x0: number, y0
   const tctx = c.getContext('2d')!;
   const img = tctx.createImageData(pw, ph);
   for (let j = 0; j < ph; j++) {
+    if ((j & 3) === 0) yield;
     const y = y0 + (j + 0.5) / scale;
     if (y < 0 || y >= height) continue;
     for (let i = 0; i < pw; i++) {
@@ -413,6 +419,7 @@ export class WorldRenderer {
   private readonly rulers: CoordinateRulers;
 
   setRulers(enabled: boolean): void {
+    this.frameKey = '';
     const wasFitted = this.fitted;
     this.rulers.toggle(enabled);
     this.resizeKeepingView();
@@ -452,6 +459,7 @@ export class WorldRenderer {
   private markerStep = -1;
   private markerView = '';
   private streakBatch = 0;
+  private streakCursor = 0;
   /** Дымка минерала (клетка поля — пиксель) и версия поля, по которой она построена. */
   private readonly mineralCanvas = document.createElement('canvas');
   /** Затемнение от мутности (серый для умножения), той же сетки. */
@@ -507,6 +515,11 @@ export class WorldRenderer {
   private sample!: ReturnType<typeof terrainSampler>;
   /** Плитки местности: ключ «масштаб:i:j», порядок — давность использования. */
   private readonly tiles = new Map<string, HTMLCanvasElement>();
+  private tileWork: { key: string; i: number; j: number; scale: number; task: Calculation<HTMLCanvasElement> } | null = null;
+  private terrainDeadline = 0;
+  private terrainPending = false;
+  private frameKey = '';
+  private minimapKey = '';
   /** Кромка стекла (в единицах мира) — строится один раз на мир. */
   private edges = new Path2D();
   /** Камера: центр вида в единицах мира и пикселей устройства на единицу мира. */
@@ -530,6 +543,7 @@ export class WorldRenderer {
   }
 
   setWorld(world: World): void {
+    this.frameKey = ''; this.minimapKey = ''; this.terrainPending = false;
     this.world = world;
     this.processes = null;
     this.processDrawn = null;
@@ -543,6 +557,7 @@ export class WorldRenderer {
     this.sample = terrainSampler(world);
     this.base = renderTerrain(this.sample, 0, 0, this.width * TILE_SCALE_MIN, this.height * TILE_SCALE_MIN, TILE_SCALE_MIN, world.dish);
     this.tiles.clear();
+    this.tileWork = null;
     this.edges = this.buildEdges();
     this.parts = this.buildParts();
     this.waterMask = this.buildWaterMask();
@@ -578,10 +593,9 @@ export class WorldRenderer {
    * воды и сбросить плитки. Не чаще раза в TERRAIN_REDRAW_MS: на ускорении
    * пересборки идут часто, а картинка нужна плавная.
    */
-  /** Дорисовать часть очереди изменившихся блоков подложки — в пределах REDRAW_BUDGET_MS. */
+  /** Дорисовать часть очереди изменившихся блоков подложки — в пределах общего бюджета построения местности. */
   private drainRedraw(): void {
     if (this.redrawQueue.size === 0) return;
-    const start = performance.now();
     const bctx = this.base.getContext('2d')!;
     const wctx = this.waterMask.getContext('2d')!;
     for (const b of this.redrawQueue) {
@@ -590,7 +604,7 @@ export class WorldRenderer {
       const px = REDRAW_BLOCK * TILE_SCALE_MIN;
       bctx.drawImage(renderTerrain(this.sample, x0, y0, px, px, TILE_SCALE_MIN, this.world.dish), x0 * TILE_SCALE_MIN, y0 * TILE_SCALE_MIN);
       wctx.putImageData(this.waterMaskBlock(x0, y0), x0 / WATER_MASK_STEP, y0 / WATER_MASK_STEP);
-      if (performance.now() - start > REDRAW_BUDGET_MS) break;
+      if (performance.now() >= this.terrainDeadline) break;
     }
   }
 
@@ -622,6 +636,7 @@ export class WorldRenderer {
       }
     }
     if (!any) return;
+    this.tileWork = null;
     this.buildSparkles();
     // Подложку и маску воды по изменившимся блокам дорисовываем понемногу,
     // по кадрам (drainRedraw), — чтобы не было рывка.
@@ -654,9 +669,13 @@ export class WorldRenderer {
     const wasAlignedLeft = !!this.world && Math.abs(this.canvas.width / 2 - (this.cx + this.wall) * this.zoom) < 1e-6;
     const changed = w !== this.canvas.width || h !== this.canvas.height;
     if (changed) {
-      for (const c of [this.canvas, this.spots, this.shade, this.glint]) {
-        c.width = w;
-        c.height = h;
+      this.canvas.width = w; this.canvas.height = h;
+      // Мягкие световые эффекты — один пиксель на CSS-пиксель;
+      // карта, линейки и штрихи остаются в полном разрешении устройства.
+      const effectScale = Math.min(1, 1 / this.dpr);
+      for (const c of [this.spots, this.shade, this.glint]) {
+        c.width = Math.max(1, Math.round(w * effectScale));
+        c.height = Math.max(1, Math.round(h * effectScale));
       }
     }
     if (!this.world || !changed) return;
@@ -731,6 +750,12 @@ export class WorldRenderer {
     return [z, 0, 0, z, this.canvas.width / 2 - this.cx * z, this.canvas.height / 2 - this.cy * z];
   }
 
+  private effectView(): readonly [number, number, number, number, number, number] {
+    const [a, b, c, d, e, f] = this.view();
+    const sx = this.spots.width / this.canvas.width, sy = this.spots.height / this.canvas.height;
+    return [a * sx, b * sy, c * sx, d * sy, e * sx, f * sy];
+  }
+
   /** Экранные пиксели (CSS) → единицы мира (для толщины линий). */
   private px(n: number): number {
     return (n * this.dpr) / this.zoom;
@@ -745,7 +770,7 @@ export class WorldRenderer {
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(this.base, 0, 0, this.width, this.height);
     const scale = Math.min(TILE_SCALE_MAX, Math.max(TILE_SCALE_MIN, 2 ** Math.ceil(Math.log2(this.zoom))));
-    if (scale <= TILE_SCALE_MIN) return;
+    if (scale <= TILE_SCALE_MIN) { this.terrainPending = false; return; }
     const span = TILE / scale;
     const [x0, y0] = this.screenToWorld(0, 0);
     const [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
@@ -770,13 +795,25 @@ export class WorldRenderer {
     // Сначала ближние к центру вида.
     const ci = (x0 + x1) / 2 / span, cj = (y0 + y1) / 2 / span;
     missing.sort((a, b) => Math.hypot(a[0] - ci, a[1] - cj) - Math.hypot(b[0] - ci, b[1] - cj));
-    const start = performance.now();
-    for (const [i, j] of missing) {
-      if (performance.now() - start > TILE_BUDGET_MS) break;
-      const tile = renderTerrain(this.sample, i * span, j * span, TILE, TILE, scale, this.world.dish);
-      this.tiles.set(`${scale}:${i}:${j}`, tile);
-      ctx.drawImage(tile, i * span, j * span, span, span);
+    if (this.tileWork && (this.tileWork.scale !== scale || this.tileWork.i < i0 || this.tileWork.i > i1 || this.tileWork.j < j0 || this.tileWork.j > j1)) this.tileWork = null;
+    let index = 0;
+    while (performance.now() < this.terrainDeadline) {
+      if (!this.tileWork) {
+        const next = missing[index++];
+        if (!next) break;
+        const [i, j] = next;
+        const key = `${scale}:${i}:${j}`;
+        if (this.tiles.has(key)) continue;
+        this.tileWork = { key, i, j, scale, task: renderTerrainTask(this.sample, i * span, j * span, TILE, TILE, scale, this.world.dish) };
+      }
+      const result = this.tileWork.task.next();
+      if (!result.done) continue;
+      const { key, i, j } = this.tileWork;
+      this.tiles.set(key, result.value);
+      ctx.drawImage(result.value, i * span, j * span, span, span);
+      this.tileWork = null;
     }
+    this.terrainPending = !!this.tileWork || missing.some(([i, j]) => !this.tiles.has(`${scale}:${i}:${j}`));
     while (this.tiles.size > TILE_CACHE) this.tiles.delete(this.tiles.keys().next().value!);
   }
 
@@ -794,6 +831,11 @@ export class WorldRenderer {
 
   /** Кадр; `animTime` — секунды анимации бликов (стоит на паузе). */
   draw(animTime = 0, flowStep = this.world.step): void {
+    const key = `${animTime}:${flowStep}:${this.world.step}:${this.world.mineral.version}:${this.world.viscosity.version}:${this.zoom}:${this.cx}:${this.cy}:${this.canvas.width}:${this.canvas.height}:${this.showProcesses}`;
+    const pendingCurves = !this.showProcesses && this.flowMarkers.some((marker) => !marker.streak.length);
+    if (key === this.frameKey && !this.terrainPending && !this.redrawQueue.size && !pendingCurves) return;
+    this.frameKey = key;
+    this.terrainDeadline = performance.now() + TERRAIN_WORK_BUDGET_MS;
     this.refreshTerrain();
     this.drainRedraw();
     const w = this.world;
@@ -822,7 +864,7 @@ export class WorldRenderer {
       const sctx = this.sctx;
       sctx.setTransform(1, 0, 0, 1, 0, 0);
       sctx.clearRect(0, 0, this.spots.width, this.spots.height);
-      sctx.setTransform(...view);
+      sctx.setTransform(...this.effectView());
       const spotsPath = new Path2D();
       // Отрезков в контуре — столько, чтобы при любом масштабе край оставался гладким.
       const segments = Math.min(360, Math.max(48, Math.round(p.spotSize * z)));
@@ -853,7 +895,7 @@ export class WorldRenderer {
       hctx.fillStyle = rgb(SHADE_COLOR);
       hctx.fillRect(0, 0, this.shade.width, this.shade.height);
       hctx.globalCompositeOperation = 'destination-out';
-      hctx.filter = `blur(${penumbra.toFixed(1)}px)`;
+      hctx.filter = `blur(${(penumbra * this.spots.width / this.canvas.width).toFixed(1)}px)`;
       hctx.globalAlpha = Math.min(1, lit);
       hctx.drawImage(this.spots, 0, 0);
       hctx.globalCompositeOperation = 'source-over';
@@ -864,21 +906,21 @@ export class WorldRenderer {
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'multiply';
-    ctx.drawImage(this.shade, 0, 0);
+    ctx.drawImage(this.shade, 0, 0, this.canvas.width, this.canvas.height);
     // Свет — солнечный тёплый оттенок освещённых мест; нагрев его усиливает.
     const warmth = Math.min(0.95, SUN_WARMTH * Math.min(1, lit) + HEAT_WARMTH * Math.min(1, p.spotHeat / 2));
     ctx.globalAlpha = warmth;
     ctx.filter = `blur(${penumbra.toFixed(1)}px)`;
-    ctx.drawImage(this.spots, 0, 0);
+    ctx.drawImage(this.spots, 0, 0, this.canvas.width, this.canvas.height);
     // И чуть высветляет их, чтобы свет читался и на тёмной суше.
     ctx.globalCompositeOperation = 'screen';
     ctx.globalAlpha = SUN_GLOW * Math.min(1, lit);
-    ctx.drawImage(this.spots, 0, 0);
+    ctx.drawImage(this.spots, 0, 0, this.canvas.width, this.canvas.height);
     // Яркое солнце высветляет освещённые места.
     if (lit > 1) {
       ctx.globalAlpha = Math.min(1, (lit - 1) * GLARE_STRENGTH);
       ctx.filter = `blur(${penumbra.toFixed(1)}px) grayscale(1) brightness(2)`;
-      ctx.drawImage(this.spots, 0, 0);
+      ctx.drawImage(this.spots, 0, 0, this.canvas.width, this.canvas.height);
     }
     ctx.filter = 'none';
     this.drawGlints(animTime, lit);
@@ -1545,9 +1587,9 @@ export class WorldRenderer {
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'source-over';
     g.clearRect(0, 0, this.glint.width, this.glint.height);
-    g.setTransform(...this.view());
+    g.setTransform(...this.effectView());
     const [x0, y0] = this.screenToWorld(0, 0);
-    const [x1, y1] = this.screenToWorld(this.glint.width, this.glint.height);
+    const [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
     const buckets = [new Path2D(), new Path2D(), new Path2D()];
     for (let n = 0; n < pts.length; n += 3) {
       const x = pts[n], y = pts[n + 1];
@@ -1581,7 +1623,7 @@ export class WorldRenderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'screen';
     ctx.globalAlpha = Math.min(1, lit);
-    ctx.drawImage(this.glint, 0, 0);
+    ctx.drawImage(this.glint, 0, 0, this.canvas.width, this.canvas.height);
   }
 
   /** Точки блёсток: на плотных залежах неглубоко — по нескольку на клетку, место и фаза из хеша. */
@@ -1615,9 +1657,9 @@ export class WorldRenderer {
       this.buildFoam();
     }
     const g = this.gctx;
-    const view = this.view();
+    const view = this.effectView();
     const [x0, y0] = this.screenToWorld(0, 0);
-    const [x1, y1] = this.screenToWorld(this.glint.width, this.glint.height);
+    const [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'source-over';
@@ -1639,7 +1681,7 @@ export class WorldRenderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'screen';
     ctx.globalAlpha = FOAM_ALPHA;
-    ctx.drawImage(this.glint, 0, 0);
+    ctx.drawImage(this.glint, 0, 0, this.canvas.width, this.canvas.height);
   }
 
   private buildFoam(): void {
@@ -1681,12 +1723,12 @@ export class WorldRenderer {
   private drawGlints(time: number, lit: number): void {
     const g = this.gctx;
     const [x0, y0] = this.screenToWorld(0, 0);
-    const [x1, y1] = this.screenToWorld(this.glint.width, this.glint.height);
+    const [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'source-over';
     g.clearRect(0, 0, this.glint.width, this.glint.height);
-    g.setTransform(...this.view());
+    g.setTransform(...this.effectView());
     GLINT_LAYERS.forEach((layer, n) => {
       const k = layer.size / 256;
       this.ripplePattern.setTransform(new DOMMatrix([k, 0, 0, k, layer.vx * time, layer.vy * time]));
@@ -1704,7 +1746,7 @@ export class WorldRenderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'screen';
     ctx.globalAlpha = GLINT_ALPHA * Math.min(1, lit);
-    ctx.drawImage(this.glint, 0, 0);
+    ctx.drawImage(this.glint, 0, 0, this.canvas.width, this.canvas.height);
   }
 
   /** Небольшие голубые штрихи со следами реального перемещения воды. */
@@ -1743,7 +1785,10 @@ export class WorldRenderer {
     ctx.setLineDash([]); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     const tails = [new Path2D(), new Path2D(), new Path2D()];
     const heads = new Path2D();
-    for (let i = 0; i < this.flowMarkers.length; i++) {
+    const curveDeadline = performance.now() + 1.5;
+    let rebuilt = 0;
+    for (let offset = 0; offset < this.flowMarkers.length; offset++) {
+      const i = (this.streakCursor + offset) % this.flowMarkers.length;
       const marker = this.flowMarkers[i];
       if (elapsed > 0 && (step - marker.born >= 600 || !advanceFlowMarker(marker, elapsed, velocity, allowed))) {
         const anchor = this.markerAnchors[i];
@@ -1753,7 +1798,8 @@ export class WorldRenderer {
       // Длина штриха — условный знак направления, а не пройденное расстояние.
       // Перестраиваем четверть штрихов за кадр, остальные переносим вместе с водой.
       const speed = Math.hypot(marker.vx, marker.vy);
-      if (!marker.streak.length || (elapsed > 0 && i % 4 === this.streakBatch)) {
+      if ((!marker.streak.length || (elapsed > 0 && i % 4 === this.streakBatch)) && rebuilt < 150 && performance.now() < curveDeadline) {
+        rebuilt++;
         const length = Math.min(64, this.px(Math.min(32, Math.max(14, speed / DRIFT_REFERENCE * 20))));
         const segments = Math.max(6, Math.ceil(length / 4));
         const pts = [{ x: 0, y: 0 }];
@@ -1782,6 +1828,7 @@ export class WorldRenderer {
         heads.lineTo(marker.x, marker.y);
       }
     }
+    this.streakCursor = (this.streakCursor + Math.max(1, rebuilt)) % Math.max(1, this.flowMarkers.length);
     this.streakBatch = (this.streakBatch + 1) % 4;
     ctx.lineWidth = this.px(0.85);
     for (let i = 2; i >= 0; i--) {
@@ -1796,6 +1843,9 @@ export class WorldRenderer {
   /** Мини-карта в отдельной панели: вся чашка, пятна света, перегородки и рамка вида. */
   drawMinimap(mini: HTMLCanvasElement): void {
     if (!this.world || !mini.clientWidth || !mini.clientHeight) return;
+    const key = `${this.world.step}:${this.world.viscosity.version}:${this.zoom}:${this.cx}:${this.cy}:${mini.clientWidth}:${mini.clientHeight}:${this.dpr}:${this.redrawQueue.size}`;
+    if (key === this.minimapKey) return;
+    this.minimapKey = key;
     const w = Math.round(mini.clientWidth * this.dpr);
     const h = Math.round(mini.clientHeight * this.dpr);
     if (mini.width !== w || mini.height !== h) { mini.width = w; mini.height = h; }
