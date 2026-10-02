@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "simulate": "node --experimental-strip-types scripts/simulate.mjs"
+    "simulate": "node --experimental-strip-types scripts/simulate.mjs",
+    "benchmark": "node --experimental-strip-types scripts/benchmark.mjs"
   },
   "overrides": {
     "source-map-js": "1.2.1"

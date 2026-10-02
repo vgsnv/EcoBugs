@@ -1,0 +1,223 @@
+{
+  "node": "v24.11.1",
+  "cpu": "Apple M1",
+  "note": "Sequential CPU-only runs; windows include JIT, portions measured separately; memory is process-wide.",
+  "results": [
+    {
+      "params": {
+        "seed": 1,
+        "shape": "rectangle",
+        "aspectRatio": 1.3333333333333333
+      },
+      "createMs": 292.296709,
+      "initialDriftMs": 92.40525000000002,
+      "cells": 30000,
+      "windows": [
+        {
+          "startStep": 0,
+          "endStep": 50000,
+          "elapsedMs": 5511.9829580000005,
+          "stepsPerSecond": 9071.145607848955,
+          "updateMs": {
+            "count": 500,
+            "p50": 7.565500000000156,
+            "p95": 35.086791999999946,
+            "p99": 41.146165999999994,
+            "max": 230.63441599999987
+          }
+        },
+        {
+          "startStep": 50000,
+          "endStep": 100000,
+          "elapsedMs": 5878.2847919999995,
+          "stepsPerSecond": 8505.8825438412,
+          "updateMs": {
+            "count": 500,
+            "p50": 7.563625000000684,
+            "p95": 30.657791999999972,
+            "p99": 47.190582999999606,
+            "max": 308.42804100000103
+          }
+        },
+        {
+          "startStep": 100000,
+          "endStep": 150000,
+          "elapsedMs": 4826.805165999998,
+          "stepsPerSecond": 10358.818779800738,
+          "updateMs": {
+            "count": 500,
+            "p50": 6.387875000000349,
+            "p95": 30.069417000000612,
+            "p99": 37.27095899999949,
+            "max": 254.5489579999994
+          }
+        }
+      ],
+      "hashAt150000": 4188516143,
+      "relativeMassError": -3.732851214231544e-13,
+      "saveMs": 31.450832999998966,
+      "loadMs": 248.8160829999979,
+      "saveBytes": 1124025,
+      "roundTripMatches": true,
+      "continuationMatches": true,
+      "portionMs": {
+        "count": 89288,
+        "p50": 0.008416999997280072,
+        "p95": 0.029875000000174623,
+        "p99": 0.046709000002010725,
+        "max": 95.20100000000093
+      },
+      "memory": {
+        "rss": 155385856,
+        "heapTotal": 82247680,
+        "heapUsed": 22150848,
+        "external": 27753024,
+        "arrayBuffers": 18958135
+      }
+    },
+    {
+      "params": {
+        "seed": 2,
+        "shape": "circle",
+        "aspectRatio": 1
+      },
+      "createMs": 301.940083999998,
+      "initialDriftMs": 72.01487500000076,
+      "cells": 38416,
+      "windows": [
+        {
+          "startStep": 0,
+          "endStep": 50000,
+          "elapsedMs": 5023.810999999998,
+          "stepsPerSecond": 9952.60371060934,
+          "updateMs": {
+            "count": 500,
+            "p50": 6.832500000000437,
+            "p95": 27.660625000000437,
+            "p99": 37.08820900000137,
+            "max": 223.41500000000087
+          }
+        },
+        {
+          "startStep": 50000,
+          "endStep": 100000,
+          "elapsedMs": 5863.946791999999,
+          "stepsPerSecond": 8526.680369646849,
+          "updateMs": {
+            "count": 500,
+            "p50": 7.296875,
+            "p95": 30.808000000000902,
+            "p99": 38.8393329999999,
+            "max": 338.1000840000015
+          }
+        },
+        {
+          "startStep": 100000,
+          "endStep": 150000,
+          "elapsedMs": 5612.680166000002,
+          "stepsPerSecond": 8908.40000164014,
+          "updateMs": {
+            "count": 500,
+            "p50": 6.281291999999667,
+            "p95": 31.310582999998587,
+            "p99": 37.52283399999942,
+            "max": 362.92000000000553
+          }
+        }
+      ],
+      "hashAt150000": 3666940170,
+      "relativeMassError": -4.390769080786875e-12,
+      "saveMs": 29.28545899999881,
+      "loadMs": 265.38179200000013,
+      "saveBytes": 1442135,
+      "roundTripMatches": true,
+      "continuationMatches": true,
+      "portionMs": {
+        "count": 119530,
+        "p50": 0.006500000003143214,
+        "p95": 0.026458000000275206,
+        "p99": 0.035499999998137355,
+        "max": 17.339959000004455
+      },
+      "memory": {
+        "rss": 244662272,
+        "heapTotal": 84574208,
+        "heapUsed": 47256920,
+        "external": 32723169,
+        "arrayBuffers": 23666557
+      }
+    },
+    {
+      "params": {
+        "seed": 3,
+        "shape": "rectangle",
+        "aspectRatio": 1.7777777777777777
+      },
+      "createMs": 255.937665999998,
+      "initialDriftMs": 51.27649999999994,
+      "cells": 30030,
+      "windows": [
+        {
+          "startStep": 0,
+          "endStep": 50000,
+          "elapsedMs": 4174.639791000001,
+          "stepsPerSecond": 11977.081258074939,
+          "updateMs": {
+            "count": 500,
+            "p50": 5.9407910000009,
+            "p95": 27.96700000000419,
+            "p99": 31.804833000001963,
+            "max": 140.35366700000304
+          }
+        },
+        {
+          "startStep": 50000,
+          "endStep": 100000,
+          "elapsedMs": 5454.274959000002,
+          "stepsPerSecond": 9167.121272002594,
+          "updateMs": {
+            "count": 500,
+            "p50": 7.273375000004307,
+            "p95": 29.410541999997804,
+            "p99": 34.7109580000033,
+            "max": 274.437125000004
+          }
+        },
+        {
+          "startStep": 100000,
+          "endStep": 150000,
+          "elapsedMs": 5442.528624999999,
+          "stepsPerSecond": 9186.906205752846,
+          "updateMs": {
+            "count": 500,
+            "p50": 6.846624999998312,
+            "p95": 25.520457999999053,
+            "p99": 34.526082999997016,
+            "max": 303.58908299999894
+          }
+        }
+      ],
+      "hashAt150000": 4254317005,
+      "relativeMassError": 7.580596266972373e-13,
+      "saveMs": 22.381750000000466,
+      "loadMs": 176.97437499999796,
+      "saveBytes": 1128383,
+      "roundTripMatches": true,
+      "continuationMatches": true,
+      "portionMs": {
+        "count": 93216,
+        "p50": 0.009166000003460795,
+        "p95": 0.027958000006037764,
+        "p99": 0.03804200000013225,
+        "max": 1.531875000000582
+      },
+      "memory": {
+        "rss": 243433472,
+        "heapTotal": 81526784,
+        "heapUsed": 15505152,
+        "external": 27414631,
+        "arrayBuffers": 18358003
+      }
+    }
+  ]
+}
