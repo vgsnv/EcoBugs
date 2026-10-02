@@ -152,7 +152,10 @@ export class Panel {
   private readonly waterValue = el('span', { className: 'value' });
   private readonly timeLabel = el('span', { className: 'time' });
   private readonly pauseButton = el('button', { title: 'Пауза / пуск (Пробел)' });
-  private readonly speedButtons = new Map<number, HTMLButtonElement>();
+  private readonly speedSelect = el('select', { ariaLabel: 'Скорость мира', className: 'speed-select' });
+  private readonly paramsToggle = el('button', { textContent: 'Новый мир', ariaExpanded: 'false', title: 'Открыть настройки нового мира', className: 'params-toggle' });
+  private readonly focusToggle = el('button', { textContent: 'Только мир', ariaPressed: 'false', title: 'Скрыть панели наблюдения (Esc — вернуть)' });
+  private readonly legendBody = el('div', { className: 'legend-body' });
   private readonly stepButton = el('button', { textContent: '+1 шаг', title: 'Один шаг (→)' });
   private readonly zoomButton = el('button', { className: 'zoom', title: 'Показать чашку целиком (0)' });
   private readonly createButton = el('button', { className: 'primary', textContent: 'Создать мир' });
@@ -187,9 +190,22 @@ export class Panel {
     this.refresh();
   }
 
-  /** Открыть или закрыть выдвижную панель параметров (на узком экране). */
+  /** Открыть или закрыть настройки; черновик сохраняется при закрытии. */
   toggleParams(open?: boolean): void {
-    this.roots.app.classList.toggle('params-open', open);
+    const next = open ?? !this.roots.app.classList.contains('params-open');
+    if (next) this.toggleFocus(false);
+    this.roots.app.classList.toggle('params-open', next);
+    this.paramsToggle.setAttribute('aria-expanded', String(next));
+    this.roots.params.inert = !next;
+    if (!next && this.roots.params.contains(document.activeElement)) this.paramsToggle.focus();
+  }
+
+  toggleFocus(open?: boolean): void {
+    const next = open ?? !this.roots.app.classList.contains('focus-mode');
+    if (next) this.toggleParams(false);
+    this.roots.app.classList.toggle('focus-mode', next);
+    this.focusToggle.setAttribute('aria-pressed', String(next));
+    this.focusToggle.textContent = next ? 'Вернуть панели' : 'Только мир';
   }
 
   /** Заменить черновик целиком и обновить все поля панели. */
@@ -202,13 +218,10 @@ export class Panel {
   private buildToolbar(): void {
     this.pauseButton.addEventListener('click', () => this.handlers.onTogglePause());
     this.stepButton.addEventListener('click', () => this.handlers.onStepOnce());
-    const speeds = el('span', { className: 'group' });
     SPEEDS.forEach((s, i) => {
-      const b = el('button', { textContent: `×${s.toLocaleString('ru')}`, title: `Скорость ×${s.toLocaleString('ru')} (${i + 1})` });
-      b.addEventListener('click', () => this.handlers.onSpeed(s));
-      this.speedButtons.set(s, b);
-      speeds.append(b);
+      this.speedSelect.append(el('option', { value: String(s), textContent: `×${s.toLocaleString('ru')} · клавиша ${i + 1}` }));
     });
+    this.speedSelect.addEventListener('change', () => this.handlers.onSpeed(Number(this.speedSelect.value)));
     const save = el('button', { textContent: 'Сохранить', title: 'Сохранить мир в файл (Ctrl+S)' });
     const load = el('button', { textContent: 'Загрузить', title: 'Загрузить мир из файла' });
     const picker = el('input', { type: 'file', accept: '.json,application/json', hidden: true });
@@ -227,19 +240,20 @@ export class Panel {
     const processes = el('button', { textContent: 'Процессы', title: 'Общее течение, размыв, оседание и уход в недра', ariaPressed: 'false' });
     const processLegend = el('span', { className: 'process-legend', hidden: true, title: 'Цвет показывает количество минерала за последнее обновление (100 шагов); ярче — больше. При одновременных процессах цвета смешиваются.' });
     processLegend.innerHTML = '<span style="color:#e88536">■ размыв</span> · <span style="color:#32c995">■ оседание</span> · <span style="color:#c27bff">■ воронка → недра</span> · стрелки — общее течение';
-    this.roots.legend.append(processLegend);
+    this.legendBody.append(processLegend);
     processes.addEventListener('click', () => {
       const enabled = processes.getAttribute('aria-pressed') !== 'true';
       processes.setAttribute('aria-pressed', String(enabled));
       processes.classList.toggle('active', enabled);
       processLegend.hidden = !enabled;
+      if (enabled) this.legendBody.closest('details')!.open = true;
       this.handlers.onProcesses(enabled);
     });
-    const toggle = el('button', { className: 'params-toggle', textContent: 'Параметры' });
-    toggle.addEventListener('click', () => this.toggleParams(true));
+    this.paramsToggle.addEventListener('click', () => this.toggleParams());
+    this.focusToggle.addEventListener('click', () => this.toggleFocus());
     this.roots.toolbar.append(
       el('span', { className: 'group' }, this.pauseButton, this.stepButton),
-      speeds,
+      el('label', { className: 'speed-control' }, el('span', { textContent: 'Скорость' }), this.speedSelect),
       this.timeLabel,
       processes,
       el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn),
@@ -247,12 +261,13 @@ export class Panel {
       this.status,
       el('span', { className: 'group' }, save, load),
       picker,
-      toggle,
+      this.focusToggle,
+      this.paramsToggle,
     );
   }
 
   private buildParams(): void {
-    const close = el('button', { className: 'params-close', textContent: '✕', title: 'Закрыть (Esc)' });
+    const close = el('button', { className: 'params-close', textContent: '✕', title: 'Закрыть (Esc)', ariaLabel: 'Закрыть настройки' });
     close.addEventListener('click', () => this.toggleParams(false));
     const open = loadOpenGroups();
     const group = (title: string, fields: HTMLElement[], openByDefault: boolean) => {
@@ -280,6 +295,7 @@ export class Panel {
       this.handlers.onCreate(structuredClone(this.draft));
       this.toggleParams(false);
     });
+    this.toggleParams(false);
   }
 
   /** Подпись поля: название, ⓘ с пояснением и (если есть) значение справа. */
@@ -416,7 +432,7 @@ export class Panel {
       sw.style.background = color;
       return el('span', { className: 'legend-item' }, sw, text);
     };
-    this.roots.legend.append(
+    this.legendBody.append(
       item(css(DEEP_WATER), 'вода'),
       item(css(SHALLOWS_SAMPLE), 'отмель — камень под водой'),
       item(css(STONE_SAMPLE), 'суша — тёмный камень'),
@@ -430,6 +446,9 @@ export class Panel {
       item('repeating-linear-gradient(60deg, rgba(255,250,230,0.9) 0 1px, transparent 1px 4px), rgb(84, 144, 210)', 'блики — вода на свету'),
       item('rgba(150, 190, 222, 0.6)', 'стекло — стенки и перегородки'),
     );
+    const disclosure = el('details', { className: 'legend-disclosure' },
+      el('summary', { textContent: 'Обозначения на карте' }), this.legendBody);
+    this.roots.legend.append(disclosure);
   }
 
   /** Итог сохранения или загрузки — коротко в строке управления, подробности по наведению. */
@@ -447,7 +466,7 @@ export class Panel {
     this.timeLabel.title = behind ? `Мир не успевает за скоростью ×${speed.toLocaleString('ru')} и идёт так быстро, как может` : '';
     this.pauseButton.textContent = paused ? '▶ Пуск' : '⏸ Пауза';
     this.stepButton.disabled = !paused;
-    for (const [s, b] of this.speedButtons) b.classList.toggle('active', s === speed);
+    if (this.speedSelect.value !== String(speed)) this.speedSelect.value = String(speed);
   }
 
 

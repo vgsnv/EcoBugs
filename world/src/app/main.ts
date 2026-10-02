@@ -215,7 +215,7 @@ document.addEventListener('keydown', (e) => {
     saveWorld();
     return;
   }
-  if (e.key === 'Escape') { panel.toggleParams(false); return; }
+  if (e.key === 'Escape') { panel.toggleParams(false); panel.toggleFocus(false); return; }
   const target = e.target as HTMLElement;
   if (e.ctrlKey || e.metaKey || e.altKey || target.closest('input, select, textarea')) return;
   if (e.key === ' ') {

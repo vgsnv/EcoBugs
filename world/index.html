@@ -11,7 +11,8 @@
       html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px system-ui, sans-serif; overflow: hidden; }
 
       /* Раскладка: слева управление, чашка и легенда; справа параметры нового мира. */
-      .app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 320px; grid-template-rows: auto minmax(0, 1fr) auto; }
+      .app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; }
+      .app.params-open { grid-template-columns: minmax(0, 1fr) 320px; }
       #toolbar { grid-column: 1; grid-row: 1; }
       /* Поле: чашка в пропорциях чашки со стеной и сводка минерала сразу под ней, той же ширины. */
       .field { grid-column: 1; grid-row: 2; margin: 0 16px; min-height: 0; container-type: size; display: flex; align-items: center; justify-content: center; }
@@ -19,6 +20,7 @@
       .stage { position: relative; width: 100%; flex: 1; min-height: 0; overflow: hidden; }
       #legend { grid-column: 1; grid-row: 3; }
       #params { grid-column: 2; grid-row: 1 / 4; }
+      .app:not(.params-open) #params { display: none; }
       canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
       .stage.dragging canvas { cursor: grabbing; }
       .zoom { font-variant-numeric: tabular-nums; min-width: 64px; }
@@ -47,16 +49,23 @@
       .light-drift path { fill: none; stroke: #c98a1c; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
       #toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 16px; }
-      .group { display: inline-flex; }
+      .group { display: inline-flex; border-radius: 8px; }
       .group button { border-radius: 0; margin-left: -1px; }
-      .group button:first-child { border-radius: 4px 0 0 4px; margin-left: 0; }
-      .group button:last-child { border-radius: 0 4px 4px 0; }
+      .group button:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
+      .group button:last-child { border-radius: 0 8px 8px 0; }
       .time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 190px; }
+      .speed-control { flex-direction: row; align-items: center; gap: 6px; color: var(--muted); }
+      .speed-select { width: auto; max-width: 180px; min-height: 36px; border-color: #c5d1df; border-radius: 8px; padding: 6px 10px; }
+      #toolbar > .group:first-child button:first-child { background: var(--accent); color: white; border-color: var(--accent); min-width: 90px; font-weight: 600; }
       .spacer { flex: 1; }
       .status { font-size: 12px; color: var(--muted); max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .status.error { color: var(--danger); }
 
       #legend { display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 10px 16px; color: var(--muted); font-size: 12px; }
+      .legend-disclosure { width: 100%; padding: 0; border: 0; }
+      .legend-disclosure > summary { text-transform: none; letter-spacing: normal; font-weight: 500; }
+      .legend-body { display: flex; flex-wrap: wrap; gap: 8px 18px; max-height: 150px; overflow-y: auto; padding: 4px 0; }
+      .process-legend { width: 100%; }
       .legend-item { display: flex; align-items: center; gap: 6px; }
       .swatch { flex: 0 0 18px; height: 12px; border-radius: 3px; border: 1px solid var(--border); }
 
@@ -93,17 +102,23 @@
 
       input[type=number], select { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px; width: 100%; font: inherit; }
       input[type=range] { width: 100%; margin: 0; }
-      button { background: var(--control); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 9px; cursor: pointer; white-space: nowrap; font: inherit; }
-      button:hover:not(:disabled) { border-color: var(--muted); position: relative; }
-      button:disabled { opacity: 0.5; cursor: default; }
+      button { background: #fff; color: #30445b; border: 1px solid #c5d1df; border-radius: 8px; padding: 7px 12px; min-height: 36px; cursor: pointer; white-space: nowrap; font: inherit; font-weight: 500; transition: background-color 120ms, border-color 120ms, color 120ms; }
+      button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      button[aria-pressed=true], button[aria-expanded=true] { border-color: #7fa9da; color: #145ba8; background: #e8f2ff; }
+      button:hover:not(:disabled) { background: #f0f5fb; border-color: #91a9c4; position: relative; }
+      button:active:not(:disabled) { background: #dce9f8; }
+      button:disabled { background: #f3f5f8; color: #8995a4; border-color: #dbe2eb; opacity: 1; cursor: default; }
+      #toolbar > .group:first-child button:first-child:hover, button.primary:hover:not(:disabled) { background: #075bb9; border-color: #075bb9; }
+      #toolbar > .group:first-child button:first-child:active, button.primary:active:not(:disabled) { background: #064b98; border-color: #064b98; }
       button.primary { background: var(--accent); border-color: var(--accent); color: #fff; padding: 7px; font-weight: 600; }
       button.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); position: relative; }
-      .params-toggle, .params-close { display: none; }
+      .params-toggle, .params-close { display: inline-block; }
+      .app.focus-mode #legend, .app.focus-mode .mineral-stats, .app.focus-mode .light-drift { display: none; }
       #scrim { display: none; }
 
       /* Узкий экран: параметры — выдвижная панель по кнопке. */
       @media (max-width: 900px) {
-        .app { grid-template-columns: minmax(0, 1fr); }
+        .app, .app.params-open { grid-template-columns: minmax(0, 1fr); }
         .field { margin: 0 8px; }
         #toolbar, #legend { padding-left: 8px; padding-right: 8px; }
         #params { position: fixed; top: 0; right: 0; bottom: 0; width: min(340px, 90vw); z-index: 10; transform: translateX(100%); transition: transform 0.2s; visibility: hidden; }
@@ -111,6 +126,16 @@
         .app.params-open #scrim { display: block; position: fixed; inset: 0; background: rgba(31, 35, 40, 0.3); z-index: 9; }
         .params-toggle, .params-close { display: inline-block; }
         .time { min-width: 0; }
+      }
+      @media (max-width: 600px) {
+        #toolbar { gap: 6px; padding-top: 8px; padding-bottom: 8px; }
+        .time { order: 1; flex-basis: 100%; font-size: 12px; }
+        .status { order: 2; flex-basis: 100%; }
+        .status:empty { display: none; }
+        .speed-control > span { display: none; }
+        .speed-select { max-width: 155px; min-height: 36px; }
+        button { min-height: 36px; }
+        .minimap { width: 128px; height: 96px; }
       }
     </style>
   </head>
