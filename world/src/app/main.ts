@@ -119,9 +119,9 @@ simulation.onmessage = ({ data }: MessageEvent<SimulationReply>) => {
         setWorld(next);
       } else {
         world.step = data.step;
-        Object.assign(world.mineral, data.mineral);
-        Object.assign(world.terrain, data.terrain);
-        Object.assign(world.viscosity, data.viscosity);
+        if (data.mineral) Object.assign(world.mineral, data.mineral);
+        if (data.terrain) Object.assign(world.terrain, data.terrain);
+        if (data.viscosity) Object.assign(world.viscosity, data.viscosity);
         if (data.drift) world.drift.acceptNodes(data.step, data.drift.a, data.drift.b);
       }
       worldSummary.observe(world, data.exchanges);

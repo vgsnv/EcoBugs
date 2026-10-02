@@ -10,20 +10,30 @@ export type SimulationCommand =
   | { type: 'ack'; epoch: number }
   | { type: 'processes'; epoch: number; enabled: boolean };
 
-export interface SimulationSnapshot {
+type MineralSnapshot = Omit<MineralState, 'blocked' | 'nearWall' | 'region'>;
+type TerrainSnapshot = Omit<TerrainState, 'applied'> & { applied?: Float32Array };
+
+/** Начальный снимок полный; далее массивы передаются только при смене версии. */
+export type SimulationSnapshot = {
   type: 'snapshot';
   epoch: number;
-  initial?: Pick<World, 'dish' | 'params' | 'light' | 'partitions'>;
   step: number;
-  mineral: MineralState;
-  terrain: TerrainState;
-  viscosity: ViscosityMap;
   drift?: { a: DriftField; b: DriftField };
   processes?: MineralProcesses;
   exchanges: MineralExchanges;
   rate: number;
   behind: boolean;
-}
+} & ({
+  initial: Pick<World, 'dish' | 'params' | 'light' | 'partitions'>;
+  mineral: MineralState;
+  terrain: TerrainState;
+  viscosity: ViscosityMap;
+} | {
+  initial?: undefined;
+  mineral?: MineralSnapshot;
+  terrain?: TerrainSnapshot;
+  viscosity?: ViscosityMap;
+});
 
 export type SimulationReply = SimulationSnapshot
   | { type: 'saved'; epoch: number; id: number; text: string; step: number; seed: number }

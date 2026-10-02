@@ -1,3 +1,4 @@
+import { finishCalculation, type Calculation } from './task.ts';
 import { dishOf } from './dish.ts';
 /**
  * Карта света (спецификация, раздел «Свет»): светлые пятна на тёмном фоне.
@@ -340,6 +341,10 @@ export function lightAt(map: LightMap, x: number, y: number, t: number): number 
  * Растеризует каждый эллипс только в его окрестности — быстро для отрисовки.
  */
 export function rasterizeSpotIntensity(map: LightMap, t: number, cols: number, rows: number, cell: number, out?: Float32Array): Float32Array {
+  return finishCalculation(rasterizeSpotIntensityTask(map, t, cols, rows, cell, out));
+}
+
+export function* rasterizeSpotIntensityTask(map: LightMap, t: number, cols: number, rows: number, cell: number, out?: Float32Array): Calculation<Float32Array> {
   const field = out && out.length === cols * rows ? out : new Float32Array(cols * rows);
   field.fill(0);
   const [ox, oy] = lightOffset(map, t);
@@ -363,6 +368,7 @@ export function rasterizeSpotIntensity(map: LightMap, t: number, cols: number, r
           const j0 = Math.max(0, Math.floor((cy - reach) / cell));
           const j1 = Math.min(rows - 1, Math.floor((cy + reach) / cell));
           for (let j = j0; j <= j1; j++) {
+            if ((j & 3) === 0) yield;
             const py = (j + 0.5) * cell - cy;
             for (let i = i0; i <= i1; i++) {
               const v = blobIntensity(b, (i + 0.5) * cell - cx, py, t);

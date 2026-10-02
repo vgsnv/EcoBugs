@@ -1,3 +1,4 @@
+import { finishCalculation, type Calculation } from './task.ts';
 import { dishOf, insideDish } from './dish.ts';
 /**
  * Карта вязкости (спецификация, раздел «Вязкость»): три градации — вода, отмель,
@@ -206,9 +207,14 @@ export function createViscosityMap(params: WorldParams, enforceShares = true): V
  * непрерывен, поэтому между водой и сушей всегда проходит отмель.
  */
 export function applyLevels(map: ViscosityMap, level: Float32Array, cols: number, rows: number, cell: number): void {
+  finishCalculation(applyLevelsTask(map, level, cols, rows, cell));
+}
+
+export function* applyLevelsTask(map: ViscosityMap, level: Float32Array, cols: number, rows: number, cell: number): Calculation {
   const n = map.active.reduce((a, b) => a + b, 0);
   const counts = [0, 0, 0];
   for (let j = 0; j < map.rows; j++) {
+    if ((j & 3) === 0) yield;
     const fy = Math.min(rows - 1, Math.max(0, ((j + 0.5) * map.cell) / cell - 0.5));
     const j0 = Math.floor(fy), j1 = Math.min(rows - 1, j0 + 1), v = fy - j0;
     for (let i = 0; i < map.cols; i++) {

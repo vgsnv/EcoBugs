@@ -11,6 +11,7 @@
  * сохраняет количество: минерал клетки делится между клетками вокруг точки
  * назначения; в перегородки не попадает.
  */
+import { finishCalculation, type Calculation } from './task.ts';
 import {
   ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_BURST, ERUPTION_TAIL_AREA, ERUPTION_BURSTS_MAX, BURST_WIDTH, BURST_FROM, THROW_RAYS, THROW_SAMPLES, MINERAL_SPREAD,
   MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_SINK_SETTLE, MINERAL_LAYER, MINERAL_MOBILITY, TRANSPORT_SUBSTEPS, DRIFT_REFERENCE, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
@@ -25,7 +26,7 @@ import { cellInsideDish, dishOf } from './dish.ts';
 import { freeRegions, isBlocked, type PartitionLayout } from './partitions.ts';
 import { Rng, deriveSeed, hash3 } from './prng.ts';
 import { multiplierForLevel } from './viscosity.ts';
-import { pushField, type PushField } from './push.ts';
+import { pushFieldTask, type PushField } from './push.ts';
 
 /**
  * Стадия вулкана: готовится к выбросу (родился или проснулся), извергается,
@@ -268,57 +269,13 @@ export function createMineral(params: WorldParams, partitions: PartitionLayout):
  * осаждение, наступившие извержения — в порядке шага мира.
  */
 export function updateMineral(m: MineralState, params: WorldParams, drift: Drift, partitions: PartitionLayout, terrain: TerrainState, light: LightMap, step: number): void {
+  finishCalculation(updateMineralTask(m, params, drift, partitions, terrain, light, step));
+}
+
+/** Горячая арифметика отдельно от планировщика: обычная функция оптимизируется JIT. */
+function transportRange(m: MineralState, src: Float64Array, dst: Float64Array, holes: Uint8Array, mobility: Float64Array, tvx: Float32Array, tvy: Float32Array, P: number, first: number, last: number): void {
   const { cols, rows, cell, blocked } = m;
-  const P = MINERAL_PERIOD;
-  const tMid = step - P / 2;
-  const src = m.field;
-  const work = workspace(m);
-  const dst = work.dst;
-  const processes = work.processes;
-  processes.step = step;
-  processes.erosion.fill(0); processes.settling.fill(0); processes.sinking.fill(0);
-  dst.fill(0);
-  const mobility = mobilityFor(terrain.applied);
-  // Сетки минерала и течений совпадают — снос клетки берётся прямо из узлов поля.
-  const { a: fa, b: fb, u: fu } = drift.nodes(tMid);
-  const sameGrid = fa.cols === cols && fa.rows === rows;
-  const v: [number, number] = [0, 0];
-  /** Сила течения и снос в клетке — для намыва, размыва и оседания там, куда уходит поток. */
-  const { speed, flowX, flowY } = work;
-
-  // Воронки и течения от вулканов и воронок — по состоянию на начало промежутка.
-  updateFunnels(m, params, terrain, P);
-  m.flow = pushFlow(m, params, terrain, tMid);
-
-  // Сумма течений (свет + вулканы и воронки) по клеткам — для переноса шажками.
-  const n = cols * rows;
-  const { tvx, tvy } = work;
-  for (let j = 0; j < rows; j++) {
-    for (let i = 0; i < cols; i++) {
-      const k = j * cols + i;
-      if (blocked[k]) continue;
-      if (sameGrid) {
-        v[0] = fa.vx[k] + (fb.vx[k] - fa.vx[k]) * fu;
-        v[1] = fa.vy[k] + (fb.vy[k] - fa.vy[k]) * fu;
-      } else {
-        drift.at((i + 0.5) * cell, (j + 0.5) * cell, tMid, v);
-      }
-      tvx[k] = v[0] + (m.flow ? m.flow.vx[k] : 0);
-      tvy[k] = v[1] + (m.flow ? m.flow.vy[k] : 0);
-      speed[k] = Math.hypot(tvx[k], tvy[k]);
-      flowX[k] = tvx[k];
-      flowY[k] = tvy[k];
-    }
-  }
-  processes.vx.set(tvx); processes.vy.set(tvy);
-  // Отверстия воронок: сквозь них ничего не проходит — попавшее остаётся.
-  const holes = work.holes;
-  holes.fill(0);
-  for (const f of m.funnels) for (const k of f.cells) holes[k] = 1;
-
-  // 1. Снос: перенос с сохранением количества — по линиям суммы течений
-  // шажками не длиннее клетки (быстрое течение не перепрыгивает острова).
-  for (let k = 0; k < n; k++) {
+  for (let k = first; k < last; k++) {
     if (blocked[k]) continue;
     const amount = src[k];
     if (amount === 0) continue;
@@ -367,19 +324,13 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     if (holes[target]) dst[target] += moved;
     else spill(dst, blocked, cols, rows, cell, x, y, moved, k);
   }
+}
 
-  // 1б. Растекание: от густого к редкому, медленнее там, где вязкость выше.
-  spread(dst, mobility, blocked, holes, cols, rows, MINERAL_SPREAD, work.spread);
-
-  // 2. Местность и залежи.
-  const sMax = DRIFT_REFERENCE * sunAt(light, tMid);
-  const settle = (1 - (1 - MINERAL_SETTLE) ** P) * params.terrainSpeed;
-  const dissolve = (1 - (1 - DEPOSIT_DISSOLVE) ** P) * params.terrainSpeed;
-  const area = cell * cell;
-  const perLvl = GROUND_PER_LEVEL * area;
-  const dep = terrain.deposits;
-  const gr = terrain.ground;
-  for (let k = 0; k < dst.length; k++) {
+function settleRange(m: MineralState, params: WorldParams, terrain: TerrainState, work: MineralWork, dst: Float64Array, sMax: number, settle: number, dissolve: number, perLvl: number, P: number, first: number, last: number): void {
+  const { cols, rows, cell, blocked } = m;
+  const { speed, flowX, flowY, processes } = work;
+  const area = cell * cell, gr = terrain.ground, dep = terrain.deposits;
+  for (let k = first; k < last; k++) {
     if (blocked[k]) continue;
     const calm = sMax > 0 ? 1 - Math.min(1, speed[k] / sMax) : 1;
     // Оседание в залежи: весь растворённый минерал понемногу, тем больше, чем
@@ -407,12 +358,13 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     processes.erosion[k] = erode;
     processes.settling[k] = settled;
   }
-  m.field = dst;
+}
 
-  // Выветривание склонов: грунт выше середины отмели переходит в среду —
-  // тем быстрее, чем круче склон; ровная середина суши устойчива.
+function weatherRange(m: MineralState, params: WorldParams, terrain: TerrainState, perLvl: number, P: number, first: number, last: number): void {
+  const { cols, rows, blocked } = m;
+  const gr = terrain.ground, dep = terrain.deposits;
   const top = (k: number) => gr[k] + dep[k];
-  for (let k = 0; k < dst.length; k++) {
+  for (let k = first; k < last; k++) {
     const above = top(k) - perLvl;
     if (above <= 0 || blocked[k]) continue;
     const i = k % cols, j = (k - i) / cols;
@@ -428,9 +380,140 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     gr[k] -= w - fromDep;
     m.field[k] += w;
   }
+}
+
+function runoffRows(field: Float64Array, ground: Float64Array, deposits: Float64Array, blocked: Uint8Array, holes: Uint8Array, cols: number, rows: number, perLevel: number, P: number, out: Float64Array, first: number, last: number): void {
+  const surf = (n: number) => (ground[n] + deposits[n] + field[n]) / perLevel;
+  for (let j = first; j < last; j++) {
+    for (let i = 0; i < cols; i++) {
+      const k = j * cols + i;
+      const a = field[k];
+      if (a === 0 || blocked[k] || holes[k]) continue;
+      const h = (ground[k] + deposits[k] + a) / perLevel;
+      // Перепады к четырём соседям (без временных массивов — горячий цикл).
+      const dl = i > 0 && !blocked[k - 1] ? Math.max(0, h - surf(k - 1)) : 0;
+      const dr = i < cols - 1 && !blocked[k + 1] ? Math.max(0, h - surf(k + 1)) : 0;
+      const du = j > 0 && !blocked[k - cols] ? Math.max(0, h - surf(k - cols)) : 0;
+      const dd = j < rows - 1 && !blocked[k + cols] ? Math.max(0, h - surf(k + cols)) : 0;
+      const total = dl + dr + du + dd;
+      if (total === 0) continue;
+      const moved = a * Math.min(0.5, RUNOFF * P * total);
+      const f = moved / total;
+      out[k] -= moved;
+      if (dl > 0) out[k - 1] += f * dl;
+      if (dr > 0) out[k + 1] += f * dr;
+      if (du > 0) out[k - cols] += f * du;
+      if (dd > 0) out[k + cols] += f * dd;
+    }
+  }
+}
+
+function spreadRows(field: Float64Array, mobility: Float64Array, blocked: Uint8Array, holes: Uint8Array, cols: number, rows: number, rate: number, flow: Float64Array, first: number, last: number): void {
+  for (let j = first; j < last; j++) {
+    for (let i = 0; i < cols; i++) {
+      const k = j * cols + i;
+      if (blocked[k]) continue;
+      const mk = mobility[k];
+      // Только вправо и вниз — каждая пара один раз.
+      if (i < cols - 1 && !blocked[k + 1]) {
+        const raw = (rate * 2 * (field[k] - field[k + 1])) / (mk + mobility[k + 1]);
+        const f = (raw > 0 ? holes[k] : holes[k + 1]) ? 0 : raw;
+        flow[k] -= f;
+        flow[k + 1] += f;
+      }
+      if (j < rows - 1 && !blocked[k + cols]) {
+        const raw = (rate * 2 * (field[k] - field[k + cols])) / (mk + mobility[k + cols]);
+        const f = (raw > 0 ? holes[k] : holes[k + cols]) ? 0 : raw;
+        flow[k] -= f;
+        flow[k + cols] += f;
+      }
+    }
+  }
+}
+
+export function* updateMineralTask(m: MineralState, params: WorldParams, drift: Drift, partitions: PartitionLayout, terrain: TerrainState, light: LightMap, step: number): Calculation {
+  const { cols, rows, cell, blocked } = m;
+  const P = MINERAL_PERIOD;
+  const tMid = step - P / 2;
+  const src = m.field;
+  const work = workspace(m);
+  const dst = work.dst;
+  const processes = work.processes;
+  processes.step = step;
+  processes.erosion.fill(0); processes.settling.fill(0); processes.sinking.fill(0);
+  dst.fill(0);
+  const mobility = mobilityFor(terrain.applied);
+  // Сетки минерала и течений совпадают — снос клетки берётся прямо из узлов поля.
+  const { a: fa, b: fb, u: fu } = (yield* drift.nodesTask(tMid));
+  const sameGrid = fa.cols === cols && fa.rows === rows;
+  const v: [number, number] = [0, 0];
+  /** Сила течения и снос в клетке — для намыва, размыва и оседания там, куда уходит поток. */
+  const { speed, flowX, flowY } = work;
+
+  // Воронки и течения от вулканов и воронок — по состоянию на начало промежутка.
+  yield* updateFunnels(m, params, terrain, P);
+  m.flow = yield* pushFlow(m, params, terrain, tMid);
+
+  // Сумма течений (свет + вулканы и воронки) по клеткам — для переноса шажками.
+  const n = cols * rows;
+  const { tvx, tvy } = work;
+  for (let j = 0; j < rows; j++) {
+    yield;
+    for (let i = 0; i < cols; i++) {
+      const k = j * cols + i;
+      if (blocked[k]) continue;
+      if (sameGrid) {
+        v[0] = fa.vx[k] + (fb.vx[k] - fa.vx[k]) * fu;
+        v[1] = fa.vy[k] + (fb.vy[k] - fa.vy[k]) * fu;
+      } else {
+        drift.at((i + 0.5) * cell, (j + 0.5) * cell, tMid, v);
+      }
+      tvx[k] = v[0] + (m.flow ? m.flow.vx[k] : 0);
+      tvy[k] = v[1] + (m.flow ? m.flow.vy[k] : 0);
+      speed[k] = Math.hypot(tvx[k], tvy[k]);
+      flowX[k] = tvx[k];
+      flowY[k] = tvy[k];
+    }
+  }
+  processes.vx.set(tvx); processes.vy.set(tvy);
+  // Отверстия воронок: сквозь них ничего не проходит — попавшее остаётся.
+  const holes = work.holes;
+  holes.fill(0);
+  for (const f of m.funnels) for (const k of f.cells) holes[k] = 1;
+
+  // 1. Снос: перенос с сохранением количества — по линиям суммы течений
+  // шажками не длиннее клетки (быстрое течение не перепрыгивает острова).
+  for (let first = 0; first < n; first += 256) {
+    yield;
+    transportRange(m, src, dst, holes, mobility, tvx, tvy, P, first, Math.min(n, first + 256));
+  }
+
+  // 1б. Растекание: от густого к редкому, медленнее там, где вязкость выше.
+  yield* spread(dst, mobility, blocked, holes, cols, rows, MINERAL_SPREAD, work.spread);
+
+  // 2. Местность и залежи.
+  const sMax = DRIFT_REFERENCE * sunAt(light, tMid);
+  const settle = (1 - (1 - MINERAL_SETTLE) ** P) * params.terrainSpeed;
+  const dissolve = (1 - (1 - DEPOSIT_DISSOLVE) ** P) * params.terrainSpeed;
+  const area = cell * cell;
+  const perLvl = GROUND_PER_LEVEL * area;
+  const dep = terrain.deposits;
+  const gr = terrain.ground;
+  for (let first = 0; first < n; first += 512) {
+    yield;
+    settleRange(m, params, terrain, work, dst, sMax, settle, dissolve, perLvl, P, first, Math.min(n, first + 512));
+  }
+  m.field = dst;
+
+  // Выветривание склонов: грунт выше середины отмели переходит в среду —
+  // тем быстрее, чем круче склон; ровная середина суши устойчива.
+  for (let first = 0; first < n; first += 512) {
+    yield;
+    weatherRange(m, params, terrain, perLvl, P, first, Math.min(n, first + 512));
+  }
 
   // Стекание: растворённый минерал стекает к соседям ниже — с суши к воде.
-  m.field = runoff(m.field, gr, dep, blocked, holes, cols, rows, perLvl, P, work.runoff);
+  m.field = yield* runoff(m.field, gr, dep, blocked, holes, cols, rows, perLvl, P, work.runoff);
 
   // Воронки: что дошло до отверстия, уходит в недра; залежи в отверстии поднимаются (см. sinkFunnel).
   for (const f of m.funnels) {
@@ -500,7 +583,7 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
       const part = vol.total * ERUPTION_BURST * b.share * (ease((u1 - b.at) / BURST_WIDTH) - ease((a0 - b.at) / BURST_WIDTH));
       if (part <= 0) continue;
       const g = Math.min(left, part);
-      throwMass(m, terrain, partitions, vol, g, vol.radius * Math.sqrt(b.share / bursts[0].share));
+      yield* throwMass(m, terrain, partitions, vol, g, vol.radius * Math.sqrt(b.share / bursts[0].share));
       left -= g;
     }
     const mouth = mouthCells(m, terrain, vol);
@@ -531,30 +614,11 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
  * большая куча сама создаёт уклон и расползается, ровный фон стоит.
  * Количество сохраняется; в перегородки не стекает.
  */
-function runoff(field: Float64Array, ground: Float64Array, deposits: Float64Array, blocked: Uint8Array, holes: Uint8Array, cols: number, rows: number, perLevel: number, P: number, out: Float64Array): Float64Array {
+function* runoff(field: Float64Array, ground: Float64Array, deposits: Float64Array, blocked: Uint8Array, holes: Uint8Array, cols: number, rows: number, perLevel: number, P: number, out: Float64Array): Calculation<Float64Array> {
   out.set(field);
-  const surf = (n: number) => (ground[n] + deposits[n] + field[n]) / perLevel;
-  for (let j = 0; j < rows; j++) {
-    for (let i = 0; i < cols; i++) {
-      const k = j * cols + i;
-      const a = field[k];
-      if (a === 0 || blocked[k] || holes[k]) continue;
-      const h = (ground[k] + deposits[k] + a) / perLevel;
-      // Перепады к четырём соседям (без временных массивов — горячий цикл).
-      const dl = i > 0 && !blocked[k - 1] ? Math.max(0, h - surf(k - 1)) : 0;
-      const dr = i < cols - 1 && !blocked[k + 1] ? Math.max(0, h - surf(k + 1)) : 0;
-      const du = j > 0 && !blocked[k - cols] ? Math.max(0, h - surf(k - cols)) : 0;
-      const dd = j < rows - 1 && !blocked[k + cols] ? Math.max(0, h - surf(k + cols)) : 0;
-      const total = dl + dr + du + dd;
-      if (total === 0) continue;
-      const moved = a * Math.min(0.5, RUNOFF * P * total);
-      const f = moved / total;
-      out[k] -= moved;
-      if (dl > 0) out[k - 1] += f * dl;
-      if (dr > 0) out[k + 1] += f * dr;
-      if (du > 0) out[k - cols] += f * du;
-      if (dd > 0) out[k + cols] += f * dd;
-    }
+  for (let first = 0; first < rows; first += 4) {
+    yield;
+    runoffRows(field, ground, deposits, blocked, holes, cols, rows, perLevel, P, out, first, Math.min(rows, first + 4));
   }
   return out;
 }
@@ -781,13 +845,13 @@ function mouthCells(m: MineralState, terrain: TerrainState, vol: Volcano): Int32
   return cells;
 }
 
-function throwMass(m: MineralState, terrain: TerrainState, partitions: PartitionLayout, vol: Volcano, amount: number, range: number): void {
+function* throwMass(m: MineralState, terrain: TerrainState, partitions: PartitionLayout, vol: Volcano, amount: number, range: number): Calculation {
   if (amount <= 0) return;
   let maps = throwMaps.get(terrain.applied);
   if (!maps) { maps = new Map(); throwMaps.set(terrain.applied, maps); }
   const key = `${vol.x}:${vol.y}:${range}`;
   let points = maps.get(key);
-  if (!points) { points = throwLandings(m, terrain, partitions, vol, range); maps.set(key, points); }
+  if (!points) { points = yield* throwLandings(m, terrain, partitions, vol, range); maps.set(key, points); }
   const weights: number[] = [];
   let wsum = 0;
   for (let q = 0; q < THROW_SAMPLES; q++) { const w = 1 - (q + 0.5) / THROW_SAMPLES; weights.push(w); wsum += w; }
@@ -798,13 +862,14 @@ function throwMass(m: MineralState, terrain: TerrainState, partitions: Partition
   }
 }
 
-function throwLandings(m: MineralState, terrain: TerrainState, partitions: PartitionLayout, vol: Volcano, range: number): Float64Array {
+function* throwLandings(m: MineralState, terrain: TerrainState, partitions: PartitionLayout, vol: Volcano, range: number): Calculation<Float64Array> {
   const { cols, rows, cell } = m;
   const rays = THROW_RAYS, samples = THROW_SAMPLES;
   // Доли запасов: линейно спадают к краю — гуще у жерла.
   const landings = new Float64Array(rays * samples * 2);
   const step = cell * 0.5;
   for (let r = 0; r < rays; r++) {
+    yield;
     const a = ((r + 0.5) / rays) * Math.PI * 2;
     const dx = Math.cos(a), dy = Math.sin(a);
     let x = vol.x, y = vol.y, spent = 0;
@@ -880,7 +945,7 @@ function basinCells(m: MineralState, f: Funnel): Int32Array {
  * воронки (сначала самые массивные). Ареол — радиус скопления + FUNNEL_REACH;
  * отверстие — FUNNEL_HOLE_SHARE скопления вокруг самой густой клетки.
  */
-function updateFunnels(m: MineralState, params: WorldParams, terrain: TerrainState, P: number): void {
+function* updateFunnels(m: MineralState, params: WorldParams, terrain: TerrainState, P: number): Calculation {
   const { cols, rows, cell, blocked } = m;
   const area = cell * cell;
   const core = FUNNEL_DEPOSIT * params.mineralStock * area;
@@ -899,12 +964,15 @@ function updateFunnels(m: MineralState, params: WorldParams, terrain: TerrainSta
   const candidates: { best: number; members: number[]; mass: number }[] = [];
   const stack: number[] = [];
   for (let k0 = 0; k0 < dep.length; k0++) {
+    if ((k0 & 255) === 0) yield;
     if (seen[k0] || !inside(k0)) continue;
     seen[k0] = 1;
     stack.push(k0);
     const members: number[] = [];
     let mass = 0, best = k0;
+    let visited = 0;
     while (stack.length > 0) {
+      if ((visited++ & 255) === 0) yield;
       const k = stack.pop()!;
       members.push(k);
       mass += dep[k];
@@ -945,16 +1013,17 @@ function updateFunnels(m: MineralState, params: WorldParams, terrain: TerrainSta
   }
 }
 
-function pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, t: number): { vx: Float32Array; vy: Float32Array } | null {
+function* pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, t: number): Calculation<{ vx: Float32Array; vy: Float32Array } | null> {
   const erupting = m.volcanoes.filter((v) => v.stage === 'erupting');
   if (erupting.length === 0 && m.funnels.length === 0) return null;
   const { pushX: vx, pushY: vy } = workspace(m);
   vx.fill(0); vy.fill(0);
   const add = (f: PushField, s: number) => {
     for (let j = f.j0; j <= f.j1; j++) {
-      for (let k = j * m.cols + f.i0, end = j * m.cols + f.i1; k <= end; k++) {
-        vx[k] += s * f.vx[k];
-        vy[k] += s * f.vy[k];
+      let q = (j - f.j0) * f.cols;
+      for (let k = j * m.cols + f.i0, end = j * m.cols + f.i1; k <= end; k++, q++) {
+        vx[k] += s * f.vx[q];
+        vy[k] += s * f.vy[q];
       }
     }
   };
@@ -963,12 +1032,12 @@ function pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, t
     const q = ventPush(params, vol, u);
     if (q <= 0) continue;
     const vent = Math.floor(vol.y / m.cell) * m.cols + Math.floor(vol.x / m.cell);
-    add(pushField(m, terrain.applied, `v${vent}`, [vent]), q);
+    add(yield* pushFieldTask(m, terrain.applied, `v${vent}`, [vent]), q);
   }
   // Тяга воронки — сила × единичное течение её отверстия (место и форма постоянны — кеш по номеру).
   for (const f of m.funnels) {
     if (f.strength <= 0) continue;
-    add(pushField(m, terrain.applied, `f${f.id}`, f.cells), -FUNNEL_DRAW * params.terrainSpeed * Math.PI * f.reach * f.reach * f.strength);
+    add(yield* pushFieldTask(m, terrain.applied, `f${f.id}`, f.cells), -FUNNEL_DRAW * params.terrainSpeed * Math.PI * f.reach * f.reach * f.strength);
   }
   return { vx, vy };
 }
@@ -1005,27 +1074,11 @@ function sinkFunnel(m: MineralState, params: WorldParams, terrain: TerrainState,
  * тем меньше, чем выше вязкость обеих (в воде — `rate`); через перегородки нет.
  * Количество сохраняется.
  */
-function spread(field: Float64Array, mobility: Float64Array, blocked: Uint8Array, holes: Uint8Array, cols: number, rows: number, rate: number, flow: Float64Array): void {
+function* spread(field: Float64Array, mobility: Float64Array, blocked: Uint8Array, holes: Uint8Array, cols: number, rows: number, rate: number, flow: Float64Array): Calculation {
   flow.fill(0);
-  for (let j = 0; j < rows; j++) {
-    for (let i = 0; i < cols; i++) {
-      const k = j * cols + i;
-      if (blocked[k]) continue;
-      const mk = mobility[k];
-      // Только вправо и вниз — каждая пара один раз.
-      if (i < cols - 1 && !blocked[k + 1]) {
-        const raw = (rate * 2 * (field[k] - field[k + 1])) / (mk + mobility[k + 1]);
-        const f = (raw > 0 ? holes[k] : holes[k + 1]) ? 0 : raw;
-        flow[k] -= f;
-        flow[k + 1] += f;
-      }
-      if (j < rows - 1 && !blocked[k + cols]) {
-        const raw = (rate * 2 * (field[k] - field[k + cols])) / (mk + mobility[k + cols]);
-        const f = (raw > 0 ? holes[k] : holes[k + cols]) ? 0 : raw;
-        flow[k] -= f;
-        flow[k + cols] += f;
-      }
-    }
+  for (let first = 0; first < rows; first += 4) {
+    yield;
+    spreadRows(field, mobility, blocked, holes, cols, rows, rate, flow, first, Math.min(rows, first + 4));
   }
   for (let k = 0; k < field.length; k++) field[k] += flow[k];
 }

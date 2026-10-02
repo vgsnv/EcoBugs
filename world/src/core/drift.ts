@@ -14,8 +14,9 @@
  * пересчитывается раз в DRIFT_PERIOD шагов, между пересчётами — плавный
  * переход.
  */
+import { finishCalculation, type Calculation } from './task.ts';
 import { DRIFT_CELL, DRIFT_DRAG, DRIFT_MAX, DRIFT_PERIOD, DRIFT_SPEED, LIGHT_DRIFT_SPEED } from './constants.ts';
-import { lightDriftVelocity, rasterizeSpotIntensity, sunAt, type LightMap } from './light.ts';
+import { lightDriftVelocity, rasterizeSpotIntensityTask, sunAt, type LightMap } from './light.ts';
 import type { WorldParams } from './params.ts';
 import { cellInsideDish } from './dish.ts';
 import { isBlocked, type PartitionLayout } from './partitions.ts';
@@ -62,11 +63,12 @@ interface Ground {
   readonly regions: number;
 }
 
-function groundOf(world: Sources, cols: number, rows: number, cell: number): Ground {
+function* groundOf(world: Sources, cols: number, rows: number, cell: number): Calculation<Ground> {
   const n = cols * rows;
   const blocked = new Uint8Array(n);
   const cond = new Float64Array(n);
   for (let j = 0; j < rows; j++) {
+    if ((j & 3) === 0) yield;
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
       const x = (i + 0.5) * cell, y = (j + 0.5) * cell;
@@ -79,10 +81,13 @@ function groundOf(world: Sources, cols: number, rows: number, cell: number): Gro
   let regions = 0;
   const stack: number[] = [];
   for (let k0 = 0; k0 < n; k0++) {
+    if ((k0 & 2047) === 0) yield;
     if (blocked[k0] || region[k0] >= 0) continue;
     region[k0] = regions;
     stack.push(k0);
+    let visited = 0;
     while (stack.length > 0) {
+      if ((visited++ & 2047) === 0) yield;
       const k = stack.pop()!;
       const i = k % cols, j = (k - i) / cols;
       for (const m of [i > 0 ? k - 1 : -1, i < cols - 1 ? k + 1 : -1, j > 0 ? k - cols : -1, j < rows - 1 ? k + cols : -1]) {
@@ -148,31 +153,38 @@ function coarsen(l: Level): Level {
  * строку сверху и снизу (индекс клетки + cols), чтобы соседи читались без
  * проверок: у краёв и преград коэффициент грани — 0.
  */
-function relax(l: Level, p: Float64Array, iterations: number): void {
-  const { cols, rows, east: ce, south: cs, source, west: cw, north: cn, inverse: inv } = l;
-  const n = cols * rows;
+function relaxRange(l: Level, p: Float64Array, first: number, last: number): void {
+  const { cols, east: ce, south: cs, source, west: cw, north: cn, inverse: inv } = l;
+  for (let k = first; k < last; k++) {
+    if (inv[k] === 0) continue;
+    const q = k + cols;
+    const target = (source[k] + cw[k] * p[q - 1] + ce[k] * p[q + 1] + cn[k] * p[q - cols] + cs[k] * p[q + cols]) * inv[k];
+    p[q] += DRIFT_OMEGA * (target - p[q]);
+  }
+}
+
+function* relax(l: Level, p: Float64Array, iterations: number): Calculation {
+  const n = l.cols * l.rows;
   for (let it = 0; it < iterations; it++) {
-    for (let k = 0; k < n; k++) {
-      if (inv[k] === 0) continue;
-      const q = k + cols;
-      const target = (source[k] + cw[k] * p[q - 1] + ce[k] * p[q + 1] + cn[k] * p[q - cols] + cs[k] * p[q + cols]) * inv[k];
-      p[q] += DRIFT_OMEGA * (target - p[q]);
+    for (let first = 0; first < n; first += 2048) {
+      yield;
+      relaxRange(l, p, first, Math.min(n, first + 2048));
     }
   }
 }
 
 /** Решение каскадом: точно на самой грубой сетке, дальше — перенос на вдвое более тонкую и сглаживание. Давление — с рамкой (см. relax). */
-function solve(fine: Level): Float64Array {
+function* solve(fine: Level): Calculation<Float64Array> {
   const levels = [fine];
   while (levels[levels.length - 1].cols > DRIFT_COARSEST) levels.push(coarsen(levels[levels.length - 1]));
   const last = levels[levels.length - 1];
   let p = new Float64Array((last.rows + 2) * last.cols + 2);
-  relax(last, p, DRIFT_COARSE_ITERATIONS);
+  yield* relax(last, p, DRIFT_COARSE_ITERATIONS);
   for (let d = levels.length - 2; d >= 0; d--) {
     const l = levels[d], c = levels[d + 1];
     const q = new Float64Array((l.rows + 2) * l.cols + 2);
     for (let j = 0; j < l.rows; j++) for (let i = 0; i < l.cols; i++) q[(j + 1) * l.cols + i] = p[((j >> 1) + 1) * c.cols + (i >> 1)];
-    relax(l, q, DRIFT_FINE_ITERATIONS);
+    yield* relax(l, q, DRIFT_FINE_ITERATIONS);
     p = q;
   }
   return p.subarray(fine.cols, fine.cols + fine.cols * fine.rows);
@@ -186,19 +198,24 @@ const DRIFT_OMEGA = 1.7;
 
 /** Течения в шаге t. */
 export function computeDriftField(world: Sources, t: number, ground?: Ground): DriftField {
+  return finishCalculation(computeDriftFieldTask(world, t, ground));
+}
+
+function* computeDriftFieldTask(world: Sources, t: number, ground?: Ground): Calculation<DriftField> {
   const cell = DRIFT_CELL, cols = Math.ceil(world.partitions.dish.width / cell), rows = Math.ceil(world.partitions.dish.height / cell), n = cols * rows;
-  ground ??= groundOf(world, cols, rows, cell);
+  ground ??= yield* groundOf(world, cols, rows, cell);
   const vx = new Float32Array(n);
   const vy = new Float32Array(n);
   const sun = sunAt(world.light, t);
   if (sun <= 0) return { cols, rows, cell, vx, vy };
   // Свет места: фон + пятна; источник — отклонение от среднего по отсеку.
   const bg = world.params.backgroundLevel;
-  const intensity = rasterizeSpotIntensity(world.light, t, cols, rows, cell);
+  const intensity = yield* rasterizeSpotIntensityTask(world.light, t, cols, rows, cell);
   const { blocked, cond, region, regions } = ground;
   const sum = new Float64Array(regions), count = new Float64Array(regions);
   const light = new Float64Array(n);
   for (let k = 0; k < n; k++) {
+    if ((k & 2047) === 0) yield;
     if (blocked[k]) continue;
     light[k] = sun * (bg + (1 - bg) * intensity[k]);
     sum[region[k]] += light[k];
@@ -209,6 +226,7 @@ export function computeDriftField(world: Sources, t: number, ground?: Ground): D
   const [dvx, dvy] = lightDriftVelocity(world.light, t);
   const fx = new Float64Array(n), fy = new Float64Array(n);
   for (let k = 0; k < n; k++) {
+    if ((k & 2047) === 0) yield;
     if (blocked[k]) continue;
     const pull = DRIFT_DRAG * sun * intensity[k] / LIGHT_DRIFT_SPEED;
     fx[k] = pull * dvx;
@@ -218,6 +236,7 @@ export function computeDriftField(world: Sources, t: number, ground?: Ground): D
   const { east, south } = level0;
   const fEast = new Float64Array(n), fSouth = new Float64Array(n);
   for (let j = 0; j < rows; j++) {
+    if ((j & 3) === 0) yield;
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
       if (east[k]) fEast[k] = (fx[k] + fx[k + 1]) / 2;
@@ -228,6 +247,7 @@ export function computeDriftField(world: Sources, t: number, ground?: Ground): D
   // увлечение само выносит из клетки, — баланс потоков сохраняется.
   const source = new Float64Array(n);
   for (let j = 0; j < rows; j++) {
+    if ((j & 3) === 0) yield;
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
       if (blocked[k]) continue;
@@ -238,9 +258,10 @@ export function computeDriftField(world: Sources, t: number, ground?: Ground): D
       source[k] = s;
     }
   }
-  const p = solve(levelOf(cols, rows, cond, source));
+  const p = yield* solve(levelOf(cols, rows, cond, source));
   // Плотность потока в клетке — среднее потоков через её грани (давление + увлечение).
   for (let j = 0; j < rows; j++) {
+    if ((j & 3) === 0) yield;
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
       if (blocked[k]) continue;
@@ -272,10 +293,16 @@ export class Drift {
   }
 
   private node(k: number): DriftField {
+    const cached = this.cache.get(k);
+    if (cached) return cached;
+    return finishCalculation(this.nodeTask(k));
+  }
+
+  private *nodeTask(k: number): Calculation<DriftField> {
     let f = this.cache.get(k);
     if (!f) {
-      this.ground ??= groundOf(this.world, Math.ceil(this.world.partitions.dish.width / DRIFT_CELL), Math.ceil(this.world.partitions.dish.height / DRIFT_CELL), DRIFT_CELL);
-      f = computeDriftField(this.world, k * DRIFT_PERIOD, this.ground);
+      this.ground ??= yield* groundOf(this.world, Math.ceil(this.world.partitions.dish.width / DRIFT_CELL), Math.ceil(this.world.partitions.dish.height / DRIFT_CELL), DRIFT_CELL);
+      f = yield* computeDriftFieldTask(this.world, k * DRIFT_PERIOD, this.ground);
       this.cache.set(k, f);
       while (this.cache.size > 3) this.cache.delete(this.cache.keys().next().value!);
     }
@@ -299,7 +326,16 @@ export class Drift {
   /** Поля в двух узлах вокруг шага t и доля пути между ними — для обхода клеток без интерполяции по точке. */
   nodes(t: number): { a: DriftField; b: DriftField; u: number } {
     const k = Math.floor(t / DRIFT_PERIOD);
-    return { a: this.node(k), b: this.node(k + 1), u: t / DRIFT_PERIOD - k };
+    const a = this.cache.get(k), b = this.cache.get(k + 1);
+    if (a && b) return { a, b, u: t / DRIFT_PERIOD - k };
+    return finishCalculation(this.nodesTask(t));
+  }
+
+  *nodesTask(t: number): Calculation<{ a: DriftField; b: DriftField; u: number }> {
+    const k = Math.floor(t / DRIFT_PERIOD);
+    const a = yield* this.nodeTask(k);
+    const b = yield* this.nodeTask(k + 1);
+    return { a, b, u: t / DRIFT_PERIOD - k };
   }
 
   /** Снос в точке (x, y) в шаге t: смещение за шаг, единиц мира. */
