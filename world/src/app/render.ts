@@ -484,6 +484,9 @@ export class WorldRenderer {
   private drawnLevel = new Float32Array(0);
   private drawnDeposit = new Float32Array(0);
   private hazeDrawnAt = 0;
+  /** Маски света пересобираются при смене снимка, камеры или мутности. */
+  private lightViewKey = '';
+  private hazeScratch: { smooth: Float32Array; tmp: Float32Array; image: ImageData; dark: ImageData; held: ImageData } | null = null;
   /** Блёстки (x, y, фаза), маска пены и когда она построена. */
   private sparkles = new Float32Array(0);
   private readonly foamCanvas = document.createElement('canvas');
@@ -520,6 +523,11 @@ export class WorldRenderer {
 
   setWorld(world: World): void {
     this.world = world;
+    this.lightViewKey = '';
+    this.mineralVersion = -1;
+    this.hazeDrawnAt = -Infinity;
+    this.funnelDrawn = -1;
+    this.linesKey = '';
     this.wall = world.partitions.thickness;
     this.sample = terrainSampler(world);
     this.base = renderTerrain(this.sample, 0, 0, DISH_WIDTH * TILE_SCALE_MIN, DISH_HEIGHT * TILE_SCALE_MIN, TILE_SCALE_MIN);
@@ -780,51 +788,56 @@ export class WorldRenderer {
     ctx.clip();
     this.drawTerrain();
 
-    // Маска пятен: контуры одним цветом (перекрытия не складываются).
-    const sctx = this.sctx;
-    sctx.setTransform(1, 0, 0, 1, 0, 0);
-    sctx.clearRect(0, 0, this.spots.width, this.spots.height);
-    sctx.setTransform(...view);
-    const spotsPath = new Path2D();
-    // Отрезков в контуре — столько, чтобы при любом масштабе край оставался гладким.
-    const segments = Math.min(360, Math.max(48, Math.round(p.spotSize * z)));
-    for (const poly of spotOutlines(w.light, w.step, DISH_WIDTH, DISH_HEIGHT, segments)) {
-      spotsPath.moveTo(poly[0], poly[1]);
-      for (let i = 2; i < poly.length; i += 2) spotsPath.lineTo(poly[i], poly[i + 1]);
-      spotsPath.closePath();
-    }
-    this.lastSpots = spotsPath;
-    sctx.fillStyle = rgb(SUN_COLOR);
-    sctx.fill(spotsPath, 'nonzero');
-    // Мутность: минерал задерживает свет — пятна над ним тусклее (по модели).
-    // От маски пятен зависят и тень, и тёплый оттенок, и высветление, и блики.
-    const lm = this.lightMurkCanvas;
-    if (lm.width > 0) {
-      sctx.globalCompositeOperation = 'destination-out';
-      sctx.imageSmoothingEnabled = true;
-      sctx.drawImage(lm, 0, 0, lm.width * w.mineral.cell, lm.height * w.mineral.cell);
-      sctx.globalCompositeOperation = 'source-over';
-    }
-
     // Сила света пятен в абсолютной шкале: 1 при солнце 1.
     const lit = lightTone(sunAt(w.light, w.step)) / lightTone(1);
     const penumbra = Math.min(3 * this.dpr, Math.max(0.5, (p.spotSize * SPOT_EDGE * z) / 6));
 
-    // Тень: сплошной слой с «дырами» там, где светят пятна (при тусклом солнце
-    // дыры неполные), накладывается на местность умножением.
-    const hctx = this.hctx;
-    hctx.globalCompositeOperation = 'source-over';
-    hctx.filter = 'none';
-    hctx.globalAlpha = 1;
-    hctx.fillStyle = rgb(SHADE_COLOR);
-    hctx.fillRect(0, 0, this.shade.width, this.shade.height);
-    hctx.globalCompositeOperation = 'destination-out';
-    hctx.filter = `blur(${penumbra.toFixed(1)}px)`;
-    hctx.globalAlpha = Math.min(1, lit);
-    hctx.drawImage(this.spots, 0, 0);
-    hctx.globalCompositeOperation = 'source-over';
-    hctx.filter = 'none';
-    hctx.globalAlpha = 1;
+    const lightKey = `${w.step}:${this.zoom}:${this.cx}:${this.cy}:${this.canvas.width}:${this.canvas.height}:${this.hazeDrawnAt}`;
+    if (lightKey !== this.lightViewKey) {
+      this.lightViewKey = lightKey;
+      // Маска пятен: контуры одним цветом (перекрытия не складываются).
+      const sctx = this.sctx;
+      sctx.setTransform(1, 0, 0, 1, 0, 0);
+      sctx.clearRect(0, 0, this.spots.width, this.spots.height);
+      sctx.setTransform(...view);
+      const spotsPath = new Path2D();
+      // Отрезков в контуре — столько, чтобы при любом масштабе край оставался гладким.
+      const segments = Math.min(360, Math.max(48, Math.round(p.spotSize * z)));
+      for (const poly of spotOutlines(w.light, w.step, DISH_WIDTH, DISH_HEIGHT, segments)) {
+        spotsPath.moveTo(poly[0], poly[1]);
+        for (let i = 2; i < poly.length; i += 2) spotsPath.lineTo(poly[i], poly[i + 1]);
+        spotsPath.closePath();
+      }
+      this.lastSpots = spotsPath;
+      sctx.fillStyle = rgb(SUN_COLOR);
+      sctx.fill(spotsPath, 'nonzero');
+      // Мутность: минерал задерживает свет — пятна над ним тусклее (по модели).
+      // От маски пятен зависят и тень, и тёплый оттенок, и высветление, и блики.
+      const lm = this.lightMurkCanvas;
+      if (lm.width > 0) {
+        sctx.globalCompositeOperation = 'destination-out';
+        sctx.imageSmoothingEnabled = true;
+        sctx.drawImage(lm, 0, 0, lm.width * w.mineral.cell, lm.height * w.mineral.cell);
+        sctx.globalCompositeOperation = 'source-over';
+      }
+
+      // Тень: сплошной слой с «дырами» там, где светят пятна (при тусклом солнце
+      // дыры неполные), накладывается на местность умножением.
+      const hctx = this.hctx;
+      hctx.globalCompositeOperation = 'source-over';
+      hctx.filter = 'none';
+      hctx.globalAlpha = 1;
+      hctx.fillStyle = rgb(SHADE_COLOR);
+      hctx.fillRect(0, 0, this.shade.width, this.shade.height);
+      hctx.globalCompositeOperation = 'destination-out';
+      hctx.filter = `blur(${penumbra.toFixed(1)}px)`;
+      hctx.globalAlpha = Math.min(1, lit);
+      hctx.drawImage(this.spots, 0, 0);
+      hctx.globalCompositeOperation = 'source-over';
+      hctx.filter = 'none';
+      hctx.globalAlpha = 1;
+
+    }
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'multiply';
@@ -869,15 +882,17 @@ export class WorldRenderer {
       this.hazeDrawnAt = nowMs;
       this.mineralVersion = m.version;
       const c = this.mineralCanvas;
-      c.width = m.cols;
-      c.height = m.rows;
+      if (c.width !== m.cols || c.height !== m.rows) { c.width = m.cols; c.height = m.rows; }
       const mctx = c.getContext('2d')!;
-      const img = mctx.createImageData(m.cols, m.rows);
+      if (!this.hazeScratch || this.hazeScratch.smooth.length !== m.field.length) {
+        this.hazeScratch = { smooth: new Float32Array(m.field.length), tmp: new Float32Array(m.field.length),
+          image: mctx.createImageData(m.cols, m.rows), dark: mctx.createImageData(m.cols, m.rows), held: mctx.createImageData(m.cols, m.rows) };
+      }
+      const { image: img, smooth, tmp, dark, held } = this.hazeScratch;
       const area = m.cell * m.cell;
       // Размытие (два прохода [1 2 1] по каждой оси) — скопления выглядят
       // округлыми, а не квадратами клеток, но край различим. Только для показа.
-      const smooth = Float32Array.from(m.field);
-      const tmp = new Float32Array(smooth.length);
+      smooth.set(m.field);
       for (let pass = 0; pass < 2; pass++) {
         for (let j = 0; j < m.rows; j++) {
           for (let i = 0; i < m.cols; i++) {
@@ -895,10 +910,8 @@ export class WorldRenderer {
         }
       }
       const murk = this.murkCanvas;
-      murk.width = m.cols;
-      murk.height = m.rows;
+      if (murk.width !== m.cols || murk.height !== m.rows) { murk.width = m.cols; murk.height = m.rows; }
       const kctx = murk.getContext('2d')!;
-      const dark = kctx.createImageData(m.cols, m.rows);
       const meanT = transparencyForDensity(stock);
       for (let k = 0; k < m.field.length; k++) {
         // Мутность: темнее там, где прозрачность ниже, чем при средней плотности.
@@ -909,10 +922,8 @@ export class WorldRenderer {
       }
       kctx.putImageData(dark, 0, 0);
       const lm = this.lightMurkCanvas;
-      lm.width = m.cols;
-      lm.height = m.rows;
+      if (lm.width !== m.cols || lm.height !== m.rows) { lm.width = m.cols; lm.height = m.rows; }
       const lctx = lm.getContext('2d')!;
-      const held = lctx.createImageData(m.cols, m.rows);
       for (let k = 0; k < m.field.length; k++) {
         held.data[k * 4 + 3] = 255 * Math.min(1, (1 - transparencyForDensity(smooth[k] / area)) * MURK_LIGHT);
       }
@@ -922,10 +933,10 @@ export class WorldRenderer {
         const d = smooth[k] / area / stock;
         const t = d <= MINERAL_FROM ? 0 : Math.min(1, Math.log(d / MINERAL_FROM) / Math.log(MINERAL_FULL / MINERAL_FROM));
         const a = t ** MINERAL_GAMMA * MINERAL_ALPHA;
-        const c = mix(MINERAL_COLOR, MINERAL_DEEP, smoothstep(0.4, 1, t));
-        img.data[k * 4] = c[0];
-        img.data[k * 4 + 1] = c[1];
-        img.data[k * 4 + 2] = c[2];
+        const blend = smoothstep(0.4, 1, t);
+        img.data[k * 4] = MINERAL_COLOR[0] + (MINERAL_DEEP[0] - MINERAL_COLOR[0]) * blend;
+        img.data[k * 4 + 1] = MINERAL_COLOR[1] + (MINERAL_DEEP[1] - MINERAL_COLOR[1]) * blend;
+        img.data[k * 4 + 2] = MINERAL_COLOR[2] + (MINERAL_DEEP[2] - MINERAL_COLOR[2]) * blend;
         img.data[k * 4 + 3] = a * 255;
       }
       mctx.putImageData(img, 0, 0);
