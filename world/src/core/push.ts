@@ -36,9 +36,27 @@ interface Grid {
 
 /** Кеш по местности (массив уровней заменяется целиком при пересборке) и по ключу источника. */
 const cache = new WeakMap<Float32Array, Map<string, PushField>>();
+const materials = new WeakMap<Float32Array, { cond: Float64Array; damp: Float64Array }>();
+
+/** Одно вычисление свойств клеток на местность для всех вулканов и воронок. */
+function materialFor(grid: Grid, level: Float32Array): { cond: Float64Array; damp: Float64Array } {
+  let material = materials.get(level);
+  if (!material) {
+    const cond = new Float64Array(level.length), damp = new Float64Array(level.length);
+    for (let k = 0; k < level.length; k++) {
+      if (grid.blocked[k]) continue;
+      const mult = multiplierForLevel(level[k]);
+      cond[k] = 1 / mult;
+      damp[k] = mult / (PUSH_LENGTH * PUSH_LENGTH);
+    }
+    material = { cond, damp };
+    materials.set(level, material);
+  }
+  return material;
+}
 
 /** Единичное течение от источника в клетках `seeds` (−1 — сток: то же с обратным знаком делает вызывающий). */
-export function pushField(grid: Grid, level: Float32Array, key: string, seeds: readonly number[]): PushField {
+export function pushField(grid: Grid, level: Float32Array, key: string, seeds: readonly number[] | Int32Array): PushField {
   let byLevel = cache.get(level);
   if (!byLevel) { byLevel = new Map(); cache.set(level, byLevel); }
   const hit = byLevel.get(key);
@@ -48,8 +66,8 @@ export function pushField(grid: Grid, level: Float32Array, key: string, seeds: r
   return field;
 }
 
-function solve(grid: Grid, level: Float32Array, seeds: readonly number[]): PushField {
-  const { cols, rows, cell, blocked } = grid;
+function solve(grid: Grid, level: Float32Array, seeds: readonly number[] | Int32Array): PushField {
+  const { cols, rows, cell } = grid;
   // Окно: вокруг источника на PUSH_WINDOW дальностей в воде.
   let si0 = cols, si1 = 0, sj0 = rows, sj1 = 0;
   for (const k of seeds) {
@@ -63,13 +81,12 @@ function solve(grid: Grid, level: Float32Array, seeds: readonly number[]): PushF
   const n = w * h;
   // Локальная сетка окна: проводимость, трение, источник.
   const cond = new Float64Array(n), damp = new Float64Array(n), src = new Float64Array(n);
+  const material = materialFor(grid, level);
   for (let j = 0; j < h; j++) {
     for (let i = 0; i < w; i++) {
       const k = (j + j0) * cols + (i + i0), q = j * w + i;
-      if (blocked[k]) continue;
-      const mult = multiplierForLevel(level[k]);
-      cond[q] = 1 / mult;
-      damp[q] = mult / (PUSH_LENGTH * PUSH_LENGTH);
+      cond[q] = material.cond[k];
+      damp[q] = material.damp[k];
     }
   }
   const share = 1 / seeds.length;
@@ -86,6 +103,12 @@ function solve(grid: Grid, level: Float32Array, seeds: readonly number[]): PushF
       if (j < h - 1) cs[q] = face(cond[q], cond[q + w]);
     }
   }
+  const west = new Float64Array(n), north = new Float64Array(n), total = new Float64Array(n);
+  for (let q = 0; q < n; q++) {
+    west[q] = q % w > 0 ? ce[q - 1] : 0;
+    north[q] = q >= w ? cs[q - w] : 0;
+    total[q] = west[q] + ce[q] + north[q] + cs[q] + damp[q];
+  }
   // Гаусс — Зейдель с верхней релаксацией; трение делает задачу устойчивой без баланса.
   const p = new Float64Array(n);
   for (let it = 0; it < PUSH_ITERATIONS; it++) {
@@ -93,8 +116,8 @@ function solve(grid: Grid, level: Float32Array, seeds: readonly number[]): PushF
       for (let i = 0; i < w; i++) {
         const q = j * w + i;
         if (cond[q] === 0) continue;
-        const cw = i > 0 ? ce[q - 1] : 0, cE = ce[q], cn = j > 0 ? cs[q - w] : 0, cS = cs[q];
-        const sum = cw + cE + cn + cS + damp[q];
+        const cw = west[q], cE = ce[q], cn = north[q], cS = cs[q];
+        const sum = total[q];
         let acc = src[q];
         if (cw) acc += cw * p[q - 1];
         if (cE) acc += cE * p[q + 1];

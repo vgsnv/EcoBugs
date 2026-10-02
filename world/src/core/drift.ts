@@ -44,7 +44,14 @@ interface Level {
   readonly east: Float64Array;
   readonly south: Float64Array;
   readonly source: Float64Array;
+  readonly west: Float64Array;
+  readonly north: Float64Array;
+  readonly inverse: Float64Array;
 }
+
+/** Коэффициенты не меняются до пересборки местности; источники меняются со светом. */
+const geometries = new WeakMap<Float64Array, Omit<Level, 'source'>>();
+const coarseConditions = new WeakMap<Float64Array, Float64Array>();
 
 /** Неизменное на сетке течений: преграды, проводимость, отсек каждой клетки (−1 — преграда). */
 interface Ground {
@@ -90,6 +97,8 @@ function groundOf(world: Sources, cols: number, rows: number, cell: number): Gro
 const face = (a: number, b: number) => (a > 0 && b > 0 ? (2 * a * b) / (a + b) : 0);
 
 function levelOf(cols: number, rows: number, cond: Float64Array, source: Float64Array): Level {
+  const cached = geometries.get(cond);
+  if (cached) return { ...cached, source };
   const east = new Float64Array(cols * rows);
   const south = new Float64Array(cols * rows);
   for (let j = 0; j < rows; j++) {
@@ -99,18 +108,34 @@ function levelOf(cols: number, rows: number, cond: Float64Array, source: Float64
       if (j < rows - 1) south[k] = face(cond[k], cond[k + cols]);
     }
   }
-  return { cols, rows, cond, east, south, source };
+  const n = cols * rows;
+  const west = new Float64Array(n), north = new Float64Array(n), inverse = new Float64Array(n);
+  for (let k = 0; k < n; k++) {
+    west[k] = k % cols > 0 ? east[k - 1] : 0;
+    north[k] = k >= cols ? south[k - cols] : 0;
+    const sum = west[k] + east[k] + north[k] + south[k];
+    inverse[k] = sum > 0 ? 1 / sum : 0;
+  }
+  const geometry = { cols, rows, cond, east, south, west, north, inverse };
+  geometries.set(cond, geometry);
+  return { ...geometry, source };
 }
 
 /** Вдвое грубее: проводимость — средняя по четырём клеткам, источник — сумма. */
 function coarsen(l: Level): Level {
   const cols = Math.ceil(l.cols / 2), rows = Math.ceil(l.rows / 2);
-  const cond = new Float64Array(cols * rows);
+  let cond = coarseConditions.get(l.cond);
+  if (!cond) {
+    cond = new Float64Array(cols * rows);
+    for (let j = 0; j < l.rows; j++) for (let i = 0; i < l.cols; i++) {
+      cond[(j >> 1) * cols + (i >> 1)] += l.cond[j * l.cols + i] / 4;
+    }
+    coarseConditions.set(l.cond, cond);
+  }
   const source = new Float64Array(cols * rows);
   for (let j = 0; j < l.rows; j++) {
     for (let i = 0; i < l.cols; i++) {
       const k = j * l.cols + i, c = (j >> 1) * cols + (i >> 1);
-      cond[c] += l.cond[k] / 4;
       source[c] += l.source[k];
     }
   }
@@ -123,18 +148,8 @@ function coarsen(l: Level): Level {
  * проверок: у краёв и преград коэффициент грани — 0.
  */
 function relax(l: Level, p: Float64Array, iterations: number): void {
-  const { cols, rows, east, south, source } = l;
+  const { cols, rows, east: ce, south: cs, source, west: cw, north: cn, inverse: inv } = l;
   const n = cols * rows;
-  const cw = new Float64Array(n), ce = new Float64Array(n), cn = new Float64Array(n), cs = new Float64Array(n), inv = new Float64Array(n);
-  for (let k = 0; k < n; k++) {
-    const i = k % cols;
-    cw[k] = i > 0 ? east[k - 1] : 0;
-    ce[k] = east[k];
-    cn[k] = k >= cols ? south[k - cols] : 0;
-    cs[k] = south[k];
-    const sum = cw[k] + ce[k] + cn[k] + cs[k];
-    inv[k] = sum > 0 ? 1 / sum : 0;
-  }
   for (let it = 0; it < iterations; it++) {
     for (let k = 0; k < n; k++) {
       if (inv[k] === 0) continue;
