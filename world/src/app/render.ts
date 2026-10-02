@@ -128,30 +128,9 @@ const GLINT_LAYERS = [
   { size: 130, vx: 5, vy: 2.5 },
   { size: 210, vx: -3.5, vy: 4 },
 ] as const;
-/**
- * Линии течений — движение среды, светлым тоном воды. Начала — по сетке через
- * столько единиц мира (со сдвигом из хеша); шаг прокладки и предел длины;
- * рисуются только течения не слабее такой доли от DRIFT_REFERENCE × солнце;
- * линия обрывается, войдя в занятую другой линией клетку (размер, ед. мира).
- * Скорость видна трижды: участки делятся на классы по скорости (границы — доли
- * от того же мерила), у быстрых — ярче и толще. Светлые метки движутся
- * с фактической скоростью в координатах мира. Перестраиваются не чаще, мс.
- */
-const LINE_SEED_SPACING = 70;
-const LINE_STEP = 4;
-const LINE_MAX_POINTS = 300;
-const LINE_MIN_SHARE = 0.25;
-const LINE_CELL = 20;
-const LINE_CLASSES = [0.6, 1.2] as const;
-const LINE_STYLES = [
-  { color: 'rgba(110, 165, 230, 0.45)', width: 1 },
-  { color: 'rgba(135, 190, 245, 0.6)', width: 1.4 },
-  { color: 'rgba(170, 215, 255, 0.75)', width: 1.9 },
-] as const;
-const LINE_DASH = 6;
-const LINE_GAP = 6;
-const FLOW_MARKER_LIMIT = 200;
-const LINE_RETRACE_MS = 150;
+/** Водные трассеры: не более 600, короткие изогнутые штрихи по текущему полю. */
+const FLOW_MARKER_LIMIT = 600;
+type WaterMarker = FlowMarker & { born: number; streak: { x: number; y: number }[] };
 
 /** Бесшовная текстура ряби: тонкая светлая сетка там, где шум близок к нулю. */
 let rippleTexture: HTMLCanvasElement | null = null;
@@ -468,13 +447,11 @@ export class WorldRenderer {
   /** Перегородки одним путём (в единицах мира). */
   private parts = new Path2D();
   /** Линии течений и ключ вида, для которого они проведены. */
-  private lines: Path2D[] = [];
   private markerAnchors: { x: number; y: number }[] = [];
-  private flowMarkers: FlowMarker[] = [];
+  private flowMarkers: WaterMarker[] = [];
   private markerStep = -1;
-  private linesKey = '';
-  private linesTracedAt = 0;
-  private linesStep = -1;
+  private markerView = '';
+  private streakBatch = 0;
   /** Дымка минерала (клетка поля — пиксель) и версия поля, по которой она построена. */
   private readonly mineralCanvas = document.createElement('canvas');
   /** Затемнение от мутности (серый для умножения), той же сетки. */
@@ -560,7 +537,7 @@ export class WorldRenderer {
     this.mineralVersion = -1;
     this.hazeDrawnAt = -Infinity;
     this.funnelDrawn = -1;
-    this.linesKey = '';
+    this.markerView = '';
     this.flowMarkers = []; this.markerStep = -1;
     this.wall = world.partitions.thickness;
     this.sample = terrainSampler(world);
@@ -911,7 +888,7 @@ export class WorldRenderer {
 
     ctx.setTransform(...view);
     this.drawMineral(animTime);
-    if (!this.showProcesses) this.drawDriftLines(flowStep);
+    if (!this.showProcesses) this.drawFlowMarkers(flowStep);
     // Жерла — отверстия в недра: поверх течений, ничто не проходит сквозь них.
     this.drawVents(animTime);
     if (this.showProcesses) this.drawProcesses();
@@ -1730,39 +1707,7 @@ export class WorldRenderer {
     ctx.drawImage(this.glint, 0, 0);
   }
 
-  /**
-   * Кешированные линии показывают форму потока. Светлые метки переносятся
-   * суммарным течением по фактическому времени мира, независимо от класса линии.
-   */
-  private drawDriftLines(flowStep: number): void {
-    const w = this.world;
-    const sun = Math.max(1e-9, sunAt(w.light, w.step));
-    // Вид изменился — перестроить сразу; шагнул мир — не чаще LINE_RETRACE_MS.
-    const view = `${this.zoom.toFixed(4)}:${this.cx.toFixed(1)}:${this.cy.toFixed(1)}:${this.canvas.width}x${this.canvas.height}`;
-    const now = performance.now();
-    if (view !== this.linesKey || (w.step !== this.linesStep && now - this.linesTracedAt >= LINE_RETRACE_MS)) {
-      if (view !== this.linesKey) this.flowMarkers = [];
-      this.linesKey = view;
-      this.linesTracedAt = now;
-      this.linesStep = w.step;
-      this.lines = this.traceDriftLines(sun);
-    }
-    const ctx = this.ctx;
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.setLineDash([this.px(LINE_DASH), this.px(LINE_GAP)]);
-    LINE_STYLES.forEach((st, c) => {
-      ctx.lineWidth = this.px(st.width);
-      ctx.strokeStyle = st.color;
-      ctx.lineDashOffset = 0;
-      ctx.stroke(this.lines[c]);
-    });
-    ctx.setLineDash([]);
-    this.drawFlowMarkers(flowStep);
-  }
-
+  /** Небольшие голубые штрихи со следами реального перемещения воды. */
   private drawFlowMarkers(step: number): void {
     const elapsed = this.markerStep < 0 ? 0 : Math.max(0, step - this.markerStep);
     this.markerStep = step;
@@ -1770,74 +1715,81 @@ export class WorldRenderer {
     const [x0, y0] = this.screenToWorld(0, 0), [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
     const allowed = (x: number, y: number) => x >= x0 && x <= x1 && y >= y0 && y <= y1 && insideDish(w.dish, x, y) && !isBlocked(w.partitions, x, y);
     const velocity = (x: number, y: number, out: [number, number]) => flowAt(w, x, y, out);
-    this.flowMarkers.length = Math.min(this.flowMarkers.length, this.markerAnchors.length);
-    while (this.flowMarkers.length < this.markerAnchors.length) {
-      const p = this.markerAnchors[this.flowMarkers.length];
-      this.flowMarkers.push({ ...p, vx: 0, vy: 0 });
+    const view = `${this.zoom}:${this.cx}:${this.cy}:${this.canvas.width}:${this.canvas.height}`;
+    if (view !== this.markerView) {
+      this.markerView = view;
+      this.markerAnchors = [];
+      const left = Math.max(0, x0), top = Math.max(0, y0);
+      const width = Math.min(this.width, x1) - left, height = Math.min(this.height, y1) - top;
+      const cols = Math.max(1, Math.ceil(Math.sqrt(FLOW_MARKER_LIMIT * 2 * width / height)));
+      const rows = Math.max(1, Math.ceil(FLOW_MARKER_LIMIT * 2 / cols));
+      let candidates = 0;
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        const x = left + (i + 0.15 + hash3(0x71ac, i, j) / 4294967296 * 0.7) * width / cols;
+        const y = top + (j + 0.15 + hash3(0x82bd, i, j) / 4294967296 * 0.7) * height / rows;
+        if (!allowed(x, y)) continue;
+        candidates++;
+        const slot = this.markerAnchors.length < FLOW_MARKER_LIMIT ? this.markerAnchors.length : hash3(0x93ce, i, j) % candidates;
+        if (slot < FLOW_MARKER_LIMIT) this.markerAnchors[slot] = { x, y };
+      }
+      this.flowMarkers = this.markerAnchors.map((p, i) => {
+        const v = velocity(p.x, p.y, [0, 0]);
+        return { ...p, vx: v[0], vy: v[1], born: step - hash3(0xa4df, i, 0) % 600, streak: [] };
+      });
     }
     const ctx = this.ctx;
     ctx.save(); ctx.beginPath(); this.traceDish(ctx); ctx.clip();
-    ctx.fillStyle = 'rgba(225,245,255,.9)';
-    ctx.beginPath();
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+    ctx.setLineDash([]); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    const tails = [new Path2D(), new Path2D(), new Path2D()];
+    const heads = new Path2D();
     for (let i = 0; i < this.flowMarkers.length; i++) {
       const marker = this.flowMarkers[i];
-      if (elapsed > 0 && !advanceFlowMarker(marker, elapsed, velocity, allowed)) {
-        const anchor = this.markerAnchors[i % this.markerAnchors.length];
-        if (!anchor) continue;
-        Object.assign(marker, anchor, { vx: 0, vy: 0 });
+      if (elapsed > 0 && (step - marker.born >= 600 || !advanceFlowMarker(marker, elapsed, velocity, allowed))) {
+        const anchor = this.markerAnchors[i];
+        Object.assign(marker, anchor, { vx: 0, vy: 0, born: step });
+        marker.streak = [];
       }
-      ctx.moveTo(marker.x + this.px(1.7), marker.y);
-      ctx.arc(marker.x, marker.y, this.px(1.7), 0, Math.PI * 2);
-    }
-    ctx.fill(); ctx.restore();
-  }
-
-  /** Линии течений по классам скорости — по сетке начал, без наложения. */
-  private traceDriftLines(sun: number): Path2D[] {
-    const w = this.world;
-    const ref = DRIFT_REFERENCE * sun;
-    const minSpeed = ref * LINE_MIN_SHARE;
-    const paths = LINE_STYLES.map(() => new Path2D());
-    this.markerAnchors = [];
-    let candidates = 0;
-    const [vx0, vy0] = this.screenToWorld(0, 0);
-    const [vx1, vy1] = this.screenToWorld(this.canvas.width, this.canvas.height);
-    // На мелком масштабе начала реже, иначе линии сливаются в рябь.
-    const spacing = LINE_SEED_SPACING * Math.max(1, 0.8 / (this.zoom / this.dpr));
-    const gc = Math.ceil(this.width / LINE_CELL), gr = Math.ceil(this.height / LINE_CELL);
-    const taken = new Int32Array(gc * gr).fill(-1);
-    const v: [number, number] = [0, 0];
-    let id = 0;
-    for (let sy = spacing / 2; sy < this.height; sy += spacing) {
-      for (let sx = spacing / 2; sx < this.width; sx += spacing) {
-        let x = sx + (hash3(0x11ae, Math.round(sx), Math.round(sy)) / 4294967296 - 0.5) * spacing * 0.8;
-        let y = sy + (hash3(0x22be, Math.round(sx), Math.round(sy)) / 4294967296 - 0.5) * spacing * 0.8;
-        if (x < vx0 - spacing || x > vx1 + spacing || y < vy0 - spacing || y > vy1 + spacing) continue;
-        if (x < 0 || y < 0 || x >= this.width || y >= this.height || isBlocked(w.partitions, x, y)) continue;
-        id++;
-        let last = -1;
-        for (let n = 0; n < LINE_MAX_POINTS; n++) {
-          const cell = Math.floor(y / LINE_CELL) * gc + Math.floor(x / LINE_CELL);
-          if (taken[cell] >= 0 && taken[cell] !== id) break;
-          taken[cell] = id;
-          flowAt(w, x, y, v);
-          const sp = Math.hypot(v[0], v[1]);
-          if (sp < minSpeed) break;
-          const nx = x + (v[0] / sp) * LINE_STEP, ny = y + (v[1] / sp) * LINE_STEP;
-          if (nx < 0 || ny < 0 || nx >= this.width || ny >= this.height || isBlocked(w.partitions, nx, ny)) break;
-          const c = sp < ref * LINE_CLASSES[0] ? 0 : sp < ref * LINE_CLASSES[1] ? 1 : 2;
-          if (c !== last) { paths[c].moveTo(x, y); last = c; }
-          paths[c].lineTo(nx, ny);
-          if (n % 8 === 0 && x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1 && insideDish(w.dish, x, y)) {
-            candidates++;
-            const slot = this.markerAnchors.length < FLOW_MARKER_LIMIT ? this.markerAnchors.length : hash3(0x123a, candidates, id) % candidates;
-            if (slot < FLOW_MARKER_LIMIT) this.markerAnchors[slot] = { x, y };
-          }
+      // Длина штриха — условный знак направления, а не пройденное расстояние.
+      // Перестраиваем четверть штрихов за кадр, остальные переносим вместе с водой.
+      const speed = Math.hypot(marker.vx, marker.vy);
+      if (!marker.streak.length || (elapsed > 0 && i % 4 === this.streakBatch)) {
+        const length = Math.min(64, this.px(Math.min(32, Math.max(14, speed / DRIFT_REFERENCE * 20))));
+        const segments = Math.max(6, Math.ceil(length / 4));
+        const pts = [{ x: 0, y: 0 }];
+        let x = marker.x, y = marker.y;
+        const v: [number, number] = [0, 0];
+        for (let k = 0; k < segments; k++) {
+          velocity(x, y, v);
+          const magnitude = Math.hypot(...v);
+          if (magnitude < 1e-6) break;
+          const distance = length / segments;
+          const nx = x - v[0] / magnitude * distance, ny = y - v[1] / magnitude * distance;
+          if (!allowed((x + nx) / 2, (y + ny) / 2) || !allowed(nx, ny)) break;
           x = nx; y = ny;
+          pts.push({ x: x - marker.x, y: y - marker.y });
         }
+        marker.streak = pts;
+      }
+      for (let k = 0; k < marker.streak.length - 1; k++) {
+        const a = marker.streak[k], b = marker.streak[k + 1];
+        const path = tails[Math.min(2, Math.floor(k / Math.max(1, marker.streak.length - 1) * 3))];
+        path.moveTo(marker.x + a.x, marker.y + a.y);
+        path.lineTo(marker.x + b.x, marker.y + b.y);
+      }
+      if (speed > 1e-6) {
+        heads.moveTo(marker.x - marker.vx / speed * this.px(1.8), marker.y - marker.vy / speed * this.px(1.8));
+        heads.lineTo(marker.x, marker.y);
       }
     }
-    return paths;
+    this.streakBatch = (this.streakBatch + 1) % 4;
+    ctx.lineWidth = this.px(0.85);
+    for (let i = 2; i >= 0; i--) {
+      ctx.strokeStyle = `rgba(105,185,215,${[0.7, 0.4, 0.16][i]})`;
+      ctx.stroke(tails[i]);
+    }
+    ctx.lineWidth = this.px(1); ctx.strokeStyle = 'rgba(135,205,230,.8)'; ctx.stroke(heads);
+    ctx.restore();
   }
 
 

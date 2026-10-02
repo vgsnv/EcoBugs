@@ -604,7 +604,7 @@ export class Panel {
       return el('section', { className: 'legend-section' }, el('h3', { textContent: name }),
         el('div', { className: 'legend-items' }, ...entries.map(e => e.button)));
     };
-    const current = item('transparent', 'Течение', 'Светлые метки движутся с фактической скоростью течения, с учётом масштаба и времени мира. Линии ярче и толще у быстрых потоков. В режиме процессов стрелки показывают общее течение.');
+    const current = item('transparent', 'Течение', 'Голубые штрихи показывают движение воды с фактической скоростью. Изогнутые затухающие штрихи показывают форму струй; их длина условная, а движение соответствует времени мира. В режиме процессов стрелки показывают общее течение.');
     current.button.querySelector('.swatch')!.innerHTML = '<svg viewBox="0 0 28 22"><path d="M2 16 Q10 3 24 8" fill="none" stroke="#6b9acc" stroke-width="2" stroke-dasharray="3 2"/><path d="m19 3 6 5-7 3" fill="none" stroke="#6b9acc" stroke-width="2"/></svg>';
     this.legendBody.append(
       section('Местность', [
