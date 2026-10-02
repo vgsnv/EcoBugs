@@ -154,7 +154,7 @@ export class Panel {
   private current: WorldParams;
   private readonly roots: PanelRoots;
   private readonly handlers: PanelHandlers;
-  private readonly errorsBox = el('div', { className: 'errors' });
+  private readonly errorsBox = el('div', { className: 'errors', ariaLive: 'polite' });
   private readonly dirtyNote = el('div', { className: 'note' });
   private readonly waterValue = el('span', { className: 'value' });
   private readonly timeLabel = el('span', { className: 'time' });
@@ -598,6 +598,11 @@ export class Panel {
       this.status.textContent = ''; this.status.title = '';
       this.handlers.onLayoutChange();
     }, isError ? 12000 : 4000);
+  }
+
+  showCreationErrors(lines: readonly string[]): void {
+    this.toggleParams(true);
+    this.errorsBox.replaceChildren(...lines.map(textContent => el('div', { textContent })));
   }
 
   setTime(step: number, paused: boolean, speed: number, fps: number | null, stepsPerSecond: number, behind = false): void {

@@ -144,7 +144,8 @@ simulation.onmessage = ({ data }: MessageEvent<SimulationReply>) => {
       if (data.fatal) { paused = true; actualRate = 0; behind = false; }
       const name = data.id === undefined ? undefined : pendingLoads.get(data.id);
       if (data.id !== undefined) pendingLoads.delete(data.id);
-      panel.setFileStatus([...(name ? [`«${name}» не загружен:`] : []), ...data.problems], true);
+      if (!data.fatal && data.id === undefined) panel.showCreationErrors(data.problems);
+      else panel.setFileStatus([...(name ? [`«${name}» не загружен:`] : []), ...data.problems], true);
       break;
     }
   }

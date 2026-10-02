@@ -209,7 +209,9 @@ export function parseWorldFile(text: string): World {
   }
   if (problems.length > 0 || !params) throw new WorldFileError(problems);
 
-  const world = createWorld(params);
+  // Стартовая местность будет заменена сохранённой, даже если новые правила
+  // создания больше не допускают исходное сочетание долей.
+  const world = createWorld(params, true);
   world.step = step as number;
   const mineralProblems = [...restoreMineral(world, data.mineral), ...restoreTerrain(world, data.terrain)];
   if (mineralProblems.length > 0) throw new WorldFileError(mineralProblems);

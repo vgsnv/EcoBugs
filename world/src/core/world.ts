@@ -40,12 +40,12 @@ export class InvalidParamsError extends Error {
   }
 }
 
-export function createWorld(params: WorldParams): World {
+export function createWorld(params: WorldParams, restoring = false): World {
   const errors = validateParams(params);
   if (errors.length > 0) throw new InvalidParamsError(errors);
   const own = structuredClone(params);
+  const viscosity = createViscosityMap(own, !restoring);
   const light = createLightMap(own);
-  const viscosity = createViscosityMap(own);
   const dish = dishOf(own);
   const partitions = buildLayout(layoutForSeed(own.seed), dish);
   const mineral = createMineral(own, partitions);
