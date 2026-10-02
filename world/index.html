@@ -10,31 +10,40 @@
       [hidden] { display: none !important; }
       html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px system-ui, sans-serif; overflow: hidden; }
 
-      /* Раскладка: слева управление, чашка и легенда; справа параметры нового мира. */
-      .app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; }
-      .app.params-open { grid-template-columns: minmax(0, 1fr) 320px; }
-      #toolbar { grid-column: 1; grid-row: 1; }
-      /* Поле: чашка в пропорциях чашки со стеной и сводка минерала сразу под ней, той же ширины. */
-      .field { grid-column: 1; grid-row: 2; margin: 0 16px; min-height: 0; container-type: size; display: flex; align-items: center; justify-content: center; }
-      .field-inner { width: 100%; height: 100%; display: flex; flex-direction: column; }
-      .stage { position: relative; width: 100%; flex: 1; min-height: 0; overflow: hidden; }
-
-      #params { grid-column: 2; grid-row: 1 / 4; }
+      /* Чистая карта между внешними панелями управления и наблюдения. */
+      .app { height: 100%; display: flex; flex-direction: column; }
+      .app:fullscreen { width: 100%; height: 100%; background: var(--bg); }
+      .workspace { display: flex; flex: 1; min-height: 0; padding: 0 6px; gap: 6px; }
+      .field { flex: 1; min-width: 0; min-height: 0; display: flex; }
+      .stage { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; }
       .app:not(.params-open) #params { display: none; }
       canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
       .stage.dragging canvas { cursor: grabbing; }
       .zoom { font-variant-numeric: tabular-nums; min-width: 64px; }
-      .minimap { position: absolute; right: 10px; bottom: 10px; width: 176px; height: 132px; border: 1px solid rgba(255, 255, 255, 0.8); border-radius: 4px; box-shadow: 0 4px 12px rgba(31, 35, 40, 0.3); cursor: pointer; z-index: 1; }
-      .minimap[hidden] { display: none; }
-      .light-drift { position: absolute; right: 10px; top: 10px; display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 4px; background: rgba(255, 255, 255, 0.85); border: 1px solid var(--border); border-radius: 14px; font-size: 11.5px; color: var(--muted); z-index: 1; user-select: none; }
+      #observation { flex: 0 0 264px; width: 264px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; border: 1px solid #d0d7de; border-radius: 8px; background: #fff; }
+      #navigation { position: absolute; z-index: 2; top: 8px; right: 8px; width: 240px; max-width: calc(100% - 16px); max-height: calc(100% - 16px); overflow: auto; border: 0; border-radius: 8px; background: #fff; box-shadow: 0 4px 18px #23364c26; cursor: grab; touch-action: none; user-select: none; }
+      #navigation .legend-head { padding: 4px 6px; border: 0; }
+      #navigation-close { display: grid; place-items: center; width: 28px; height: 28px; min-height: 28px; padding: 0; border: 0; background: transparent; color: var(--muted); border-radius: 5px; }
+      #navigation-close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+      #navigation.moving, #navigation.moving .minimap { cursor: grabbing; }
+      .navigation-body { padding: 6px; }
+      .minimap { width: 100%; height: 160px; background: var(--bg); border: 0; border-radius: 4px; cursor: grab; }
+      .bottom-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 6px; border-top: 1px solid #d0d7de; margin-top: 6px; flex-shrink: 0; }
+      #view-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+      .light-drift { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); user-select: none; }
       .light-drift svg { width: 20px; height: 20px; }
       .sun-rhythm { margin-left: 6px; padding-left: 8px; border-left: 1px solid var(--border); color: #a76d0d; font-variant-numeric: tabular-nums; }
       .mineral-stats b { color: #8a4fd0; font-weight: 600; }
       /* Под чашкой: полоса минерала во всю ширину (недра, «в пути» — выходит извержением, залежи, среда; риска — порог давления недр), подписи второй строкой. */
-      .mineral-stats { flex-shrink: 0; margin-top: 8px; display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; user-select: none; }
-      .mineral-keys { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 14px; }
+      .mineral-stats { flex: 1; min-width: 180px; max-width: 450px; margin: 0; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; user-select: none; }
+      .mineral-details { padding: 0; border: 0; }
+      .mineral-details > summary { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; padding: 4px; border-radius: 4px; }
+      .mineral-details > summary::before { content: "▸"; }
+      .mineral-details[open] > summary::before { content: "▾"; }
+      .mineral-details[open] > summary { margin-bottom: 0; }
+      .mineral-keys { padding: 6px 4px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 14px; }
       .mineral-keys .volcanoes { margin-left: auto; }
-      .mineral-bar { position: relative; display: block; width: 100%; height: 18px; background: #ece6f5; border: 1px solid #cbbde3; overflow: hidden; cursor: help; }
+      .mineral-bar { position: relative; display: block; flex: 1; width: 100%; height: 10px; background: #ece6f5; border: 1px solid #cbbde3; overflow: hidden; cursor: help; }
       .mineral-bar i { position: absolute; top: 0; bottom: 0; transition: left 0.25s linear, width 0.25s linear; }
       .mineral-stats .depths { background: #3d2a5c; }
       .mineral-stats .out { background: #e2c8ff; animation: mineral-out 0.8s ease-in-out infinite alternate; }
@@ -48,21 +57,47 @@
       .light-drift circle { fill: #fff; stroke: var(--border); }
       .light-drift path { fill: none; stroke: #c98a1c; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
-      #toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 16px; }
+      #toolbar { position: relative; z-index: 5; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px; flex-shrink: 0; }
       .group { display: inline-flex; border-radius: 8px; }
       .group button { border-radius: 0; margin-left: -1px; }
       .group button:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
       .group button:last-child { border-radius: 0 8px 8px 0; }
-      .time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 190px; }
-      .speed-control { flex-direction: row; align-items: center; gap: 6px; color: var(--muted); }
-      .speed-select { width: auto; max-width: 180px; min-height: 36px; border-color: #c5d1df; border-radius: 8px; padding: 6px 10px; }
-      #toolbar > .group:first-child button:first-child { background: var(--accent); color: white; border-color: var(--accent); min-width: 90px; font-weight: 600; }
+      .time-controls { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+      .time { display: flex; flex-direction: column; gap: 1px; flex: 0 0 auto; padding: 2px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); overflow: hidden; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+      .world-age, .world-rate { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .world-age { color: var(--text); font: 600 13px/16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .world-rate { font-size: 11px; line-height: 13px; }
+      .speed-control { width: 240px; flex: 0 0 240px; padding: 0 8px; }
+      .speed-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--muted); height: 16px; }
+      .speed-value { flex: 0 0 70px; text-align: right; font-size: 12px; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+      input.speed-slider { display: block; width: 100%; height: 16px; margin: 0; padding: 0; appearance: none; -webkit-appearance: none; background: transparent; cursor: pointer; touch-action: pan-y; }
+      .speed-slider::-webkit-slider-runnable-track { height: 4px; border-radius: 3px; background: linear-gradient(to right, var(--accent) var(--speed-progress, 0%), #d6e0ec var(--speed-progress, 0%)); }
+      .speed-slider::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px; background: #fff; border: 2px solid var(--accent); border-radius: 50%; }
+      .speed-slider::-moz-range-track { height: 4px; border-radius: 3px; background: #d6e0ec; }
+      .speed-slider::-moz-range-progress { height: 4px; background: var(--accent); }
+      .speed-slider::-moz-range-thumb { width: 10px; height: 10px; background: #fff; border: 2px solid var(--accent); border-radius: 50%; }
+      .speed-ticks { position: relative; height: 20px; margin: 0 7px; }
+      .speed-ticks button { position: absolute; top: 0; transform: translateX(-50%); border: 0; border-radius: 3px; background: transparent; color: var(--muted); min-height: 20px; padding: 6px 3px 0; font-size: 10px; font-weight: 400; line-height: 12px; }
+      .speed-ticks button::before { content: ''; position: absolute; left: 50%; top: 0; width: 1px; height: 4px; background: #91a9c4; }
+      .speed-ticks button:first-child { transform: none; padding-left: 0; }
+      .speed-ticks button:first-child::before { left: 0; }
+      .speed-ticks button:last-child { transform: translateX(-100%); padding-right: 0; }
+      .speed-ticks button:last-child::before { left: 100%; }
+      .time-controls .run-toggle { --run-bg: #fff8c5; --run-border: #d4a72c; --run-fg: #7d4e00; --run-hover: #fae17d; display: grid; place-items: center; flex: 0 0 36px; width: 36px; height: 36px; min-width: 36px; padding: 8px; background: var(--run-bg); color: var(--run-fg); border-color: var(--run-border); }
+      .run-toggle[data-state=running] { --run-bg: #dafbe1; --run-border: #4ac26b; --run-fg: #116329; --run-hover: #b4f1c2; }
+      .run-toggle svg { display: block; width: 18px; height: 18px; fill: currentColor; }
+      .run-toggle .pause-icon, .run-toggle[data-state=running] .play-icon { display: none; }
+      .run-toggle[data-state=running] .pause-icon { display: block; }
+      .focus-toggle, .minimap-toggle { display: grid; place-items: center; width: 36px; height: 36px; min-width: 36px; padding: 8px; flex-shrink: 0; }
+      .focus-toggle svg, .minimap-toggle svg { display: block; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .focus-toggle .focus-exit, .focus-toggle[aria-pressed=true] .focus-enter { display: none; }
+      .focus-toggle[aria-pressed=true] .focus-exit { display: block; }
       .spacer { flex: 1; }
-      .status { font-size: 12px; color: var(--muted); max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .status { font-size: 12px; color: var(--muted); padding: 0 10px 6px; flex-shrink: 0; }
+      .status:empty { display: none; }
       .status.error { color: var(--danger); }
 
-      .legend-toggle { position: absolute; left: 10px; top: 10px; z-index: 3; }
-      #legend { position: absolute; left: 10px; top: 54px; bottom: 10px; width: min(260px, calc(100% - 20px)); z-index: 3; display: flex; flex-direction: column; background: #fff; border: 1px solid #c5d1df; border-radius: 12px; box-shadow: 0 8px 28px rgba(31, 51, 76, 0.15); overflow: hidden; font-size: 12px; }
+      #legend { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; font-size: 12px; }
       .legend-head { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid #e5ebf2; }
       .legend-head h2 { margin: 0; font-size: 14px; }
       .legend-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 18px; }
@@ -80,12 +115,26 @@
       .process-legend span { color: #30445b; }
       .process-legend i { font-style: normal; font-weight: 700; margin-right: 4px; }
 
-      /* Подсказка у курсора. */
-      .tip { position: absolute; pointer-events: none; background: rgba(255, 255, 255, 0.96); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; box-shadow: 0 4px 12px rgba(31, 35, 40, 0.15); font-size: 12px; line-height: 1.45; font-variant-numeric: tabular-nums; white-space: nowrap; z-index: 2; }
+      /* Значения под курсором тоже находятся за пределами карты. */
+      .probe-panel { padding: 0; border: 0; max-width: 100%; }
+      .probe-panel > summary { text-transform: none; letter-spacing: 0; }
+      .probe-panel[open] { flex-basis: 100%; }
+      .tip { padding: 8px; font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+      .probe-panel[open] .tip { height: 100px; overflow-y: auto; }
       .tip b { font-weight: 600; }
+      .file-menu { position: relative; display: flex; align-items: center; max-width: 100%; min-width: 0; padding: 0; border: 0; }
+      .file-menu > summary { display: grid; place-items: center; flex: 0 0 36px; width: 36px; height: 36px; border: 1px solid #c5d1df; border-radius: 8px; padding: 8px; color: #30445b; background: #fff; }
+      .file-menu > summary svg { display: block; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+      .file-menu > summary:hover { background: #f0f5fb; border-color: #91a9c4; }
+      .file-menu[open] > summary { color: #145ba8; background: #e8f2ff; border-color: #7fa9da; }
+      .file-menu[open] > summary { margin-bottom: 0; }
+      .file-menu:not([open]) .menu-actions { display: none; }
+      .menu-actions { position: absolute; top: calc(100% + 6px); left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; width: 184px; max-width: calc(100vw - 12px); padding: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); box-shadow: 0 8px 24px rgba(31, 35, 40, .16); }
+      .menu-actions button { width: 100%; text-align: left; border-color: transparent; background: transparent; }
+      .toolbar-secondary { display: inline-flex; flex-wrap: wrap; max-width: 100%; align-items: center; gap: 8px; }
 
       /* Параметры нового мира: прокручиваемые группы и закреплённый низ. */
-      #params { background: var(--panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+      #params { flex: 0 0 320px; width: 320px; border-radius: 8px; background: var(--panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
       .params-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 8px; }
       .params-head h2 { margin: 0; font-size: 14px; }
       .params-body { flex: 1; overflow-y: auto; padding: 0 14px 12px; display: flex; flex-direction: column; gap: 4px; }
@@ -120,55 +169,69 @@
       .group button:hover:not(:disabled) { position: relative; }
       button:active:not(:disabled) { background: #dce9f8; }
       button:disabled { background: #f3f5f8; color: #8995a4; border-color: #dbe2eb; opacity: 1; cursor: default; }
-      #toolbar > .group:first-child button:first-child:hover, button.primary:hover:not(:disabled) { background: #075bb9; border-color: #075bb9; }
-      #toolbar > .group:first-child button:first-child:active, button.primary:active:not(:disabled) { background: #064b98; border-color: #064b98; }
+      .time-controls .run-toggle:hover { background: var(--run-hover); border-color: var(--run-border); }
+      .time-controls .run-toggle:active { background: var(--run-hover); filter: brightness(.96); }
+      button.primary:hover:not(:disabled) { background: #075bb9; border-color: #075bb9; }
+      button.primary:active:not(:disabled) { background: #064b98; border-color: #064b98; }
       button.primary { background: var(--accent); border-color: var(--accent); color: #fff; padding: 7px; font-weight: 600; }
       button.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); position: relative; }
       .params-toggle, .params-close { display: inline-block; }
-      .app.focus-mode #legend, .app.focus-mode .legend-toggle, .app.focus-mode .mineral-stats, .app.focus-mode .light-drift { display: none; }
-      #scrim { display: none; }
-
-      /* Узкий экран: параметры — выдвижная панель по кнопке. */
+      .app.focus-mode .bottom-bar, .app.focus-mode #observation, .app.focus-mode .toolbar-secondary, .app.focus-mode .file-menu { display: none; }
       @media (max-width: 900px) {
-        .app, .app.params-open { grid-template-columns: minmax(0, 1fr); }
-        .field { margin: 0 8px; }
-        #toolbar { padding-left: 8px; padding-right: 8px; }
-        #params { position: fixed; top: 0; right: 0; bottom: 0; width: min(340px, 90vw); z-index: 10; transform: translateX(100%); transition: transform 0.2s; visibility: hidden; }
-        .app.params-open #params { transform: none; visibility: visible; box-shadow: -8px 0 24px rgba(31, 35, 40, 0.2); }
-        .app.params-open #scrim { display: block; position: fixed; inset: 0; background: rgba(31, 35, 40, 0.3); z-index: 9; }
-        .params-toggle, .params-close { display: inline-block; }
-        .time { min-width: 0; }
+        .workspace { flex-direction: column; }
+        .field { order: 0; min-height: 100px; }
+        #observation { order: 1; flex: 0 1 auto; width: 100%; max-height: 40vh; flex-direction: row; }
+        #legend { flex: 1; }
+        #params { order: 1; width: 100%; flex: 0 1 50vh; }
+        .legend-items { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
       }
       @media (max-width: 600px) {
-        #toolbar { gap: 6px; padding-top: 8px; padding-bottom: 8px; }
-        .time { order: 1; flex-basis: 100%; font-size: 12px; }
-        .status { order: 2; flex-basis: 100%; }
-        .status:empty { display: none; }
-        .speed-control > span { display: none; }
-        .speed-select { max-width: 155px; min-height: 36px; }
-        button { min-height: 36px; }
-        .minimap { width: 128px; height: 96px; }
-        .light-drift { top: 54px; font-size: 10px; }
-        .process-legend { left: 0; gap: 6px; font-size: 10px; }
+        #toolbar { gap: 6px; }
+        #toolbar > .spacer { display: none; }
+        .toolbar-secondary { gap: 6px; order: 3; }
+        .file-menu { order: -1; }
+        .time-controls { gap: 6px; order: 0; }
+        .speed-control { order: 1; }
+        .focus-toggle { order: 2; }
+        .time { padding-inline: 6px; }
+        .world-age { font-size: 12px; }
+        .speed-control { width: min(240px, 100%); }
+        #observation { flex-direction: column; }
+        #navigation { width: 200px; }
+        #navigation .minimap { height: 100px; }
+        #observation { overflow-y: auto; }
+        .legend-items { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .bottom-bar { gap: 6px 10px; }
+        .process-legend { gap: 6px; font-size: 10px; padding: 4px; }
+        .light-drift { font-size: 11px; }
+      }
+      @media (max-width: 380px) {
+        .world-age { font-size: 11px; }
       }
     </style>
   </head>
   <body>
     <div class="app">
       <header id="toolbar"></header>
-      <div class="field"><div class="field-inner">
-      <div class="stage">
-        <canvas id="world"></canvas>
-        <div class="tip" hidden></div>
-        <div class="light-drift" title="Куда сдвигается карта света. Сдвиг очень медленный — заметен на ускорении."><svg viewBox="-12 -12 24 24"><circle r="11" /><path d="M -6 0 H 6 M 2 -4 L 6 0 L 2 4" /></svg><span>дрейф света</span><span class="sun-rhythm" title="Ритм солнца: множитель силы солнца сейчас и куда он идёт. Ярче — больше энергии и сильнее течения."></span></div>
-        <canvas class="minimap" hidden title="Вся чашка. Клик — перейти сюда"></canvas>
-        <aside id="legend" hidden aria-label="Легенда карты"></aside>
+      <div class="workspace">
+        <aside id="observation" hidden aria-label="Наблюдение за миром">
+          <section id="legend" hidden aria-label="Легенда карты"></section>
+        </aside>
+        <main class="field"><div class="stage"><canvas id="world" aria-label="Карта мира"></canvas>
+          <section id="navigation" hidden aria-label="Миникарта">
+            <div class="legend-head"><h2>Миникарта</h2><button id="navigation-close" aria-label="Закрыть миникарту"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m5 5 10 10 M15 5 5 15"/></svg></button></div>
+            <div class="navigation-body"><canvas class="minimap" aria-label="Мини-карта чашки" title="Клик — перейти сюда. Перетаскивание — переместить миникарту."></canvas></div>
+          </section>
+        </div></main>
+        <aside id="params"></aside>
       </div>
-      <div class="mineral-stats" title="Где сейчас минерал мира. Сумма постоянна."></div>
-      </div></div>
-
-      <aside id="params"></aside>
-      <div id="scrim"></div>
+      <footer class="bottom-bar">
+        <div id="view-controls"></div>
+        <div class="light-drift" title="Куда сдвигается карта света"><svg viewBox="-12 -12 24 24"><circle r="11" /><path d="M -6 0 H 6 M 2 -4 L 6 0 L 2 4" /></svg><span>дрейф света</span><span class="sun-rhythm" title="Ритм солнца: множитель силы солнца сейчас и куда он идёт"></span></div>
+        <div class="mineral-stats" title="Где сейчас минерал мира. Сумма постоянна."></div>
+        <details class="probe-panel"><summary>Точка на карте</summary><div class="tip">Наведите курсор на чашку, чтобы увидеть значения.</div></details>
+      </footer>
     </div>
     <script type="module" src="/src/app/main.ts"></script>
   </body>

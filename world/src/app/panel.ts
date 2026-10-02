@@ -1,6 +1,6 @@
 /**
  * Интерфейс песочницы. Над чашкой — управление живым миром (время, файл),
- * под ней — легенда, у курсора — подсказка. Справа — параметры нового мира:
+ * под ней — сводка и значения точки, слева — легенда и навигация. Справа — параметры нового мира:
  * они задаются при сотворении, поэтому правки копятся в черновике и
  * применяются кнопкой «Создать мир».
  */
@@ -10,6 +10,7 @@ import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE,
 export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
 
 export interface PanelHandlers {
+  onLayoutChange(): void;
   onCreate(params: WorldParams): void;
   onTogglePause(): void;
   onStepOnce(): void;
@@ -28,7 +29,9 @@ export interface PanelRoots {
   params: HTMLElement;
   legend: HTMLElement;
   tip: HTMLElement;
-  scrim: HTMLElement;
+  observation: HTMLElement;
+  navigation: HTMLElement;
+  viewControls: HTMLElement;
 }
 
 /** Горячие клавиши скоростей: 1…7. */
@@ -104,22 +107,25 @@ const info = (text: string) => {
 };
 
 /**
- * Одна всплывающая подсказка на страницу: позиционируется у ⓘ поверх всего,
- * поэтому не обрезается прокруткой панели.
+ * Пояснение у ⓘ ограничено областью настроек и не закрывает карту.
  */
 function installInfoTips(): void {
   const tip = el('div', { className: 'info-tip', hidden: true });
   document.body.append(tip);
   let pinned: HTMLElement | null = null;
   const show = (target: HTMLElement) => {
+    const bounds = target.closest('#params')!.getBoundingClientRect();
     tip.textContent = target.dataset.tip ?? '';
+    tip.style.maxWidth = `${Math.max(24, Math.min(260, bounds.width - 16))}px`;
+    tip.style.maxHeight = `${Math.max(24, bounds.height - 16)}px`;
+    tip.style.overflowY = 'auto';
     tip.hidden = false;
     const r = target.getBoundingClientRect();
     const w = tip.offsetWidth, h = tip.offsetHeight;
-    const x = Math.min(window.innerWidth - w - 8, Math.max(8, r.left + r.width / 2 - w / 2));
-    const below = r.bottom + 6 + h <= window.innerHeight - 8;
+    const x = Math.min(bounds.right - w - 8, Math.max(bounds.left + 8, r.left + r.width / 2 - w / 2));
+    const below = r.bottom + 6 + h <= bounds.bottom - 8;
     tip.style.left = `${x}px`;
-    tip.style.top = `${below ? r.bottom + 6 : r.top - 6 - h}px`;
+    tip.style.top = `${Math.max(bounds.top + 8, below ? r.bottom + 6 : r.top - 6 - h)}px`;
   };
   const hide = () => { tip.hidden = true; pinned = null; };
   const infoOf = (e: Event) => (e.target as HTMLElement).closest<HTMLElement>('.info');
@@ -141,6 +147,7 @@ function installInfoTips(): void {
 }
 
 const fmt = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(2));
+const stepFormatter = new Intl.NumberFormat('ru', { minimumIntegerDigits: 15 });
 
 export class Panel {
   private draft: WorldParams;
@@ -151,12 +158,19 @@ export class Panel {
   private readonly dirtyNote = el('div', { className: 'note' });
   private readonly waterValue = el('span', { className: 'value' });
   private readonly timeLabel = el('span', { className: 'time' });
-  private readonly pauseButton = el('button', { title: 'Пауза / пуск (Пробел)' });
-  private readonly speedSelect = el('select', { ariaLabel: 'Скорость мира', className: 'speed-select' });
-  private readonly paramsToggle = el('button', { textContent: 'Новый мир', ariaExpanded: 'false', title: 'Открыть настройки нового мира', className: 'params-toggle' });
-  private readonly focusToggle = el('button', { textContent: 'Только мир', ariaPressed: 'false', title: 'Скрыть панели наблюдения (Esc — вернуть)' });
+  private readonly ageLabel = el('span', { className: 'world-age' });
+  private readonly rateLabel = el('span', { className: 'world-rate' });
+  private readonly pauseButton = el('button', { className: 'run-toggle', ariaLabel: 'Пауза', title: 'Пауза (Пробел)' });
+  private readonly speedSlider = el('input', { type: 'range', min: '0', max: '4', step: '0.001', value: '0', ariaLabel: 'Скорость мира', className: 'speed-slider', title: 'Скорость ×1–×10 000; клавиши 1–7' });
+  private readonly speedValue = el('output', { className: 'speed-value', textContent: '×1' });
+  private readonly paramsToggle = el('button', { textContent: 'Новый мир', ariaLabel: 'Новый мир', ariaExpanded: 'false', title: 'Открыть настройки нового мира', className: 'params-toggle' });
+  private readonly focusToggle = el('button', { className: 'focus-toggle', ariaLabel: 'На весь экран', ariaPressed: 'false', title: 'На весь экран' });
+  private fullscreenPending = false;
   private readonly legendBody = el('div', { className: 'legend-body' });
   private readonly legendToggle = el('button', { textContent: 'Легенда', className: 'legend-toggle', ariaExpanded: 'false' });
+  private readonly navigationToggle = el('button', { className: 'minimap-toggle', ariaLabel: 'Миникарта', title: 'Миникарта', ariaExpanded: 'false' });
+  private readonly fileMenu = el('details', { className: 'file-menu' });
+  private readonly menuToggle = el('summary', { ariaLabel: 'Меню мира', title: 'Меню мира' });
   private readonly stepButton = el('button', { textContent: '+1 шаг', title: 'Один шаг (→)' });
   private readonly zoomButton = el('button', { className: 'zoom', title: 'Показать чашку целиком (0)' });
   private readonly createButton = el('button', { className: 'primary', textContent: 'Создать мир' });
@@ -179,7 +193,13 @@ export class Panel {
     this.buildLegend();
     this.buildToolbar();
     installInfoTips();
-    roots.scrim.addEventListener('click', () => this.toggleParams(false));
+    document.querySelector('#navigation-close')!.addEventListener('click', () => this.toggleNavigation(false));
+    this.navigationToggle.addEventListener('click', () => this.toggleNavigation());
+    this.navigationToggle.setAttribute('aria-controls', 'navigation');
+    this.navigationToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m2 4 5-2 6 2 5-2v14l-5 2-6-2-5 2Z M7 2v14 M13 4v14"/></svg>';
+    this.status.setAttribute('role', 'status');
+    roots.toolbar.after(this.status);
+    document.addEventListener('fullscreenchange', () => this.toggleFocus(document.fullscreenElement === roots.app));
     this.refresh();
   }
 
@@ -194,26 +214,77 @@ export class Panel {
   /** Открыть или закрыть настройки; черновик сохраняется при закрытии. */
   toggleParams(open?: boolean): void {
     const next = open ?? !this.roots.app.classList.contains('params-open');
-    if (next) this.toggleFocus(false);
+    if (next) { this.toggleFocus(false); this.toggleLegend(false); this.toggleNavigation(false); }
     this.roots.app.classList.toggle('params-open', next);
     this.paramsToggle.setAttribute('aria-expanded', String(next));
     this.roots.params.inert = !next;
-    if (!next && this.roots.params.contains(document.activeElement)) this.paramsToggle.focus();
+    this.handlers.onLayoutChange();
+    if (!next && this.roots.params.contains(document.activeElement)) this.menuToggle.focus();
   }
 
   toggleFocus(open?: boolean): void {
     const next = open ?? !this.roots.app.classList.contains('focus-mode');
-    if (next) { this.toggleParams(false); this.toggleLegend(false); }
+    if (!next && document.fullscreenElement === this.roots.app) {
+      void document.exitFullscreen().catch(() => {
+        this.toggleFocus(true);
+        this.setFileStatus(['Не удалось выйти из полноэкранного режима. Попробуйте Esc.'], true);
+      });
+    }
+    if (next) { this.toggleParams(false); this.toggleLegend(false); this.toggleNavigation(false); this.closeMenu(); }
     this.roots.app.classList.toggle('focus-mode', next);
     this.focusToggle.setAttribute('aria-pressed', String(next));
-    this.focusToggle.textContent = next ? 'Вернуть панели' : 'Только мир';
+    this.focusToggle.ariaLabel = next ? 'Выйти из полноэкранного режима' : 'На весь экран';
+    this.focusToggle.title = next ? 'Выйти из полноэкранного режима (Esc)' : 'На весь экран';
+    this.handlers.onLayoutChange();
+  }
+
+  private async toggleFullscreen(): Promise<void> {
+    if (this.fullscreenPending) return;
+    this.fullscreenPending = true;
+    try {
+      if (document.fullscreenElement === this.roots.app) await document.exitFullscreen();
+      else await this.roots.app.requestFullscreen({ navigationUI: 'hide' });
+    } catch {
+      this.toggleFocus(!this.roots.app.classList.contains('focus-mode'));
+      this.setFileStatus(['Полноэкранный режим недоступен в этом браузере.'], false);
+    } finally {
+      this.fullscreenPending = false;
+    }
   }
 
   toggleLegend(open?: boolean): void {
     const next = open ?? this.roots.legend.hidden;
+    if (next) { this.toggleFocus(false); this.toggleParams(false); }
     this.roots.legend.hidden = !next;
     this.legendToggle.setAttribute('aria-expanded', String(next));
+    this.syncObservation();
     if (!next && this.roots.legend.contains(document.activeElement)) this.legendToggle.focus();
+  }
+
+  toggleNavigation(open?: boolean): void {
+    const next = open ?? this.roots.navigation.hidden;
+    if (next) { this.toggleFocus(false); this.toggleParams(false); }
+    this.roots.navigation.hidden = !next;
+    this.navigationToggle.setAttribute('aria-expanded', String(next));
+    if (!next && this.roots.navigation.contains(document.activeElement)) this.navigationToggle.focus();
+  }
+
+  closePanels(): void {
+    this.toggleParams(false);
+    this.toggleLegend(false);
+    this.toggleNavigation(false);
+    this.toggleFocus(false);
+    this.closeMenu();
+  }
+
+  private closeMenu(): void {
+    if (this.fileMenu.contains(document.activeElement)) this.menuToggle.focus();
+    this.fileMenu.open = false;
+  }
+
+  private syncObservation(): void {
+    this.roots.observation.hidden = this.roots.legend.hidden;
+    this.handlers.onLayoutChange();
   }
 
   /** Заменить черновик целиком и обновить все поля панели. */
@@ -224,17 +295,27 @@ export class Panel {
   }
 
   private buildToolbar(): void {
+    this.pauseButton.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path class="play-icon" d="M7 4 16 10 7 16Z"/><path class="pause-icon" d="M5 4h4v12H5zM11 4h4v12h-4z"/></svg>';
+    this.pauseButton.dataset.state = 'running';
     this.pauseButton.addEventListener('click', () => this.handlers.onTogglePause());
     this.stepButton.addEventListener('click', () => this.handlers.onStepOnce());
-    SPEEDS.forEach((s, i) => {
-      this.speedSelect.append(el('option', { value: String(s), textContent: `×${s.toLocaleString('ru')} · клавиша ${i + 1}` }));
-    });
-    this.speedSelect.addEventListener('change', () => this.handlers.onSpeed(Number(this.speedSelect.value)));
-    const save = el('button', { textContent: 'Сохранить', title: 'Сохранить мир в файл (Ctrl+S)' });
-    const load = el('button', { textContent: 'Загрузить', title: 'Загрузить мир из файла' });
+    this.timeLabel.append(this.ageLabel, this.rateLabel);
+    const speedTicks = el('div', { className: 'speed-ticks' });
+    for (const s of [1, 10, 100, 1000, 10000]) {
+      const tick = el('button', { type: 'button', textContent: s.toLocaleString('ru'), title: `Скорость ×${s.toLocaleString('ru')}`, ariaLabel: `Скорость ×${s.toLocaleString('ru')}` });
+      tick.style.left = `${Math.log10(s) / 4 * 100}%`;
+      tick.addEventListener('click', () => this.handlers.onSpeed(s));
+      speedTicks.append(tick);
+    }
+    this.speedSlider.addEventListener('input', () => this.handlers.onSpeed(10 ** Number(this.speedSlider.value)));
+    const speedControl = el('div', { className: 'speed-control' },
+      el('div', { className: 'speed-head' }, el('span', { textContent: 'Скорость' }), this.speedValue),
+      this.speedSlider, speedTicks);
+    const save = el('button', { textContent: 'Сохранить', ariaLabel: 'Сохранить', title: 'Сохранить мир в файл (Ctrl+S)' });
+    const load = el('button', { textContent: 'Загрузить', ariaLabel: 'Загрузить', title: 'Загрузить мир из файла' });
     const picker = el('input', { type: 'file', accept: '.json,application/json', hidden: true });
-    save.addEventListener('click', () => this.handlers.onSave());
-    load.addEventListener('click', () => picker.click());
+    save.addEventListener('click', () => { this.closeMenu(); this.handlers.onSave(); });
+    load.addEventListener('click', () => { this.closeMenu(); picker.click(); });
     picker.addEventListener('change', () => {
       const file = picker.files?.[0];
       if (file) this.handlers.onLoad(file);
@@ -255,21 +336,36 @@ export class Panel {
       processes.classList.toggle('active', enabled);
       processLegend.hidden = !enabled;
       this.handlers.onProcesses(enabled);
+      this.handlers.onLayoutChange();
     });
-    this.paramsToggle.addEventListener('click', () => this.toggleParams());
-    this.focusToggle.addEventListener('click', () => this.toggleFocus());
+    this.paramsToggle.addEventListener('click', () => {
+      this.closeMenu();
+      this.toggleParams(true);
+      this.roots.params.querySelector<HTMLButtonElement>('.params-close')!.focus();
+    });
+    this.focusToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path class="focus-enter" d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4"/><path class="focus-exit" d="M3 7h4V3M13 3v4h4M17 13h-4v4M7 17v-4H3"/></svg>';
+    this.focusToggle.addEventListener('click', () => { void this.toggleFullscreen(); });
+    this.menuToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M10 4v12M4 10h12"/></svg>';
+    this.fileMenu.append(this.menuToggle, el('div', { className: 'menu-actions' }, this.paramsToggle, save, load));
+    document.addEventListener('pointerdown', (event) => {
+      if (this.fileMenu.open && !this.fileMenu.contains(event.target as Node)) this.closeMenu();
+    });
     this.roots.toolbar.append(
-      el('span', { className: 'group' }, this.pauseButton, this.stepButton),
-      el('label', { className: 'speed-control' }, el('span', { textContent: 'Скорость' }), this.speedSelect),
-      this.timeLabel,
-      el('span', { className: 'process-control' }, processes, processLegend),
-      el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn),
+      this.fileMenu,
+      el('div', { className: 'time-controls' }, this.timeLabel, el('span', { className: 'group' }, this.pauseButton, this.stepButton)),
+      speedControl,
       el('span', { className: 'spacer' }),
-      this.status,
-      el('span', { className: 'group' }, save, load),
-      picker,
+      el('span', { className: 'toolbar-secondary' }, this.legendToggle, this.navigationToggle),
       this.focusToggle,
-      this.paramsToggle,
+      picker,
+    );
+    for (const disclosure of [document.querySelector<HTMLDetailsElement>('.mineral-details')!, document.querySelector<HTMLDetailsElement>('.probe-panel')!]) {
+      disclosure.querySelector('summary')!.addEventListener('click', () => requestAnimationFrame(() => this.handlers.onLayoutChange()));
+      disclosure.addEventListener('toggle', () => this.handlers.onLayoutChange());
+    }
+    this.roots.viewControls.append(
+      el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn),
+      el('span', { className: 'process-control' }, processes, processLegend),
     );
   }
 
@@ -431,7 +527,7 @@ export class Panel {
     ];
   }
 
-  /** Справочник поверх карты: короткие обозначения и пояснение выбранного пункта. */
+  /** Справочник в отдельной панели: обозначения и пояснение выбранного пункта. */
   private buildLegend(): void {
     const css = (c: Rgb) => `rgb(${c.map(Math.round).join(',')})`;
     const detail = el('div', { className: 'legend-detail', textContent: 'Нажмите на обозначение, чтобы узнать больше.' });
@@ -469,14 +565,14 @@ export class Panel {
         item('radial-gradient(ellipse, #080c1a 0 30%, #485279 45%, transparent 65%)', 'Воронка', 'Тёмное отверстие затягивает минерал. Избыток уходит в недра.'),
       ]),
       el('details', { className: 'legend-extras' }, el('summary', { textContent: 'Блики и нагрев' }),
-        el('p', { className: 'note', textContent: 'Блики отмечают воду на свету. Светлые пятна теплее; точные значения температуры доступны в подсказке на карте.' })),
+        el('p', { className: 'note', textContent: 'Блики отмечают воду на свету. Светлые пятна теплее; точные значения температуры доступны в панели «Точка на карте».' })),
     );
     const close = el('button', { textContent: '×', ariaLabel: 'Закрыть легенду', title: 'Закрыть (Esc)' });
     close.addEventListener('click', () => this.toggleLegend(false));
     this.legendToggle.addEventListener('click', () => this.toggleLegend());
     this.legendToggle.setAttribute('aria-controls', 'legend');
     this.roots.legend.append(el('div', { className: 'legend-head' }, el('h2', { textContent: 'Легенда' }), close), this.legendBody, detail);
-    this.roots.legend.before(this.legendToggle);
+
   }
 
   /** Итог сохранения или загрузки — коротко в строке управления, подробности по наведению. */
@@ -485,16 +581,34 @@ export class Panel {
     this.status.className = isError ? 'status error' : 'status';
     this.status.textContent = lines.join(' ');
     this.status.title = lines.join('\n');
-    this.statusTimer = window.setTimeout(() => { this.status.textContent = ''; this.status.title = ''; }, isError ? 12000 : 4000);
+    this.handlers.onLayoutChange();
+    this.statusTimer = window.setTimeout(() => {
+      this.status.textContent = ''; this.status.title = '';
+      this.handlers.onLayoutChange();
+    }, isError ? 12000 : 4000);
   }
 
-  setTime(step: number, paused: boolean, speed: number, stepsPerSecond: number, behind = false): void {
+  setTime(step: number, paused: boolean, speed: number, fps: number | null, stepsPerSecond: number, behind = false): void {
     const rate = `${Math.round(stepsPerSecond).toLocaleString('ru')} шагов/с`;
-    this.timeLabel.textContent = `Шаг ${step.toLocaleString('ru')} · ${paused ? 'пауза' : behind ? `${rate} · предел` : rate}`;
-    this.timeLabel.title = behind ? `Мир не успевает за скоростью ×${speed.toLocaleString('ru')} и идёт так быстро, как может` : '';
-    this.pauseButton.textContent = paused ? '▶ Пуск' : '⏸ Пауза';
+    this.ageLabel.textContent = stepFormatter.format(step);
+    this.rateLabel.textContent = `${fps === null ? '—' : Math.round(fps).toLocaleString('ru')} FPS${paused ? ' · пауза' : ''}`;
+    this.timeLabel.title = `Шаг ${this.ageLabel.textContent}\n${this.rateLabel.textContent}`
+      + '\nFPS — частота отрисовки карты за последнюю секунду'
+      + (paused ? '\nРасчёт мира на паузе' : `\nРасчёт мира: ${rate}${behind ? ' · предел' : ''}`)
+      + (behind ? `\nМир не успевает за скоростью ×${speed.toLocaleString('ru')} и идёт так быстро, как может` : '');
+    const state = paused ? 'paused' : 'running';
+    if (this.pauseButton.dataset.state !== state) {
+      this.pauseButton.dataset.state = state;
+      this.pauseButton.ariaLabel = paused ? 'Пуск' : 'Пауза';
+      this.pauseButton.title = `${this.pauseButton.ariaLabel} (Пробел)`;
+    }
     this.stepButton.disabled = !paused;
-    if (this.speedSelect.value !== String(speed)) this.speedSelect.value = String(speed);
+    const position = Math.log10(speed);
+    if (Math.abs(Number(this.speedSlider.value) - position) > 0.00051) this.speedSlider.value = String(position);
+    const selected = `×${speed.toLocaleString('ru', { maximumFractionDigits: speed < 10 ? 2 : speed < 100 ? 1 : 0 })}`;
+    if (this.speedValue.textContent !== selected) this.speedValue.textContent = selected;
+    this.speedSlider.setAttribute('aria-valuetext', selected);
+    this.speedSlider.style.setProperty('--speed-progress', `${position / 4 * 100}%`);
   }
 
 
@@ -503,20 +617,14 @@ export class Panel {
     this.zoomButton.textContent = relative < 1.005 ? 'Вся чашка' : `×${relative < 10 ? relative.toFixed(1) : Math.round(relative)}`;
   }
 
-  /** Подсказка у курсора: строки и позиция в координатах окна; null — скрыть. */
-  setProbe(lines: readonly string[] | null, clientX = 0, clientY = 0): void {
+  /** Значения точки под курсором выводятся в нижней панели, за пределами карты. */
+  setProbe(lines: readonly string[] | null): void {
     const tip = this.roots.tip;
-    if (!lines) { tip.hidden = true; return; }
+    if (!lines) { delete tip.dataset.content; tip.textContent = 'Наведите курсор на чашку, чтобы увидеть значения.'; return; }
+    const content = lines.join('\n');
+    if (tip.dataset.content === content) return;
+    tip.dataset.content = content;
     tip.replaceChildren(...lines.map((l, i) => el('div', {}, i === 0 ? el('b', { textContent: l }) : l)));
-    tip.hidden = false;
-    const stage = tip.parentElement!.getBoundingClientRect();
-    const gap = 14;
-    let x = clientX - stage.left + gap;
-    let y = clientY - stage.top + gap;
-    if (x + tip.offsetWidth > stage.width) x = clientX - stage.left - gap - tip.offsetWidth;
-    if (y + tip.offsetHeight > stage.height) y = clientY - stage.top - gap - tip.offsetHeight;
-    tip.style.left = `${Math.max(0, x)}px`;
-    tip.style.top = `${Math.max(0, y)}px`;
   }
 
   /** Схема планировки, которую даст сид из черновика. */

@@ -8,6 +8,7 @@ import {
 } from '../core/index.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
 import { WorldRenderer } from './render.ts';
+import { installMovableMinimap } from './minimap-panel.ts';
 import type { SimulationCommand, SimulationReply } from './simulation.ts';
 
 /** Шаг масштаба кнопками и клавишами. */
@@ -17,19 +18,26 @@ const GRADATION_NAMES = ['Вода', 'Отмель', 'Суша'];
 const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
 const renderer = new WorldRenderer(canvas);
 const minimap = document.querySelector<HTMLCanvasElement>('.minimap')!;
+installMovableMinimap(document.querySelector<HTMLElement>('.stage')!, document.querySelector<HTMLElement>('#navigation')!,
+  (x, y) => renderer.centerFromMinimap(minimap, x, y));
 const driftArrow = document.querySelector<SVGElement>('.light-drift svg')!;
 const mineralStats = document.querySelector<HTMLElement>('.mineral-stats')!;
-mineralStats.innerHTML = '<span class="mineral-bar"><i class="depths"></i><i class="out"></i><i class="deposits"></i><i class="medium"></i><i class="threshold"></i></span>'
-  + '<div class="mineral-keys"><b>минерал</b><span class="key"><i class="depths"></i>недра</span><span class="key"><i class="deposits"></i>залежи</span><span class="key"><i class="medium"></i>в среде</span><span class="volcanoes"></span></div>';
+mineralStats.innerHTML = '<details class="mineral-details"><summary><b>Минерал</b><span class="mineral-bar"><i class="depths"></i><i class="out"></i><i class="deposits"></i><i class="medium"></i><i class="threshold"></i></span></summary>'
+  + '<div class="mineral-keys"><span class="key"><i class="depths"></i>недра <span class="amount-depths"></span></span><span class="key"><i class="deposits"></i>залежи <span class="amount-deposits"></span></span><span class="key"><i class="medium"></i>в среде <span class="amount-medium"></span></span><span class="key"><i class="out"></i>извергается <span class="amount-out"></span></span><span class="volcanoes"></span></div></details>';
 const mineralBar = mineralStats.querySelector<HTMLElement>('.mineral-bar')!;
 const [barDepths, barOut, barDeposits, barMedium, barThreshold] = mineralBar.querySelectorAll<HTMLElement>('i');
 const volcanoText = mineralStats.querySelector<HTMLElement>('.volcanoes')!;
+const amounts = ['depths', 'out', 'deposits', 'medium'].map(name => mineralStats.querySelector<HTMLElement>(`.amount-${name}`)!);
 const sunLabel = document.querySelector<HTMLElement>('.sun-rhythm')!;
 let mineralStatsVersion = -1;
 /** Время анимации (блики), секунды; стоит на паузе. */
 let animTime = 0;
 /** Сколько шагов в секунду мир делает на самом деле. */
 let actualRate = 0;
+/** Частота отрисованных кадров за последнюю секунду, независимо от расчёта мира. */
+let framesPerSecond: number | null = null;
+let fpsWindowStart: number | null = null;
+let renderedFrames = 0;
 
 let world: World = createWorld(makeParams({ seed: 1 }));
 let paused = false;
@@ -54,10 +62,11 @@ function create(params: WorldParams): void {
 
 let lastTime = performance.now();
 /** Курсор над чашкой: координаты мира и окна. */
-let pointer: { x: number; y: number; clientX: number; clientY: number } | null = null;
+let pointer: { x: number; y: number } | null = null;
 
 const $ = (selector: string) => document.querySelector<HTMLElement>(selector)!;
-const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#params'), legend: $('#legend'), tip: $('.tip'), scrim: $('#scrim') }, world.params, {
+const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#params'), legend: $('#legend'), tip: $('.tip'), observation: $('#observation'), navigation: $('#navigation'), viewControls: $('#view-controls') }, world.params, {
+  onLayoutChange: () => { pointer = null; renderer.resizeKeepingView(); },
   onCreate: (params: WorldParams) => create(params),
   onTogglePause: () => togglePause(),
   onStepOnce: () => stepOnce(),
@@ -144,7 +153,12 @@ simulation.onerror = (event) => {
   paused = true;
   panel.setFileStatus([`Расчёт мира остановлен: ${event.message}`], true);
 };
-document.addEventListener('visibilitychange', control);
+document.addEventListener('visibilitychange', () => {
+  control();
+  fpsWindowStart = null;
+  framesPerSecond = null;
+  renderedFrames = 0;
+});
 
 function setWorld(next: World): void {
   world = next;
@@ -188,7 +202,7 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
   const at = renderer.toWorld(e.clientX, e.clientY);
-  pointer = at ? { x: at[0], y: at[1], clientX: e.clientX, clientY: e.clientY } : null;
+  pointer = at ? { x: at[0], y: at[1] } : null;
 });
 const endDrag = () => {
   drag = null;
@@ -199,15 +213,6 @@ canvas.addEventListener('pointercancel', endDrag);
 canvas.addEventListener('pointerleave', () => { pointer = null; });
 canvas.addEventListener('dblclick', (e) => renderer.zoomBy(2, e.clientX, e.clientY));
 
-// Мини-карта: клик или перетаскивание — перейти к этому месту чашки.
-minimap.addEventListener('pointerdown', (e) => {
-  minimap.setPointerCapture(e.pointerId);
-  renderer.centerFromMinimap(minimap, e.clientX, e.clientY);
-});
-minimap.addEventListener('pointermove', (e) => {
-  if (minimap.hasPointerCapture(e.pointerId)) renderer.centerFromMinimap(minimap, e.clientX, e.clientY);
-});
-
 // Горячие клавиши: не мешают полям ввода.
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
@@ -215,7 +220,7 @@ document.addEventListener('keydown', (e) => {
     saveWorld();
     return;
   }
-  if (e.key === 'Escape') { panel.toggleParams(false); panel.toggleLegend(false); panel.toggleFocus(false); return; }
+  if (e.key === 'Escape') { panel.closePanels(); return; }
   const target = e.target as HTMLElement;
   if (e.ctrlKey || e.metaKey || e.altKey || target.closest('input, select, textarea')) return;
   if (e.key === ' ') {
@@ -246,7 +251,7 @@ function depositsAt(w: World, x: number, y: number): number {
 
 function probe(): void {
   if (!pointer) { panel.setProbe(null); return; }
-  const { x, y, clientX, clientY } = pointer;
+  const { x, y } = pointer;
   const p = world.params;
   const where = `(${Math.round(x)}, ${Math.round(y)})`;
   const v = world.mineral.volcanoes.find((v) => Math.hypot(v.x - x, v.y - y) < 12);
@@ -260,11 +265,11 @@ function probe(): void {
       dormant: ['Спит — может проснуться, когда недра снова наберут давление', `Потухнет без выбросов через ${steps(v.stageUntil - world.step)}`],
       extinct: ['Потух', `Исчезнет через ${steps(v.stageUntil - world.step)}`],
     }[v.stage];
-    panel.setProbe([`Вулкан ${v.id + 1} · ${where}`, `Мощность ×${v.power.toFixed(2)} · извержений было: ${v.k - (v.stage === 'erupting' ? 1 : 0)}`, ...state], clientX, clientY);
+    panel.setProbe([`Вулкан ${v.id + 1} · ${where}`, `Мощность ×${v.power.toFixed(2)} · извержений было: ${v.k - (v.stage === 'erupting' ? 1 : 0)}`, ...state]);
     return;
   }
   if (isBlocked(world.partitions, x, y)) {
-    panel.setProbe([`Перегородка · ${where}`], clientX, clientY);
+    panel.setProbe([`Перегородка · ${where}`]);
     return;
   }
   const temp = temperatureAt(p, world.light, x, y, world.step);
@@ -282,7 +287,7 @@ function probe(): void {
       `Последний расчёт: шаг ${processes.step.toLocaleString('ru')} · за 100 шагов`,
       `Размыв ${processes.erosion[k].toPrecision(3)} · оседание ${processes.settling[k].toPrecision(3)} · воронка → недра ${processes.sinking[k].toPrecision(3)}`,
     ] : []),
-  ], clientX, clientY);
+  ]);
 }
 
 function frame(now: number): void {
@@ -291,6 +296,17 @@ function frame(now: number): void {
   if (!paused) animTime += dt;
   if (!ready) { requestAnimationFrame(frame); return; }
   renderer.draw(animTime);
+  if (fpsWindowStart === null) {
+    fpsWindowStart = now;
+  } else {
+    renderedFrames++;
+    const elapsed = now - fpsWindowStart;
+    if (elapsed >= 1000) {
+      framesPerSecond = renderedFrames * 1000 / elapsed;
+      fpsWindowStart = now;
+      renderedFrames = 0;
+    }
+  }
   renderer.drawMinimap(minimap);
   const [dvx, dvy] = lightDriftVelocity(world.light, world.step);
   driftArrow.style.transform = `rotate(${Math.atan2(dvy, dvx)}rad)`;
@@ -315,6 +331,9 @@ function frame(now: number): void {
       el.style.width = `${pct(x)}%`;
       left += pct(x);
     }
+    for (const [i, amount] of [m.depths, inTransit, deposits, medium].entries()) {
+      amounts[i].textContent = `${pctText(amount)} · ${Math.round(amount).toLocaleString('ru')}`;
+    }
     barThreshold.style.left = `${pct(m.threshold)}%`;
     const erupting = m.volcanoes.find((v) => v.stage === 'erupting');
     const preparing = m.volcanoes.find((v) => v.stage === 'preparing');
@@ -325,7 +344,7 @@ function frame(now: number): void {
       + (inTransit > 0 ? `, выходит извержением ${pctText(inTransit)}` : '')
       + `, в залежах ${pctText(deposits)}, в среде ${pctText(medium)}. Риска — порог давления недр (${pctText(m.threshold)}): когда недра дорастут до неё, начнётся извержение.`;
   }
-  panel.setTime(world.step, paused, speed, paused ? 0 : actualRate, behind);
+  panel.setTime(world.step, paused, speed, framesPerSecond, paused ? 0 : actualRate, behind);
   probe();
   requestAnimationFrame(frame);
 }

@@ -652,17 +652,29 @@ export class WorldRenderer {
 
 
   /** Подогнать разрешение холстов под размер на экране и плотность пикселей. */
-  private resize(): void {
+  /** Изменение компоновки сохраняет масштаб, левый край чашки или центр приближенного вида. */
+  resizeKeepingView(): void { this.resize(true); }
+
+  private resize(keepView = false): void {
     const w = Math.max(1, Math.round(this.canvas.clientWidth * this.dpr));
     const h = Math.max(1, Math.round(this.canvas.clientHeight * this.dpr));
-    if (w !== this.canvas.width || h !== this.canvas.height) {
+    const wasAlignedLeft = !!this.world && Math.abs(this.canvas.width / 2 - (this.cx + this.wall) * this.zoom) < 1e-6;
+    const changed = w !== this.canvas.width || h !== this.canvas.height;
+    if (changed) {
       for (const c of [this.canvas, this.spots, this.shade, this.glint]) {
         c.width = w;
         c.height = h;
       }
     }
-    if (!this.world) return;
-    if (this.fitted) this.fit();
+    if (!this.world || !changed) return;
+    if (keepView) {
+      // Чашка у левого края сохраняет его при открытии внешних панелей.
+      if (wasAlignedLeft || w + 1e-6 >= (this.width + 2 * this.wall) * this.zoom) {
+        this.cx = -this.wall + w / this.zoom / 2;
+      }
+      this.onZoomChange(this.zoom / this.fitZoom());
+    }
+    else if (this.fitted) this.fit();
     else this.setView(this.zoom, this.cx, this.cy);
   }
 
@@ -679,17 +691,17 @@ export class WorldRenderer {
     const max = Math.max(min, MAX_ZOOM_CSS * this.dpr);
     this.zoom = Math.min(max, Math.max(min, zoom));
     this.fitted = this.zoom <= min * 1.0001;
-    const clampAxis = (c: number, size: number, view: number) => {
+    const clampAxis = (c: number, size: number, view: number, alignStart = false) => {
       const half = view / this.zoom / 2;
       const lo = -this.wall + half, hi = size + this.wall - half;
-      return lo > hi ? size / 2 : Math.min(hi, Math.max(lo, c));
+      return lo > hi ? (alignStart ? lo : size / 2) : Math.min(hi, Math.max(lo, c));
     };
-    this.cx = clampAxis(cx, this.width, this.canvas.width);
+    this.cx = clampAxis(cx, this.width, this.canvas.width, true);
     this.cy = clampAxis(cy, this.height, this.canvas.height);
     this.onZoomChange(this.zoom / min);
   }
 
-  /** Показать чашку целиком. */
+  /** Показать чашку целиком у левого края, по вертикали — по центру. */
   fit(): void {
     this.setView(0, this.width / 2, this.height / 2);
   }
@@ -1777,10 +1789,9 @@ export class WorldRenderer {
   }
 
 
-  /** Мини-карта при приближении: вся чашка, пятна света, перегородки и рамка вида; скрыта, когда видна вся чашка. */
+  /** Мини-карта в отдельной панели: вся чашка, пятна света, перегородки и рамка вида. */
   drawMinimap(mini: HTMLCanvasElement): void {
-    mini.hidden = this.fitted;
-    if (this.fitted || !this.world) return;
+    if (!this.world || !mini.clientWidth || !mini.clientHeight) return;
     const w = Math.round(mini.clientWidth * this.dpr);
     const h = Math.round(mini.clientHeight * this.dpr);
     if (mini.width !== w || mini.height !== h) { mini.width = w; mini.height = h; }
