@@ -156,6 +156,7 @@ export class Panel {
   private readonly paramsToggle = el('button', { textContent: 'Новый мир', ariaExpanded: 'false', title: 'Открыть настройки нового мира', className: 'params-toggle' });
   private readonly focusToggle = el('button', { textContent: 'Только мир', ariaPressed: 'false', title: 'Скрыть панели наблюдения (Esc — вернуть)' });
   private readonly legendBody = el('div', { className: 'legend-body' });
+  private readonly legendToggle = el('button', { textContent: 'Легенда', className: 'legend-toggle', ariaExpanded: 'false' });
   private readonly stepButton = el('button', { textContent: '+1 шаг', title: 'Один шаг (→)' });
   private readonly zoomButton = el('button', { className: 'zoom', title: 'Показать чашку целиком (0)' });
   private readonly createButton = el('button', { className: 'primary', textContent: 'Создать мир' });
@@ -202,10 +203,17 @@ export class Panel {
 
   toggleFocus(open?: boolean): void {
     const next = open ?? !this.roots.app.classList.contains('focus-mode');
-    if (next) this.toggleParams(false);
+    if (next) { this.toggleParams(false); this.toggleLegend(false); }
     this.roots.app.classList.toggle('focus-mode', next);
     this.focusToggle.setAttribute('aria-pressed', String(next));
     this.focusToggle.textContent = next ? 'Вернуть панели' : 'Только мир';
+  }
+
+  toggleLegend(open?: boolean): void {
+    const next = open ?? this.roots.legend.hidden;
+    this.roots.legend.hidden = !next;
+    this.legendToggle.setAttribute('aria-expanded', String(next));
+    if (!next && this.roots.legend.contains(document.activeElement)) this.legendToggle.focus();
   }
 
   /** Заменить черновик целиком и обновить все поля панели. */
@@ -239,14 +247,13 @@ export class Panel {
     this.zoomButton.addEventListener('click', () => this.handlers.onZoomFit());
     const processes = el('button', { textContent: 'Процессы', title: 'Общее течение, размыв, оседание и уход в недра', ariaPressed: 'false' });
     const processLegend = el('span', { className: 'process-legend', hidden: true, title: 'Цвет показывает количество минерала за последнее обновление (100 шагов); ярче — больше. При одновременных процессах цвета смешиваются.' });
-    processLegend.innerHTML = '<span style="color:#e88536">■ размыв</span> · <span style="color:#32c995">■ оседание</span> · <span style="color:#c27bff">■ воронка → недра</span> · стрелки — общее течение';
-    this.legendBody.append(processLegend);
+    processLegend.innerHTML = '<span><i style="color:#e88536">↗</i>размыв</span><span><i style="color:#32c995">↧</i>оседание</span><span><i style="color:#c27bff">⊙</i>в недра</span>';
+    processLegend.setAttribute('role', 'note');
     processes.addEventListener('click', () => {
       const enabled = processes.getAttribute('aria-pressed') !== 'true';
       processes.setAttribute('aria-pressed', String(enabled));
       processes.classList.toggle('active', enabled);
       processLegend.hidden = !enabled;
-      if (enabled) this.legendBody.closest('details')!.open = true;
       this.handlers.onProcesses(enabled);
     });
     this.paramsToggle.addEventListener('click', () => this.toggleParams());
@@ -255,7 +262,7 @@ export class Panel {
       el('span', { className: 'group' }, this.pauseButton, this.stepButton),
       el('label', { className: 'speed-control' }, el('span', { textContent: 'Скорость' }), this.speedSelect),
       this.timeLabel,
-      processes,
+      el('span', { className: 'process-control' }, processes, processLegend),
       el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn),
       el('span', { className: 'spacer' }),
       this.status,
@@ -424,31 +431,52 @@ export class Panel {
     ];
   }
 
-  /** Легенда строкой под чашкой: что каким способом показано. */
+  /** Справочник поверх карты: короткие обозначения и пояснение выбранного пункта. */
   private buildLegend(): void {
     const css = (c: Rgb) => `rgb(${c.map(Math.round).join(',')})`;
-    const item = (color: string, text: string) => {
-      const sw = el('span', { className: 'swatch' });
+    const detail = el('div', { className: 'legend-detail', textContent: 'Нажмите на обозначение, чтобы узнать больше.' });
+    const item = (color: string, name: string, description: string, glyph = '') => {
+      const sw = el('span', { className: 'swatch', ariaHidden: 'true' });
       sw.style.background = color;
-      return el('span', { className: 'legend-item' }, sw, text);
+      sw.textContent = glyph;
+      return { button: el('button', { className: 'legend-item', title: description, ariaPressed: 'false' }, sw, name), description };
     };
+    const section = (name: string, entries: ReturnType<typeof item>[]) => {
+      for (const entry of entries) entry.button.addEventListener('click', () => {
+        for (const other of entries) other.button.setAttribute('aria-pressed', String(other === entry));
+        detail.textContent = entry.description;
+      });
+      return el('section', { className: 'legend-section' }, el('h3', { textContent: name }),
+        el('div', { className: 'legend-items' }, ...entries.map(e => e.button)));
+    };
+    const current = item('transparent', 'Течение', 'Пунктир движется по течению: быстрее — ярче и толще. В режиме процессов стрелки показывают общее течение.');
+    current.button.querySelector('.swatch')!.innerHTML = '<svg viewBox="0 0 28 22"><path d="M2 16 Q10 3 24 8" fill="none" stroke="#6b9acc" stroke-width="2" stroke-dasharray="3 2"/><path d="m19 3 6 5-7 3" fill="none" stroke="#6b9acc" stroke-width="2"/></svg>';
     this.legendBody.append(
-      item(css(DEEP_WATER), 'вода'),
-      item(css(SHALLOWS_SAMPLE), 'отмель — камень под водой'),
-      item(css(STONE_SAMPLE), 'суша — тёмный камень'),
-      item(`radial-gradient(circle at 30% 40%, rgba(230,200,255,0.9) 0 1px, transparent 1.5px), radial-gradient(circle at 70% 65%, rgba(230,200,255,0.9) 0 1px, transparent 1.5px), ${css(DEPOSIT_COLOR)}`, 'залежи минерала — тёмно-фиолетовое дно'),
-      item(css(SUN_COLOR), 'пятна света'),
-      item(css(DEEP_WATER.map((c, i) => (c * SHADE_COLOR[i]) / 255) as unknown as Rgb), 'тень'),
-      item('rgb(255, 170, 70)', 'нагрев — теплее'),
-      item('rgb(135, 190, 245)', 'течение — пунктир бежит со скоростью течения; быстрее — ярче и толще'),
-      item(css(MINERAL_COLOR), 'растворённый минерал — заметнее, где его больше; зёрна текут вместе с ним'),
-      item('radial-gradient(circle, rgb(30,18,40) 0 35%, rgb(196,128,255) 36% 55%, transparent 56%)', 'вулкан'),
-      item('repeating-linear-gradient(60deg, rgba(255,250,230,0.9) 0 1px, transparent 1px 4px), rgb(84, 144, 210)', 'блики — вода на свету'),
-      item('rgba(150, 190, 222, 0.6)', 'стекло — стенки и перегородки'),
+      section('Местность', [
+        item(css(DEEP_WATER), 'Вода', 'Глубокая вода: низкое сопротивление движению.'),
+        item(css(SHALLOWS_SAMPLE), 'Отмель', 'Камень под водой. Сопротивление выше, чем в глубокой воде.'),
+        item(css(STONE_SAMPLE), 'Суша', 'Тёмный камень над водой. Здесь сопротивление движению самое высокое.'),
+        item('rgba(150,190,222,.6)', 'Стекло', 'Стенки чашки и перегородки преграждают путь среде и минералу.'),
+      ]),
+      section('Свет и движение', [
+        item(css(SUN_COLOR), 'Свет', 'Светлые пятна нагревают мир и создают течение.'),
+        item(css(DEEP_WATER.map((c, i) => c * SHADE_COLOR[i] / 255) as unknown as Rgb), 'Тень', 'Область между пятнами света; течение среды направлено от света к тени.'), current,
+      ]),
+      section('Минерал', [
+        item(css(MINERAL_COLOR), 'В среде', 'Фиолетовая дымка и зёрна: растворённый минерал движется вместе со средой.'),
+        item(`radial-gradient(circle at 30% 40%, #e6c8ff 0 1px, transparent 2px), ${css(DEPOSIT_COLOR)}`, 'Залежи', 'Тёмно-фиолетовый минерал на дне с кристаллами. Он оседает и размывается течением.'),
+        item('radial-gradient(circle, #1e1228 0 25%, #c480ff 30% 48%, transparent 54%)', 'Вулкан', 'Жерло выбрасывает минерал из недр; во время извержения вокруг расходятся кольца.'),
+        item('radial-gradient(ellipse, #080c1a 0 30%, #485279 45%, transparent 65%)', 'Воронка', 'Тёмное отверстие затягивает минерал. Избыток уходит в недра.'),
+      ]),
+      el('details', { className: 'legend-extras' }, el('summary', { textContent: 'Блики и нагрев' }),
+        el('p', { className: 'note', textContent: 'Блики отмечают воду на свету. Светлые пятна теплее; точные значения температуры доступны в подсказке на карте.' })),
     );
-    const disclosure = el('details', { className: 'legend-disclosure' },
-      el('summary', { textContent: 'Обозначения на карте' }), this.legendBody);
-    this.roots.legend.append(disclosure);
+    const close = el('button', { textContent: '×', ariaLabel: 'Закрыть легенду', title: 'Закрыть (Esc)' });
+    close.addEventListener('click', () => this.toggleLegend(false));
+    this.legendToggle.addEventListener('click', () => this.toggleLegend());
+    this.legendToggle.setAttribute('aria-controls', 'legend');
+    this.roots.legend.append(el('div', { className: 'legend-head' }, el('h2', { textContent: 'Легенда' }), close), this.legendBody, detail);
+    this.roots.legend.before(this.legendToggle);
   }
 
   /** Итог сохранения или загрузки — коротко в строке управления, подробности по наведению. */
