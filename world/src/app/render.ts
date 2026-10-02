@@ -23,32 +23,35 @@ const GLASS_SHADOW = 'rgba(30, 55, 80, 0.65)';
 export type Rgb = readonly [number, number, number];
 
 /** Вода: глубокая и над отмелью. */
-export const DEEP_WATER: Rgb = [34, 96, 178];
-export const SHALLOW_WATER: Rgb = [84, 144, 210];
+export const DEEP_WATER: Rgb = [28, 101, 142];
+export const SHALLOW_WATER: Rgb = [102, 180, 188];
 /** Камень суши: средняя яркость, разброс пятнами и зерном, трещины. */
-const STONE_BASE = 40;
-const STONE_MOTTLE = 18;
-const STONE_GRAIN = 8;
-const STONE_CRACK = 16;
+const STONE_BASE = 61;
+const STONE_MOTTLE = 15;
+const STONE_GRAIN = 6;
+const STONE_CRACK = 12;
 /** Размер плит камня между трещинами, единиц мира. */
 const STONE_SLAB = 14;
 /** Камень под водой светлее: вода его подсвечивает. */
-const STONE_UNDERWATER_LIFT = 45;
+const STONE_UNDERWATER_LIFT = 36;
 /** Насколько вода над отмелью прозрачна (0 — не видно камня, 1 — только камень). */
-const SHALLOWS_CLARITY = 0.6;
+const SHALLOWS_CLARITY = 0.42;
+/** Условная влажная кромка по уровню среды, без геометрической высоты и новых волн. */
+const WET_SHORE: Rgb = [31, 51, 55];
+const SHORE_LIGHT: Rgb = [151, 201, 194];
 /**
  * Залежи минерала на дне: тёмно-фиолетовые, с мелкими светлыми кристаллами;
  * с какой густоты залежей (от средней плотности запаса) начинаются и с какой
  * сплошные, наибольшая укрывистость, доля и яркость кристаллов.
  */
-export const DEPOSIT_COLOR: Rgb = [84, 44, 122];
+export const DEPOSIT_COLOR: Rgb = [101, 57, 137];
 const DEPOSIT_FROM = 0.5;
 const DEPOSIT_FULL = 8;
 const DEPOSIT_MAX = 0.9;
 const CRYSTAL_SHARE = 0.06;
 const CRYSTAL_LIGHT = 70;
 /** Образцы для легенды. */
-export const STONE_SAMPLE: Rgb = [STONE_BASE, STONE_BASE, STONE_BASE + 4];
+export const STONE_SAMPLE: Rgb = [STONE_BASE + 6, STONE_BASE + 3, STONE_BASE];
 export const SHALLOWS_SAMPLE: Rgb = mix(lift(STONE_SAMPLE, STONE_UNDERWATER_LIFT), SHALLOW_WATER, 1 - SHALLOWS_CLARITY);
 
 /** Тень умножается на местность: темнее и холоднее. */
@@ -131,8 +134,9 @@ const GLINT_LAYERS = [
   { size: 130, vx: 5, vy: 2.5 },
   { size: 210, vx: -3.5, vy: 4 },
 ] as const;
-/** Водные трассеры: не более 600, короткие изогнутые штрихи по текущему полю. */
+/** Водные трассеры: плотность по экрану и масштабу, не более 600. */
 const FLOW_MARKER_LIMIT = 600;
+const FLOW_MARKER_SPACING = { overview: 38, detail: 26 };
 type WaterMarker = FlowMarker & { born: number; streak: { x: number; y: number }[] };
 
 /** Бесшовная текстура ряби: тонкая светлая сетка там, где шум близок к нулю. */
@@ -173,13 +177,13 @@ function ripple(): HTMLCanvasElement {
  * но полупрозрачный и светлее залежей. С какой плотности (от средней) виден, при
  * какой — полный; наибольшая непрозрачность; цвет тонкого и густого.
  */
-export const MINERAL_COLOR: Rgb = [196, 128, 255];
-const MINERAL_DEEP: Rgb = [164, 112, 236];
+export const MINERAL_COLOR: Rgb = [216, 165, 255];
+const MINERAL_DEEP: Rgb = [185, 131, 237];
 const MINERAL_FROM = 0.15;
-const MINERAL_FULL = 8;
-const MINERAL_ALPHA = 0.5;
+const MINERAL_FULL = 6;
+const MINERAL_ALPHA = 0.46;
 /** Как быстро растёт непрозрачность с плотностью (1 — ровно по логарифму; больше — тонкое прозрачнее). */
-const MINERAL_GAMMA = 1.1;
+const MINERAL_GAMMA = 1;
 /**
  * Зёрна минерала — только для показа: точки там, где минерал движется (гуще,
  * где больше количество × скорость — видно и тонкие реки), движутся так же,
@@ -202,7 +206,7 @@ const GRAIN_ALPHA = 0.6;
  * лёгкое затемнение там, где прозрачность ниже средней (насколько мягче модели).
  */
 const MURK_LIGHT = 1;
-const MURK_STRENGTH = 0.5;
+const MURK_STRENGTH = 0.35;
 /**
  * Извержение — показывается только то, что есть в модели: вспышка света у
  * жерла на каждый залп, свечение жерла по темпу выброса; само вещество и
@@ -236,6 +240,8 @@ const VENT_PULSE_S = 0.9;
 /** Отверстие вулкана: в силе — белое с оттенком минерала, без силы (спит) — тусклое. */
 const VENT_SPARK: Rgb = [250, 242, 255];
 const VENT_DIM: Rgb = [128, 106, 160];
+/** Кромка жерла отделяет его от дымки; у спящего вулкана остаётся матовой. */
+const VENT_RIM: Rgb = [185, 153, 209];
 /** Пульс созревшего вулкана: насколько диск вырастает на пике. */
 const VENT_BEAT = 0.3;
 /** Радиус точки на экране, CSS px: у спящего и только зародившегося — и перед самым взрывом. */
@@ -260,28 +266,30 @@ const SPRING_REACH = 2.2;
 const FUNNEL_COLOR: Rgb = [58, 30, 92];
 /** Центр отверстия — глубина: тёмно-синий. */
 const FUNNEL_DEEP: Rgb = [8, 14, 46];
-const FUNNEL_ALPHA = 0.6;
-/** Отверстия рисуются во столько раз детальнее сетки поля; уступов глубины от кромки к центру. */
+const FUNNEL_ALPHA = 0.48;
+/** Отверстия рисуются во столько раз детальнее сетки поля. */
 const FUNNEL_RES = 3;
-const FUNNEL_STEPS = 4;
 /** С такой силы воронка видна полностью; слабее — проявляется. */
 const FUNNEL_SHOWN = 0.25;
 /** Кромка отверстия: цвет и непрозрачность. */
 const FUNNEL_RIM_COLOR: Rgb = [190, 150, 240];
-const FUNNEL_RIM_ALPHA = 0.75;
+const FUNNEL_RIM_ALPHA = 0.45;
+/** Холодные крупинки стока отличаются от бело-сиреневого притока жерла. */
+const FUNNEL_PARTICLE: Rgb = [184, 235, 246];
 /** Стекающие крупинки: сколько на воронку и сколько живут, с. */
 const FUNNEL_GRAINS = 40;
-const FUNNEL_GRAIN_LIFE = 6;
+// На ×1 частица успевает пройти к отверстию, а не исчезает на подступах.
+const FUNNEL_GRAIN_LIFE = 30;
 /** Попав в отверстие, крупинка зависает и тает за столько секунд. */
 const SINK_S = 1.5;
 /** Свечение недр из отверстия: цвет, размер (в радиусах отверстия), не меньше CSS px, яркость при полной силе. */
 const FUNNEL_GLOW: Rgb = [110, 80, 220];
 const FUNNEL_GLOW_SIZE = 2.2;
 const FUNNEL_GLOW_MIN_CSS = 10;
-const FUNNEL_GLOW_ALPHA = 0.7;
+const FUNNEL_GLOW_ALPHA = 0.22;
 /** Искра ушедшей крупинки: сколько живёт, с, и размер, CSS px. */
 const SPARK_S = 0.35;
-const SPARK_CSS = 4;
+const SPARK_CSS = 2.5;
 /** Размер стекающей крупинки вдали от отверстия, CSS px (к отверстию — до точки). */
 const FUNNEL_GRAIN_CSS = 2.4;
 const VENT_ERUPT_CSS: readonly [number, number] = [5, 11];
@@ -320,7 +328,7 @@ const TERRAIN_WORK_BUDGET_MS = 4;
 const MAX_ZOOM_CSS = 24;
 
 /** Цвет местности в точке мира: вязкость и фактура камня, посчитанные один раз на мир. */
-function terrainSampler(world: World): (x: number, y: number, out: Uint8ClampedArray, k: number) => void {
+function terrainSampler(world: World): (x: number, y: number, out: Uint8ClampedArray, k: number, detail: number) => void {
   const { width, height } = world.dish;
   const seed = world.params.seed;
   // Фактура камня в единицах мира — узор только для глаза, на модель не влияет.
@@ -340,32 +348,45 @@ function terrainSampler(world: World): (x: number, y: number, out: Uint8ClampedA
     const b = deposits[j1 * m.cols + i0] + (deposits[j1 * m.cols + i1] - deposits[j1 * m.cols + i0]) * u;
     return (a + (b - a) * v) / (m.cell * m.cell) / stock;
   };
-  return (x, y, out, k) => {
+  return (x, y, out, k, detail) => {
     if (!insideDish(world.dish, x, y)) return;
     const L = smoothLevelAt(world.viscosity, x, y);
-    const crack = 1 - smoothstep(0.02, 0.07, edge(x / STONE_SLAB, y / STONE_SLAB));
-    const v = STONE_BASE + STONE_MOTTLE * mottle(x, y) + STONE_GRAIN * grain(x, y) - STONE_CRACK * crack;
+    const crack = detail > 0 ? 1 - smoothstep(0.02, 0.07, edge(x / STONE_SLAB, y / STONE_SLAB)) : 0;
+    const fine = detail > 0 ? STONE_GRAIN * grain(x, y) - STONE_CRACK * crack : 0;
+    const v = STONE_BASE + STONE_MOTTLE * mottle(x, y) + fine * detail;
     // Вода мелеет к отмели и сходит на нет к суше; камень под ней светлее.
     const shallow = smoothstep(0.2, 1.3, L);
     const dry = smoothstep(1.35, 1.75, L);
     const stone = v + STONE_UNDERWATER_LIFT * (1 - dry);
-    let r = stone, g = stone, b = stone + 4;
+    let r = stone + 6, g = stone + 3, b = stone;
     // Залежи: тёмно-фиолетовый налёт на дне — гуще залежи, плотнее цвет;
     // по нему редкие светлые кристаллы.
     const lode = Math.min(1, smoothstep(DEPOSIT_FROM, DEPOSIT_FULL, depositAt(x, y)));
     if (lode > 0) {
-      const speck = hash3(seed ^ 0x3a7d, Math.round(x * 1.5), Math.round(y * 1.5)) / 4294967296;
-      const crystal = speck < CRYSTAL_SHARE * lode ? CRYSTAL_LIGHT : 0;
-      const cover = lode * DEPOSIT_MAX;
+      const speck = detail > 0 ? hash3(seed ^ 0x3a7d, Math.round(x * 1.5), Math.round(y * 1.5)) / 4294967296 : 0.5;
+      const crystal = speck < CRYSTAL_SHARE * lode ? CRYSTAL_LIGHT * detail : 0;
+      // Неподвижная мелкая фактура отличает залежи от гладкой подвижной дымки.
+      const cover = lode * DEPOSIT_MAX * (0.94 + 0.12 * (speck - 0.5) * detail);
       r += (DEPOSIT_COLOR[0] + crystal * 0.9 - r) * cover;
       g += (DEPOSIT_COLOR[1] + crystal * 0.6 - g) * cover;
       b += (DEPOSIT_COLOR[2] + crystal - b) * cover;
     }
     const water = mix(DEEP_WATER, SHALLOW_WATER, shallow);
-    const cover = (1 - SHALLOWS_CLARITY * shallow) * (1 - dry);
-    out[k] = r + (water[0] - r) * cover;
-    out[k + 1] = g + (water[1] - g) * cover;
-    out[k + 2] = b + (water[2] - b) * cover;
+    // Плотные залежи слегка просвечивают и в глубокой воде.
+    const cover = (1 - SHALLOWS_CLARITY * shallow) * (1 - dry) * (1 - 0.24 * lode);
+    r += (water[0] - r) * cover;
+    g += (water[1] - g) * cover;
+    b += (water[2] - b) * cover;
+    // Две мягкие полосы следуют полю местности: светлое мелководье снаружи,
+    // мокрый камень внутри. Это тон берега, не пена и не дополнительное течение.
+    const shoreLight = smoothstep(1.08, 1.3, L) * (1 - smoothstep(1.3, 1.5, L)) * 0.22 * (1 - lode);
+    const wet = smoothstep(1.35, 1.53, L) * (1 - smoothstep(1.58, 1.83, L)) * 0.42 * (1 - 0.65 * lode);
+    r += (SHORE_LIGHT[0] - r) * shoreLight;
+    g += (SHORE_LIGHT[1] - g) * shoreLight;
+    b += (SHORE_LIGHT[2] - b) * shoreLight;
+    out[k] = r + (WET_SHORE[0] - r) * wet;
+    out[k + 1] = g + (WET_SHORE[1] - g) * wet;
+    out[k + 2] = b + (WET_SHORE[2] - b) * wet;
     out[k + 3] = 255;
   };
 }
@@ -383,6 +404,8 @@ function* renderTerrainTask(sample: ReturnType<typeof terrainSampler>, x0: numbe
   c.height = ph;
   const tctx = c.getContext('2d')!;
   const img = tctx.createImageData(pw, ph);
+  // Уровни кеша фиксированы; между ними камера смешивает уже готовые плитки.
+  const detail = smoothstep(TILE_SCALE_MIN, 4, scale);
   for (let j = 0; j < ph; j++) {
     if ((j & 3) === 0) yield;
     const y = y0 + (j + 0.5) / scale;
@@ -390,7 +413,7 @@ function* renderTerrainTask(sample: ReturnType<typeof terrainSampler>, x0: numbe
     for (let i = 0; i < pw; i++) {
       const x = x0 + (i + 0.5) / scale;
       if (x < 0 || x >= width) continue;
-      sample(x, y, img.data, (j * pw + i) * 4);
+      sample(x, y, img.data, (j * pw + i) * 4, detail);
     }
   }
   tctx.putImageData(img, 0, 0);
@@ -594,6 +617,9 @@ export class WorldRenderer {
     return window.devicePixelRatio || 1;
   }
 
+  /** Детали эффектов проявляются плавно от всей чашки до ×4; считаем один раз на кадр. */
+  private detailVisibility = 0;
+
   /**
    * Местность изменилась (пересборка из грунта) — перестроить подложку, маску
    * воды и сбросить плитки. Не чаще раза в TERRAIN_REDRAW_MS: на ускорении
@@ -771,6 +797,7 @@ export class WorldRenderer {
     const scale = Math.min(TILE_SCALE_MAX, Math.max(TILE_SCALE_MIN, 2 ** Math.ceil(Math.log2(this.zoom))));
     if (scale <= TILE_SCALE_MIN) { this.terrainPending = false; return; }
     const span = TILE / scale;
+    const blend = smoothstep(0, 1, Math.log2(this.zoom / (scale / 2)));
     const [x0, y0] = this.screenToWorld(0, 0);
     const [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
     const i0 = Math.max(0, Math.floor(x0 / span)), i1 = Math.min(Math.ceil(this.width / span) - 1, Math.floor(x1 / span));
@@ -780,13 +807,17 @@ export class WorldRenderer {
       for (let i = i0; i <= i1; i++) {
         const key = `${scale}:${i}:${j}`;
         const tile = this.tiles.get(key);
+        // Нижний уровень остаётся под верхним: фактура проявляется непрерывно,
+        // в том числе при переходе через степень двойки.
+        this.drawCoarser(scale, i, j, span);
         if (tile) {
           this.tiles.delete(key);
           this.tiles.set(key, tile);
+          ctx.globalAlpha = blend;
           ctx.drawImage(tile, i * span, j * span, span, span);
+          ctx.globalAlpha = 1;
         } else {
           // Пока плитки нет — ближайшая готовая крупнее (мельче масштабом), иначе подложка.
-          this.drawCoarser(scale, i, j, span);
           missing.push([i, j]);
         }
       }
@@ -809,7 +840,9 @@ export class WorldRenderer {
       if (!result.done) continue;
       const { key, i, j } = this.tileWork;
       this.tiles.set(key, result.value);
+      ctx.globalAlpha = blend;
       ctx.drawImage(result.value, i * span, j * span, span, span);
+      ctx.globalAlpha = 1;
       this.tileWork = null;
     }
     this.terrainPending = !!this.tileWork || missing.some(([i, j]) => !this.tiles.has(`${scale}:${i}:${j}`));
@@ -834,6 +867,7 @@ export class WorldRenderer {
     const pendingCurves = !this.showProcesses && this.flowMarkers.some((marker) => !marker.streak.length);
     if (key === this.frameKey && !this.terrainPending && !this.redrawQueue.size && !pendingCurves) return;
     this.frameKey = key;
+    this.detailVisibility = smoothstep(1, 4, this.zoom / this.fitZoom());
     this.terrainDeadline = performance.now() + TERRAIN_WORK_BUDGET_MS;
     this.refreshTerrain();
     this.drainRedraw();
@@ -1169,7 +1203,7 @@ export class WorldRenderer {
         sz = size * Math.max(0.1, (g[o + 3] - g[o + 2]) / SINK_S);
       }
       const f = g[o + 2] / g[o + 3];
-      ctx.globalAlpha = Math.min(1, f * 6, (1 - f) * 3) * GRAIN_ALPHA;
+      ctx.globalAlpha = Math.min(1, f * 6, (1 - f) * 3) * GRAIN_ALPHA * (0.25 + 0.75 * this.detailVisibility);
       ctx.fillRect(g[o] - sz / 2, g[o + 1] - sz / 2, sz, sz);
     }
     ctx.globalAlpha = 1;
@@ -1269,6 +1303,7 @@ export class WorldRenderer {
           * (v.fresh ? smoothstep(0, 0.3, phase) : 1) * (1 + VENT_BEAT * beat);
         this.softSpot(v.x, v.y, dot * (3.2 + 1.2 * beat), [[0, MINERAL_COLOR, (0.45 + 0.3 * beat) * force], [0.5, MINERAL_COLOR, (0.15 + 0.15 * beat) * force], [1, MINERAL_COLOR, 0]]);
         this.solidDot(v.x, v.y, dot, mix(mix(VENT_DIM, VENT_SPARK, force), MINERAL_COLOR, 0.45 * beat));
+        this.ventRim(v.x, v.y, dot, mix(VENT_RIM, VENT_SPARK, force), 0.35 + 0.4 * force);
       } else if (v.stage === 'erupting') {
         // Извергается: крупнее у большого извержения (по объёму) и сейчас, пока
         // выброс силён, — к концу диск сжимается вместе с темпом.
@@ -1283,14 +1318,20 @@ export class WorldRenderer {
         const color = mix(VENT_SPARK, mix(MINERAL_COLOR, VENT_DIM, 0.4 * Math.max(0, 1 - this.ventStrength(v) / VENT_TAIL_RATE)), after);
         this.softSpot(v.x, v.y, dot * 2.3, [[0.3, mix(BAR_OUT, MINERAL_COLOR, after), 0.8 - 0.4 * after], [0.75, MINERAL_COLOR, 0.35 - 0.15 * after], [1, MINERAL_COLOR, 0]]);
         this.solidDot(v.x, v.y, dot, color);
+        this.ventRim(v.x, v.y, dot, mix(VENT_RIM, VENT_SPARK, Math.max(burst, swell)), 0.65 + 0.25 * burst);
+        // Яркая сердцевина только у реального залпа; при истечении остаётся сиреневый диск.
+        if (burst > 0) this.solidDot(v.x, v.y, dot * 0.45 * Math.sqrt(burst), VENT_SPARK);
         this.drawSpring(v, dot, after);
       } else if (v.stage === 'dormant') {
         // Угасшая искра: маленькое тусклое отверстие, без ореола; может снова разгореться.
-        this.solidDot(v.x, v.y, Math.max(this.px(VENT_DOT_CSS[0]) * big, r * 0.2), VENT_DIM);
+        const dot = Math.max(this.px(VENT_DOT_CSS[0]) * big, r * 0.2);
+        this.solidDot(v.x, v.y, dot, mix(VENT_DIM, FUNNEL_DEEP, 0.4));
+        this.ventRim(v.x, v.y, dot, VENT_RIM, 0.3);
       } else {
         // Потухший: отверстие сереет и затягивается до исчезновения.
         const dot = Math.max(this.px(VENT_DOT_CSS[0]) * big, r * 0.2) * (1 - phase);
         this.solidDot(v.x, v.y, dot, mix(VENT_DIM, VENT_ASH, Math.min(1, phase * 3)));
+        this.ventRim(v.x, v.y, dot, VENT_ASH, 0.3 * (1 - phase));
       }
     }
     for (const id of this.springs.keys()) if (!m.volcanoes.some((v) => v.id === id && v.stage === 'erupting')) this.springs.delete(id);
@@ -1310,7 +1351,11 @@ export class WorldRenderer {
     let st = this.springs.get(v.id);
     if (!st) {
       st = { p: new Float32Array(SPRING_COUNT * 3), step: w.step };
-      for (let n = 0; n < SPRING_COUNT; n++) st.p[n * 3 + 2] = -1;
+      for (let n = 0; n < SPRING_COUNT; n++) {
+        st.p[n * 3] = hash3(v.id, v.k, n, 1) / 4294967296 * Math.PI * 2;
+        st.p[n * 3 + 1] = disk * Math.sqrt(hash3(v.id, v.k, n, 2) / 4294967296);
+        st.p[n * 3 + 2] = hash3(v.id, v.k, n, 3) / 4294967296 < 0.05 + 0.6 * this.ventStrength(v) ? 0 : -1;
+      }
       this.springs.set(v.id, st);
     }
     const steps = Math.max(0, w.step - st.step);
@@ -1326,7 +1371,7 @@ export class WorldRenderer {
       const o = n * 3;
       if (p[o + 2] < 0) {
         // Новая — в случайной точке диска (равномерно по площади); живых тем больше, чем сильнее выброс.
-        if (Math.random() > 0.05 + 0.6 * strength) continue;
+        if (steps <= 0 || Math.random() > 0.05 + 0.6 * strength) continue;
         const a = Math.random() * Math.PI * 2, rr = disk * Math.sqrt(Math.random());
         p[o] = a; p[o + 1] = rr; p[o + 2] = 0;
       }
@@ -1334,17 +1379,19 @@ export class WorldRenderer {
       p[o + 1] = Math.sqrt(r * r + (rate * steps) / Math.PI);
       const f = p[o + 1] / (disk * SPRING_REACH);
       if (f >= 1) { p[o + 2] = -1; continue; }
-      ctx.globalAlpha = (1 - f) * (0.6 + 0.35 * after) * Math.min(1, 0.55 + strength * 3);
+      ctx.globalAlpha = (1 - f) * (0.6 + 0.35 * after) * Math.min(1, 0.55 + strength * 3) * (0.55 + 0.45 * this.detailVisibility);
       // Рождается точкой в жерле и растёт, отходя от него.
       const sz = size * (0.15 + 0.85 * smoothstep(0, disk * 1.2, p[o + 1]));
-      ctx.fillRect(v.x + Math.cos(p[o]) * p[o + 1] - sz / 2, v.y + Math.sin(p[o]) * p[o + 1] - sz / 2, sz, sz);
+      const x = v.x + Math.cos(p[o]) * p[o + 1], y = v.y + Math.sin(p[o]) * p[o + 1];
+      if (!insideDish(w.dish, x, y) || isBlocked(w.partitions, x, y)) { p[o + 2] = -1; continue; }
+      ctx.fillRect(x - sz / 2, y - sz / 2, sz, sz);
     }
     ctx.globalAlpha = 1;
   }
 
   /**
-   * Воронки — отверстия в недра. Отверстие — светлая кромка по краю и уступы
-   * вниз к центру (темнее и синее, между уступами — тонкие светлые линии) —
+   * Воронки — отверстия в недра. Отверстие — мягкая кромка по краю и плавное
+   * затемнение к центру —
    * плоско, без теней; свечение недр из него по силе воронки; ушедшая вниз
    * крупинка мелькает искрой. Сгущаются и тают по модели (проявленность — сила воронки).
    * Светлые крупинки в ареоле идут по сумме
@@ -1361,7 +1408,19 @@ export class WorldRenderer {
     // Воронки модели — по номеру; проявленность — их сила (сгущаются и тают по модели).
     const views = new Map(this.funnelViews.map((e) => [e.id, e]));
     this.funnelViews = m.funnels.map((f) => {
-      const e = views.get(f.id) ?? { id: f.id, x: f.x, y: f.y, cells: f.cells, reach: f.reach, alpha: 0, alive: true, grains: new Float32Array(FUNNEL_GRAINS * 4).fill(-1) };
+      let e = views.get(f.id);
+      if (!e) {
+        e = { id: f.id, x: f.x, y: f.y, cells: f.cells, reach: f.reach, alpha: 0, alive: true, grains: new Float32Array(FUNNEL_GRAINS * 4).fill(-1) };
+        // При загрузке на паузе частицы сразу видны; дальнейший пересев только при ходе времени.
+        for (let q = 0; q < FUNNEL_GRAINS; q++) {
+          if (hash3(f.id, q, 0) / 4294967296 > f.strength) continue;
+          const a = hash3(f.id, q, 1) / 4294967296 * Math.PI * 2;
+          const r = f.reach * (q % 3 === 0 ? 0.35 : 1) * Math.sqrt(hash3(f.id, q, 2) / 4294967296);
+          e.grains[q * 4] = f.x + Math.cos(a) * r;
+          e.grains[q * 4 + 1] = f.y + Math.sin(a) * r;
+          e.grains[q * 4 + 2] = hash3(f.id, q, 3) / 4294967296 * FUNNEL_GRAIN_LIFE * 0.25;
+        }
+      }
       e.alpha = f.strength;
       e.alive = f.forming;
       return e;
@@ -1438,16 +1497,12 @@ export class WorldRenderer {
             const sh = at(shape, fx, fy);
             const st = at(power, fx, fy);
             if (sh <= 0.05 || st <= 0) continue;
-            // Кромка — светлая линия по краю; внутри — уступы вниз: темнее и синее к центру, между уступами — тонкие светлые линии.
+            // Кромка мягкая, затемнение к центру непрерывное, без ступенчатых колец.
             const inside = smoothstep(0.35, 0.6, sh);
             const rim = Math.max(0, 1 - Math.abs(sh - 0.45) / 0.14);
             const d = at(depth, fx, fy) * inside;
-            const ds = d * FUNNEL_STEPS;
-            const level = Math.min(1, Math.floor(ds) / (FUNNEL_STEPS - 1));
-            const frac = ds - Math.floor(ds);
-            const contour = level > 0 && frac < 0.18 ? 1 : 0;
-            let col = mix(FUNNEL_COLOR, FUNNEL_DEEP, level);
-            col = mix(col, FUNNEL_RIM_COLOR, Math.max(rim, contour * 0.3));
+            let col = mix(FUNNEL_COLOR, FUNNEL_DEEP, smoothstep(0, 1, d));
+            col = mix(col, FUNNEL_RIM_COLOR, rim * 0.65);
             const a = Math.max(inside * FUNNEL_ALPHA, rim * FUNNEL_RIM_ALPHA) * smoothstep(0, FUNNEL_SHOWN, st);
             const o = (py * bw + px) * 4;
             img.data[o] = col[0];
@@ -1460,9 +1515,10 @@ export class WorldRenderer {
       }
     }
     const ctx = this.ctx;
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = 0.6 + 0.4 * this.detailVisibility;
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(c, 0, 0, m.cols * m.cell, m.rows * m.cell);
+    ctx.globalAlpha = 1;
     // Свечение недр из отверстия — по силе воронки: рождающаяся тлеет, полная светится, тающая гаснет.
     const glow = puffSprite(FUNNEL_GLOW);
     ctx.globalCompositeOperation = 'screen';
@@ -1480,17 +1536,22 @@ export class WorldRenderer {
     const v: [number, number] = [0, 0];
     const size = this.px(FUNNEL_GRAIN_CSS);
     const maxHop = this.px(10);
-    ctx.fillStyle = rgb(VENT_SPARK);
+    ctx.fillStyle = rgb(FUNNEL_PARTICLE);
+    ctx.strokeStyle = rgb(FUNNEL_PARTICLE);
+    ctx.lineWidth = this.px(0.85); ctx.lineCap = 'round';
+    const allowed = (x: number, y: number) => insideDish(w.dish, x, y) && !isBlocked(w.partitions, x, y);
     for (const e of this.funnelViews) {
       const p = e.grains;
+      const trails = new Path2D();
       for (let q = 0; q < FUNNEL_GRAINS; q++) {
         const o = q * 4;
         if (p[o + 2] < 0) {
-          if (Math.random() > 0.15 * e.alpha) continue;
-          const a = Math.random() * Math.PI * 2, r = e.reach * (0.3 + 0.7 * Math.sqrt(Math.random()));
+          if (dt <= 0 || Math.random() > 0.15 * e.alpha) continue;
+          const a = Math.random() * Math.PI * 2, r = e.reach * (q % 3 === 0 ? 0.35 : 1) * Math.sqrt(Math.random());
           p[o] = e.x + Math.cos(a) * r; p[o + 1] = e.y + Math.sin(a) * r; p[o + 2] = 0; p[o + 3] = -1;
         }
         p[o + 2] += dt;
+        if (!allowed(p[o], p[o + 1])) { p[o + 2] = -1; continue; }
         const ci = Math.min(m.cols - 1, Math.max(0, Math.floor(p[o] / m.cell)));
         const cj = Math.min(m.rows - 1, Math.max(0, Math.floor(p[o + 1] / m.cell)));
         if (holes[cj * m.cols + ci]) {
@@ -1503,6 +1564,7 @@ export class WorldRenderer {
           let dx = v[0] * steps, dy = v[1] * steps;
           const hop = Math.hypot(dx, dy);
           if (hop > maxHop) { dx *= maxHop / hop; dy *= maxHop / hop; }
+          if (!allowed(p[o] + dx / 2, p[o + 1] + dy / 2) || !allowed(p[o] + dx, p[o + 1] + dy)) { p[o + 2] = -1; continue; }
           p[o] += dx; p[o + 1] += dy;
         }
         const sinking = p[o + 3] < 0 ? 1 : 1 - p[o + 3] / SINK_S;
@@ -1514,22 +1576,49 @@ export class WorldRenderer {
         }
         if (p[o + 2] > FUNNEL_GRAIN_LIFE) { p[o + 2] = -1; continue; }
         const sz = size * (0.1 + 0.9 * sinking);
-        ctx.globalAlpha = e.alpha * Math.min(1, p[o + 2] * 3) * 0.9;
+        ctx.globalAlpha = e.alpha * Math.min(1, p[o + 2] * 3) * 0.9 * (0.5 + 0.5 * this.detailVisibility);
+        // Короткий условный след назад по реальному полю, без придуманного вращения.
+        if (p[o + 3] < 0) {
+          flowAt(w, p[o], p[o + 1], v);
+          const speed = Math.hypot(...v);
+          const length = Math.min(m.cell / 2, this.px(6) * speed / (speed + DRIFT_REFERENCE));
+          if (speed > 1e-6 && length > this.px(0.5)) {
+            const tx = p[o] - v[0] / speed * length, ty = p[o + 1] - v[1] / speed * length;
+            if (allowed(tx, ty) && allowed((tx + p[o]) / 2, (ty + p[o + 1]) / 2)) {
+              trails.moveTo(tx, ty); trails.lineTo(p[o], p[o + 1]);
+            }
+          }
+        }
+        // Уходящая крупинка одновременно уменьшается и гаснет.
+        ctx.globalAlpha *= Math.sqrt(Math.max(0, sinking));
         ctx.fillRect(p[o] - sz / 2, p[o + 1] - sz / 2, sz, sz);
       }
+      ctx.globalAlpha = e.alpha * 0.45 * (0.5 + 0.5 * this.detailVisibility);
+      ctx.stroke(trails);
     }
     // Искры — крупинки, ушедшие в недра: короткая вспышка, расширяется и гаснет.
     this.funnelSparks = this.funnelSparks.filter((sp) => animTime - sp.t < SPARK_S);
     ctx.globalCompositeOperation = 'screen';
-    const spark = puffSprite(VENT_SPARK);
+    const spark = puffSprite(FUNNEL_PARTICLE);
     for (const sp of this.funnelSparks) {
       const f = (animTime - sp.t) / SPARK_S;
       const r = this.px(SPARK_CSS) * (0.6 + 0.8 * f);
-      ctx.globalAlpha = (1 - f) ** 2;
+      ctx.globalAlpha = 0.35 * (1 - f) ** 2 * (0.5 + 0.5 * this.detailVisibility);
       ctx.drawImage(spark, sp.x - r, sp.y - r, r * 2, r * 2);
     }
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
+  }
+
+  /** Тонкая кромка жерла; её радиус следует размеру диска, не фронту выброса. */
+  private ventRim(x: number, y: number, radius: number, color: Rgb, alpha: number): void {
+    if (radius <= 0) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = rgb(color); ctx.lineWidth = this.px(1.2);
+    ctx.beginPath(); ctx.arc(x, y, radius + this.px(1.5), 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
   }
 
   /** Сплошной непрозрачный диск. */
@@ -1631,7 +1720,7 @@ export class WorldRenderer {
     const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'screen';
-    ctx.globalAlpha = Math.min(1, lit);
+    ctx.globalAlpha = Math.min(1, lit) * (0.15 + 0.85 * this.detailVisibility);
     ctx.drawImage(this.glint, 0, 0, this.canvas.width, this.canvas.height);
   }
 
@@ -1766,22 +1855,22 @@ export class WorldRenderer {
     const [x0, y0] = this.screenToWorld(0, 0), [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
     const allowed = (x: number, y: number) => x >= x0 && x <= x1 && y >= y0 && y <= y1 && insideDish(w.dish, x, y) && !isBlocked(w.partitions, x, y);
     const velocity = (x: number, y: number, out: [number, number]) => flowAt(w, x, y, out);
+    const detail = smoothstep(1, 3, this.zoom / this.fitZoom());
     const view = `${this.zoom}:${this.cx}:${this.cy}:${this.canvas.width}:${this.canvas.height}`;
     if (view !== this.markerView) {
       this.markerView = view;
       this.markerAnchors = [];
       const left = Math.max(0, x0), top = Math.max(0, y0);
-      const width = Math.min(this.width, x1) - left, height = Math.min(this.height, y1) - top;
-      const cols = Math.max(1, Math.ceil(Math.sqrt(FLOW_MARKER_LIMIT * 2 * width / height)));
-      const rows = Math.max(1, Math.ceil(FLOW_MARKER_LIMIT * 2 / cols));
-      let candidates = 0;
+      const width = Math.max(0, Math.min(this.width, x1) - left), height = Math.max(0, Math.min(this.height, y1) - top);
+      const spacing = this.px(FLOW_MARKER_SPACING.overview + (FLOW_MARKER_SPACING.detail - FLOW_MARKER_SPACING.overview) * detail);
+      const count = Math.min(FLOW_MARKER_LIMIT, Math.max(1, Math.floor(width * height / (spacing * spacing))));
+      const cols = Math.max(1, Math.min(count, Math.round(Math.sqrt(count * width / Math.max(1, height)))));
+      const rows = Math.max(1, Math.floor(count / cols));
       for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
         const x = left + (i + 0.15 + hash3(0x71ac, i, j) / 4294967296 * 0.7) * width / cols;
         const y = top + (j + 0.15 + hash3(0x82bd, i, j) / 4294967296 * 0.7) * height / rows;
         if (!allowed(x, y)) continue;
-        candidates++;
-        const slot = this.markerAnchors.length < FLOW_MARKER_LIMIT ? this.markerAnchors.length : hash3(0x93ce, i, j) % candidates;
-        if (slot < FLOW_MARKER_LIMIT) this.markerAnchors[slot] = { x, y };
+        this.markerAnchors.push({ x, y });
       }
       this.flowMarkers = this.markerAnchors.map((p, i) => {
         const v = velocity(p.x, p.y, [0, 0]);
@@ -1792,8 +1881,8 @@ export class WorldRenderer {
     ctx.save(); ctx.beginPath(); this.traceDish(ctx); ctx.clip();
     ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
     ctx.setLineDash([]); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    const tails = [new Path2D(), new Path2D(), new Path2D()];
-    const heads = new Path2D();
+    // Три среды × три силы потока; рисуем пачками, без стиля на каждую метку.
+    const paths = Array.from({ length: 9 }, () => ({ tails: [new Path2D(), new Path2D(), new Path2D()], heads: new Path2D() }));
     const curveDeadline = performance.now() + 1.5;
     let rebuilt = 0;
     for (let offset = 0; offset < this.flowMarkers.length; offset++) {
@@ -1806,11 +1895,19 @@ export class WorldRenderer {
       }
       // Длина штриха — условный знак направления, а не пройденное расстояние.
       // Перестраиваем четверть штрихов за кадр, остальные переносим вместе с водой.
+      const current = velocity(marker.x, marker.y, [0, 0]);
+      marker.vx = current[0]; marker.vy = current[1];
       const speed = Math.hypot(marker.vx, marker.vy);
+      const strength = speed / (speed + DRIFT_REFERENCE);
+      const level = smoothLevelAt(w.viscosity, marker.x, marker.y);
+      const habitat = level < 0.8 ? 0 : level < 1.65 ? 1 : 2;
+      const weight = strength < 0.22 ? 0 : strength < 0.5 ? 1 : 2;
+      const { tails, heads } = paths[habitat * 3 + weight];
       if ((!marker.streak.length || (elapsed > 0 && i % 4 === this.streakBatch)) && rebuilt < 150 && performance.now() < curveDeadline) {
         rebuilt++;
-        const length = Math.min(64, this.px(Math.min(32, Math.max(14, speed / DRIFT_REFERENCE * 20))));
-        const segments = Math.max(6, Math.ceil(length / 4));
+        const length = Math.min(64, this.px(10 + 24 * strength + 6 * detail));
+        // При приближении изгибы возле берегов читаются точнее.
+        const segments = Math.max(6, Math.ceil(length / (4 - 2 * detail)));
         const pts = [{ x: 0, y: 0 }];
         let x = marker.x, y = marker.y;
         const v: [number, number] = [0, 0];
@@ -1839,12 +1936,25 @@ export class WorldRenderer {
     }
     this.streakCursor = (this.streakCursor + Math.max(1, rebuilt)) % Math.max(1, this.flowMarkers.length);
     this.streakBatch = (this.streakBatch + 1) % 4;
-    ctx.lineWidth = this.px(0.85);
-    for (let i = 2; i >= 0; i--) {
-      ctx.strokeStyle = `rgba(105,185,215,${[0.7, 0.4, 0.16][i]})`;
-      ctx.stroke(tails[i]);
+    for (let habitat = 0; habitat < 3; habitat++) for (let weight = 0; weight < 3; weight++) {
+      const { tails, heads } = paths[habitat * 3 + weight];
+      const opacity = [0.24, 0.55, 0.85][weight] * (habitat === 2 ? 0.4 : 1);
+      for (let i = 2; i >= 0; i--) {
+        const fade = [0.65, 0.32, 0.1][i];
+        if (habitat === 1) {
+          ctx.lineWidth = this.px(1.9);
+          ctx.strokeStyle = `rgba(21,65,85,${opacity * fade * 0.6})`;
+          ctx.stroke(tails[i]);
+        }
+        ctx.lineWidth = this.px(0.9);
+        ctx.strokeStyle = `rgba(145,213,232,${opacity * fade})`;
+        ctx.stroke(tails[i]);
+      }
+      if (habitat === 1) {
+        ctx.lineWidth = this.px(2.1); ctx.strokeStyle = `rgba(21,65,85,${opacity * 0.45})`; ctx.stroke(heads);
+      }
+      ctx.lineWidth = this.px(1.15); ctx.strokeStyle = `rgba(181,231,244,${opacity})`; ctx.stroke(heads);
     }
-    ctx.lineWidth = this.px(1); ctx.strokeStyle = 'rgba(135,205,230,.8)'; ctx.stroke(heads);
     ctx.restore();
   }
 
