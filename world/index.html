@@ -63,9 +63,10 @@
       .group button:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
       .group button:last-child { border-radius: 0 8px 8px 0; }
       .time-controls { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-      .time { display: flex; flex-direction: column; gap: 1px; flex: 0 0 auto; padding: 2px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); overflow: hidden; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
-      .world-age, .world-rate { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .time { display: flex; flex-direction: column; gap: 1px; flex: 0 0 210px; width: 210px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); overflow: hidden; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+      .world-age, .world-step, .world-rate { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .world-age { color: var(--text); font: 600 13px/16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .world-step { font: 10px/12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       .world-rate { font-size: 11px; line-height: 13px; }
       .speed-control { width: 240px; flex: 0 0 240px; padding: 0 8px; }
       .speed-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--muted); height: 16px; }
@@ -196,7 +197,7 @@
         .time-controls { gap: 6px; order: 0; }
         .speed-control { order: 1; }
         .focus-toggle { order: 2; }
-        .time { padding-inline: 6px; }
+        .time { padding-inline: 6px; width: 180px; flex-basis: 180px; }
         .world-age { font-size: 12px; }
         .speed-control { width: min(240px, 100%); }
         #observation { flex-direction: column; }

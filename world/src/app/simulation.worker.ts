@@ -1,13 +1,14 @@
 /** Мир считает шаги независимо от кадров; показ получает не больше 20 снимков/с. */
 import { createWorld, mineralProcesses, DRIFT_PERIOD, parseWorldFile, serializeWorld, stepWorld, WorldFileError, type World } from '../core/index.ts';
 import type { SimulationCommand, SimulationReply, SimulationSnapshot } from './simulation.ts';
+import { STEPS_PER_SECOND } from '../core/units.ts';
 
 // Отдельный интерфейс сохраняет проверку типов без подключения DOM + WebWorker lib вместе.
 const host = self as unknown as {
   onmessage: ((event: MessageEvent<SimulationCommand>) => void) | null;
   postMessage(message: SimulationReply, transfer?: Transferable[]): void;
 };
-const BASE_RATE = 30;
+const BASE_RATE = STEPS_PER_SECOND;
 const SLICE_MS = 12;
 const SNAPSHOT_MS = 50;
 let world: World | null = null;

@@ -7,6 +7,7 @@ export * from './prng.ts';
 export * from './noise.ts';
 export * from './params.ts';
 export * from './constants.ts';
+export * from './units.ts';
 export * from './light.ts';
 export * from './temperature.ts';
 export * from './viscosity.ts';

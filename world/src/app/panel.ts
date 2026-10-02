@@ -6,6 +6,8 @@
  */
 import { layoutPartitions, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type WorldParams } from '../core/index.ts';
 import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render.ts';
+import { formatArea, formatDuration, formatLength, formatMultiplier, formatNumber, formatPercent, formatWorldAge } from './units.ts';
+import { gramsPerSquareMetre, secondsFromSteps, stepsFromSeconds } from '../core/units.ts';
 
 export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
 
@@ -56,9 +58,9 @@ const GROUPS: readonly { title: string; sliders: readonly SliderSpec[] }[] = [
     title: 'Свет',
     sliders: [
       { key: 'sun', label: 'Солнце', hint: 'Средняя яркость света в пятнах. От неё же зависит сила течений: ярче — сильнее и длиннее.', min: 0.1, max: 3, step: 0.1 },
-      { key: 'lightDrift', label: 'Скорость дрейфа', hint: 'Как быстро карта света сдвигается по чашке и пятна дрейфуют: 1 — обычно (вся чашка проходится примерно за 80 тысяч шагов), 0 — свет стоит на месте. Медленнее — ниши и концы течений дольше на одном месте, минерал успевает оседать; быстрее — ниши чаще меняются.', min: 0, max: 5, step: 0.1 },
+      { key: 'lightDrift', label: 'Скорость дрейфа', hint: 'Как быстро карта света сдвигается по чашке и пятна дрейфуют: 1 — обычно (вся чашка проходится примерно за 2 ч 13 мин), 0 — свет стоит на месте. Медленнее — ниши и концы течений дольше на одном месте, минерал успевает оседать; быстрее — ниши чаще меняются.', min: 0, max: 5, step: 0.1 },
       { key: 'sunRhythm', label: 'Размах ритма', hint: 'Солнце медленно и плавно то светлеет, то тускнеет: от (1 − размах) до (1 + размах) от среднего. 0 — ровное солнце. Ритм меняет энергию и силу течений, но не температуру.', min: 0, max: 0.9, step: 0.05 },
-      { key: 'sunPeriod', label: 'Период ритма', hint: 'За сколько шагов солнце проходит полный цикл: от яркого к тусклому и обратно.', min: 10000, max: 1000000, step: 10000 },
+      { key: 'sunPeriod', label: 'Период ритма', hint: 'Длительность полного цикла солнца в модельном времени: от яркого к тусклому и обратно.', min: 10000, max: 1000000, step: 10000 },
       { key: 'backgroundLevel', label: 'Яркость фона', hint: 'Свет между пятнами — доля от света в пятне.', min: 0.02, max: 0.9, step: 0.01 },
       { key: 'illumination', label: 'Освещённость', hint: 'Какую часть карты света в среднем занимают пятна.', min: 0.05, max: 0.8, step: 0.01 },
       { key: 'spotSize', label: 'Размер пятен', hint: 'Средний размер пятна; отдельные бывают мельче и крупнее.', min: 15, max: 200, step: 1 },
@@ -81,13 +83,13 @@ const GROUPS: readonly { title: string; sliders: readonly SliderSpec[] }[] = [
     title: 'Местность',
     sliders: [
       { key: 'terrainSpeed', label: 'Скорость местности', hint: 'Множитель для намыва (избыток минерала оседает в грунт там, где течения слабые), размыва (сильные течения срывают грунт), оседания дна и подвижек. 0 — местность неподвижна.', min: 0, max: 5, step: 0.1 },
-      { key: 'quakeInterval', label: 'Промежуток между толчками', hint: 'Средний промежуток между толчками — короткими резкими подъёмами или провалами небольшого участка, в шагах. Медленные подвижки (хребты, моря, проливы) идут сами, раз в сотни тысяч шагов.', min: 50000, max: 2000000, step: 50000 },
+      { key: 'quakeInterval', label: 'Промежуток между толчками', hint: 'Средний промежуток между толчками — короткими резкими подъёмами или провалами небольшого участка, в модельном времени. Медленные подвижки (хребты, моря, проливы) идут сами, раз в несколько часов.', min: 50000, max: 2000000, step: 50000 },
     ],
   },
   {
     title: 'Минерал',
     sliders: [
-      { key: 'mineralStock', label: 'Запас минерала', hint: 'Общее количество минерала в мире (в среднем на единицу площади чашки). Оно постоянно: минерал переходит между средой, телами, останками, залежами и недрами. При сотворении весь он в недрах и выходит извержениями; вулканы рождаются, извергаются, засыпают и гаснут сами — когда и где, решают недра.', min: 0.2, max: 5, step: 0.1 },
+      { key: 'mineralStock', label: 'Запас минерала', hint: 'Запас минерала на единицу свободной площади чашки; 1 расчётная единица = 1 кг/м². Оно постоянно: минерал переходит между средой, телами, останками, залежами и недрами. При сотворении весь он в недрах и выходит извержениями; вулканы рождаются, извергаются, засыпают и гаснут сами — когда и где, решают недра.', min: 0.2, max: 5, step: 0.1 },
     ],
   },
 ];
@@ -146,7 +148,6 @@ function installInfoTips(): void {
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
 }
 
-const fmt = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(2));
 const stepFormatter = new Intl.NumberFormat('ru', { minimumIntegerDigits: 15 });
 
 export class Panel {
@@ -159,9 +160,10 @@ export class Panel {
   private readonly waterValue = el('span', { className: 'value' });
   private readonly timeLabel = el('span', { className: 'time' });
   private readonly ageLabel = el('span', { className: 'world-age' });
+  private readonly stepLabel = el('span', { className: 'world-step' });
   private readonly rateLabel = el('span', { className: 'world-rate' });
   private readonly pauseButton = el('button', { className: 'run-toggle', ariaLabel: 'Пауза', title: 'Пауза (Пробел)' });
-  private readonly speedSlider = el('input', { type: 'range', min: '0', max: '4', step: '0.001', value: '0', ariaLabel: 'Скорость мира', className: 'speed-slider', title: 'Скорость ×1–×10 000; клавиши 1–7' });
+  private readonly speedSlider = el('input', { type: 'range', min: '0', max: '4', step: '0.001', value: '0', ariaLabel: 'Скорость мира', className: 'speed-slider', title: '×1 — реальное время; ×10 — в 10 раз быстрее; клавиши 1–7' });
   private readonly speedValue = el('output', { className: 'speed-value', textContent: '×1' });
   private readonly paramsToggle = el('button', { textContent: 'Новый мир', ariaLabel: 'Новый мир', ariaExpanded: 'false', title: 'Открыть настройки нового мира', className: 'params-toggle' });
   private readonly focusToggle = el('button', { className: 'focus-toggle', ariaLabel: 'На весь экран', ariaPressed: 'false', title: 'На весь экран' });
@@ -171,7 +173,7 @@ export class Panel {
   private readonly navigationToggle = el('button', { className: 'minimap-toggle', ariaLabel: 'Миникарта', title: 'Миникарта', ariaExpanded: 'false' });
   private readonly fileMenu = el('details', { className: 'file-menu' });
   private readonly menuToggle = el('summary', { ariaLabel: 'Меню мира', title: 'Меню мира' });
-  private readonly stepButton = el('button', { textContent: '+1 шаг', title: 'Один шаг (→)' });
+  private readonly stepButton = el('button', { textContent: '+1 шаг', title: 'Один шаг = 0,1 с мира (→)' });
   private readonly zoomButton = el('button', { className: 'zoom', title: 'Показать чашку целиком (0)' });
   private readonly createButton = el('button', { className: 'primary', textContent: 'Создать мир' });
   private readonly status = el('span', { className: 'status' });
@@ -299,7 +301,7 @@ export class Panel {
     this.pauseButton.dataset.state = 'running';
     this.pauseButton.addEventListener('click', () => this.handlers.onTogglePause());
     this.stepButton.addEventListener('click', () => this.handlers.onStepOnce());
-    this.timeLabel.append(this.ageLabel, this.rateLabel);
+    this.timeLabel.append(this.ageLabel, this.stepLabel, this.rateLabel);
     const speedTicks = el('div', { className: 'speed-ticks' });
     for (const s of [1, 10, 100, 1000, 10000]) {
       const tick = el('button', { type: 'button', textContent: s.toLocaleString('ru'), title: `Скорость ×${s.toLocaleString('ru')}`, ariaLabel: `Скорость ×${s.toLocaleString('ru')}` });
@@ -327,7 +329,7 @@ export class Panel {
     zoomIn.addEventListener('click', () => this.handlers.onZoomIn());
     this.zoomButton.addEventListener('click', () => this.handlers.onZoomFit());
     const processes = el('button', { textContent: 'Процессы', title: 'Общее течение, размыв, оседание и уход в недра', ariaPressed: 'false' });
-    const processLegend = el('span', { className: 'process-legend', hidden: true, title: 'Цвет показывает количество минерала за последнее обновление (100 шагов); ярче — больше. При одновременных процессах цвета смешиваются.' });
+    const processLegend = el('span', { className: 'process-legend', hidden: true, title: 'Цвет показывает количество минерала за последнее обновление (10 с мира, 100 шагов); ярче — больше. При одновременных процессах цвета смешиваются.' });
     processLegend.innerHTML = '<span><i style="color:#e88536">↗</i>размыв</span><span><i style="color:#32c995">↧</i>оседание</span><span><i style="color:#c27bff">⊙</i>в недра</span>';
     processLegend.setAttribute('role', 'note');
     processes.addEventListener('click', () => {
@@ -467,7 +469,7 @@ export class Panel {
       const r = this.draft.aspectRatio;
       if (!Number.isFinite(r) || r < 0.25 || r > 4) { size.textContent = 'Пропорции от 1:4 до 4:1'; return; }
       const d = dishOf(this.draft);
-      size.textContent = this.draft.shape === 'circle' ? `Диаметр ${Math.round(d.width)} · площадь 1 920 000` : `${Math.round(d.width)} × ${Math.round(d.height)} · площадь 1 920 000`;
+      size.textContent = this.draft.shape === 'circle' ? `Диаметр ${formatLength(d.width)} · площадь ${formatArea(1920000)}` : `${formatLength(d.width)} × ${formatLength(d.height)} · площадь ${formatArea(1920000)}`;
     };
     shape.addEventListener('change', updateSize); ratios.addEventListener('change', updateSize);
     rw.addEventListener('input', updateSize); rh.addEventListener('input', updateSize); screen.addEventListener('click', updateSize);
@@ -498,16 +500,28 @@ export class Panel {
   }
 
   private slider(spec: SliderSpec): HTMLElement {
-    const input = el('input', { type: 'range', min: String(spec.min), max: String(spec.max), step: String(spec.step) });
+    const timed = spec.key === 'sunPeriod' || spec.key === 'quakeInterval';
+    const display = (v: number) => {
+      if (timed) return formatDuration(v);
+      if (spec.key === 'spotSize' || spec.key === 'viscosityZoneSize') return formatLength(v);
+      if (spec.key === 'backgroundLevel' || spec.key === 'illumination' || spec.key === 'sunRhythm') return formatPercent(v);
+      if (spec.key === 'lightDrift' || spec.key === 'terrainSpeed') return formatMultiplier(v);
+      if (spec.key === 'mineralStock') return `${formatNumber(gramsPerSquareMetre(v))} г/м²`;
+      return `${formatNumber(v)} усл. ед.`;
+    };
+    const inputValue = (v: number) => timed ? secondsFromSteps(v) : v;
+    const input = el('input', { type: 'range', min: String(inputValue(spec.min)), max: String(inputValue(spec.max)), step: String(inputValue(spec.step)) });
     const value = el('span', { className: 'value' });
     input.addEventListener('input', () => {
-      this.draft[spec.key] = Number(input.value);
-      value.textContent = fmt(this.draft[spec.key]);
+      this.draft[spec.key] = timed ? Math.round(stepsFromSeconds(Number(input.value))) : Number(input.value);
+      value.textContent = display(this.draft[spec.key]);
+      input.setAttribute('aria-valuetext', value.textContent);
       this.refresh();
     });
     this.inputs.push(() => {
-      input.value = String(this.draft[spec.key]);
-      value.textContent = fmt(this.draft[spec.key]);
+      input.value = String(inputValue(this.draft[spec.key]));
+      value.textContent = display(this.draft[spec.key]);
+      input.setAttribute('aria-valuetext', value.textContent);
     });
     return this.mark(el('label', {}, this.caption(spec.label, spec.hint, value), input), () => this.draft[spec.key] !== this.current[spec.key]);
   }
@@ -518,12 +532,14 @@ export class Panel {
       const value = el('span', { className: 'value' });
       input.addEventListener('input', () => {
         this.draft.viscosityShares[key] = Number(input.value);
-        value.textContent = fmt(this.draft.viscosityShares[key]);
+        value.textContent = formatPercent(this.draft.viscosityShares[key]);
+        input.setAttribute('aria-valuetext', value.textContent);
         this.refresh();
       });
       this.inputs.push(() => {
         input.value = String(this.draft.viscosityShares[key]);
-        value.textContent = fmt(this.draft.viscosityShares[key]);
+        value.textContent = formatPercent(this.draft.viscosityShares[key]);
+        input.setAttribute('aria-valuetext', value.textContent);
       });
       return this.mark(el('label', {}, this.caption(label, text, value), input),
         () => this.draft.viscosityShares[key] !== this.current.viscosityShares[key]);
@@ -607,9 +623,10 @@ export class Panel {
 
   setTime(step: number, paused: boolean, speed: number, fps: number | null, stepsPerSecond: number, behind = false): void {
     const rate = `${Math.round(stepsPerSecond).toLocaleString('ru')} шагов/с`;
-    this.ageLabel.textContent = stepFormatter.format(step);
+    this.ageLabel.textContent = formatWorldAge(step);
+    this.stepLabel.textContent = `шаг ${stepFormatter.format(step)}`;
     this.rateLabel.textContent = `${fps === null ? '—' : Math.round(fps).toLocaleString('ru')} FPS${paused ? ' · пауза' : ''}`;
-    this.timeLabel.title = `Шаг ${this.ageLabel.textContent}\n${this.rateLabel.textContent}`
+    this.timeLabel.title = `Возраст мира ${this.ageLabel.textContent}\n${this.stepLabel.textContent}\n1 шаг = 0,1 с; ×1 — реальное время\n${this.rateLabel.textContent}`
       + '\nFPS — частота отрисовки карты за последнюю секунду'
       + (paused ? '\nРасчёт мира на паузе' : `\nРасчёт мира: ${rate}${behind ? ' · предел' : ''}`)
       + (behind ? `\nМир не успевает за скоростью ×${speed.toLocaleString('ru')} и идёт так быстро, как может` : '');
@@ -676,7 +693,7 @@ export class Panel {
     this.showLayout();
     const s = this.draft.viscosityShares;
     s.water = Math.round((1 - s.land - s.shallows) * 100) / 100;
-    this.waterValue.textContent = fmt(s.water);
+    this.waterValue.textContent = formatPercent(s.water);
     const errors = validateParams(this.draft);
     this.errorsBox.replaceChildren(...errors.map((e) => el('div', { textContent: e })));
     this.createButton.disabled = errors.length > 0;

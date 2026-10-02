@@ -9,6 +9,8 @@ import {
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
 import { WorldRenderer } from './render.ts';
 import { installMovableMinimap } from './minimap-panel.ts';
+import { formatDuration, formatLength, formatMass, formatNumber, formatPercent } from './units.ts';
+import { gramsPerSquareMetre, millimetresPerSecond } from '../core/units.ts';
 import type { SimulationCommand, SimulationReply } from './simulation.ts';
 
 /** Шаг масштаба кнопками и клавишами. */
@@ -254,15 +256,15 @@ function probe(): void {
   if (!pointer) { panel.setProbe(null); return; }
   const { x, y } = pointer;
   const p = world.params;
-  const where = `(${Math.round(x)}, ${Math.round(y)})`;
+  const where = `(${formatLength(x)}, ${formatLength(y)})`;
   const v = world.mineral.volcanoes.find((v) => Math.hypot(v.x - x, v.y - y) < 12);
   if (v) {
-    const steps = (n: number) => `${Math.max(0, Math.round(n)).toLocaleString('ru')} шагов`;
+    const steps = formatDuration;
     const pressure = Math.round((world.mineral.depths / world.mineral.threshold) * 100);
     const state = {
       preparing: [v.fresh ? 'Зарождается — готовится к первому выбросу' : 'Проснулся — готовится к выбросу',
         world.step < v.stageUntil ? `Созреет через ${steps(v.stageUntil - world.step)}; давление недр ${pressure}%` : `Созрел; извергнется, когда давление недр дойдёт до 100% (сейчас ${pressure}%)`],
-      erupting: [`Извергается ещё ${steps(v.until - world.step)}`, `Осталось выбросить: ${Math.round((v.left / (world.params.mineralStock * world.mineral.freeArea)) * 1000) / 10}% запаса`],
+      erupting: [`Извергается ещё ${steps(v.until - world.step)}`, `Осталось выбросить: ${formatMass(v.left)} · всего ${formatMass(v.total)}`],
       dormant: ['Спит — может проснуться, когда недра снова наберут давление', `Потухнет без выбросов через ${steps(v.stageUntil - world.step)}`],
       extinct: ['Потух', `Исчезнет через ${steps(v.stageUntil - world.step)}`],
     }[v.stage];
@@ -278,15 +280,15 @@ function probe(): void {
   const k = Math.floor(y / world.mineral.cell) * world.mineral.cols + Math.floor(x / world.mineral.cell);
   panel.setProbe([
     `${GRADATION_NAMES[gradationAt(world.viscosity, x, y)]} · уровень ${smoothLevelAt(world.viscosity, x, y).toFixed(2)} · ${where}`,
-    `Свет ${worldLightAt(world, x, y).toFixed(3)} · усваивается ${absorptionAt(world.viscosity, x, y).toFixed(2)}`,
-    `Температура ${temp.toFixed(2)} · мутации ${mutationStrength(temp).toFixed(2)}`,
-    `Сопротивление движению ${resistanceAt(world.viscosity, x, y).toFixed(2)}`,
-    `Снос ${Math.hypot(...flowAt(world, x, y)).toFixed(3)} за шаг`,
-    `Минерал ×${mineralDensityAt(world.mineral, p.mineralStock, x, y).toFixed(2)} от среднего · прозрачность ${transparencyAt(world.mineral, x, y).toFixed(2)}`,
-    `Залежи ×${depositsAt(world, x, y).toFixed(2)} от среднего запаса`,
+    `Свет ${worldLightAt(world, x, y).toFixed(3)} усл. ед. · усваивается ${formatPercent(absorptionAt(world.viscosity, x, y))}`,
+    `Температура ${formatNumber(temp)} усл. ед. · сила мутаций ${formatNumber(mutationStrength(temp))}`,
+    `Сопротивление движению ×${formatNumber(resistanceAt(world.viscosity, x, y))}`,
+    `Течение ${formatNumber(millimetresPerSecond(Math.hypot(...flowAt(world, x, y))))} мм/с`,
+    `Минерал ${formatNumber(gramsPerSquareMetre(mineralDensityAt(world.mineral, p.mineralStock, x, y) * p.mineralStock))} г/м² · прозрачность ${formatPercent(transparencyAt(world.mineral, x, y))}`,
+    `Залежи ${formatNumber(gramsPerSquareMetre(depositsAt(world, x, y) * p.mineralStock))} г/м²`,
     ...(processes && processes.step > 0 ? [
-      `Последний расчёт: шаг ${processes.step.toLocaleString('ru')} · за 100 шагов`,
-      `Размыв ${processes.erosion[k].toPrecision(3)} · оседание ${processes.settling[k].toPrecision(3)} · воронка → недра ${processes.sinking[k].toPrecision(3)}`,
+      `Последний расчёт: шаг ${processes.step.toLocaleString('ru')} · за ${formatDuration(100)}`,
+      `Размыв ${formatMass(processes.erosion[k])} · оседание ${formatMass(processes.settling[k])} · воронка → недра ${formatMass(processes.sinking[k])}`,
     ] : []),
   ]);
 }
@@ -333,7 +335,7 @@ function frame(now: number): void {
       left += pct(x);
     }
     for (const [i, amount] of [m.depths, inTransit, deposits, medium].entries()) {
-      amounts[i].textContent = `${pctText(amount)} · ${Math.round(amount).toLocaleString('ru')}`;
+      amounts[i].textContent = `${pctText(amount)} · ${formatMass(amount)}`;
     }
     barThreshold.style.left = `${pct(m.threshold)}%`;
     const erupting = m.volcanoes.find((v) => v.stage === 'erupting');
@@ -341,7 +343,7 @@ function frame(now: number): void {
     const alive = m.volcanoes.filter((v) => v.stage !== 'extinct').length;
     const now = erupting ? `извергается вулкан ${erupting.id + 1}` : preparing ? `${preparing.fresh ? 'зарождается' : 'просыпается'} вулкан ${preparing.id + 1}` : alive ? 'вулканы спят' : 'вулканов нет';
     volcanoText.textContent = `${now} · живых ${alive} · извержений ${m.eruptions}`;
-    mineralBar.title = `Весь минерал, кроме грунта: недра ${pctText(m.depths)}`
+    mineralBar.title = `Весь минерал, кроме грунта: ${formatMass(total)}; недра ${pctText(m.depths)} (${formatMass(m.depths)})`
       + (inTransit > 0 ? `, выходит извержением ${pctText(inTransit)}` : '')
       + `, в залежах ${pctText(deposits)}, в среде ${pctText(medium)}. Риска — порог давления недр (${pctText(m.threshold)}): когда недра дорастут до неё, начнётся извержение.`;
   }
