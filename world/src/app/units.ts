@@ -21,6 +21,6 @@ export function formatWorldAge(step: number): string {
   const whole = Math.floor(step / STEPS_PER_SECOND);
   const days = Math.floor(whole / 86400);
   const pad = (v: number) => String(v).padStart(2, '0');
-  const clock = `${pad(Math.floor(whole / 3600) % 24)}:${pad(Math.floor(whole / 60) % 60)}:${pad(whole % 60)},${step % STEPS_PER_SECOND}`;
-  return days ? `${days} д ${clock}` : clock;
+  const dayDigits = String(days).padStart(6, '0').replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0');
+  return `${dayDigits} дн ${pad(Math.floor(whole / 3600) % 24)} ч ${pad(Math.floor(whole / 60) % 60)} мин ${pad(whole % 60)} с`;
 }

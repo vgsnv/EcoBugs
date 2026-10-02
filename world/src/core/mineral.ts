@@ -164,7 +164,12 @@ export function mineralProcesses(m: MineralState): MineralProcesses {
 }
 
 /** Рабочая память не входит в состояние и файл мира. */
+/** Накопленные наблюдаемые потоки; не входят в состояние, хеш или сохранение. */
+export interface MineralExchanges { emitted: number; funnelSunk: number }
+export function mineralExchanges(m: MineralState): MineralExchanges { return workspace(m).exchanges; }
+
 interface MineralWork {
+  exchanges: MineralExchanges;
   dst: Float64Array;
   runoff: Float64Array;
   spread: Float64Array;
@@ -188,6 +193,7 @@ function workspace(m: MineralState): MineralWork {
   if (!work) {
     const n = m.field.length;
     work = {
+      exchanges: { emitted: 0, funnelSunk: 0 },
       dst: new Float64Array(n), runoff: new Float64Array(n), spread: new Float64Array(n),
       speed: new Float32Array(n), flowX: new Float32Array(n), flowY: new Float32Array(n),
       tvx: new Float32Array(n), tvy: new Float32Array(n), pushX: new Float32Array(n), pushY: new Float32Array(n),
@@ -427,7 +433,11 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
   m.field = runoff(m.field, gr, dep, blocked, holes, cols, rows, perLvl, P, work.runoff);
 
   // Воронки: что дошло до отверстия, уходит в недра; залежи в отверстии поднимаются (см. sinkFunnel).
-  for (const f of m.funnels) m.depths += sinkFunnel(m, params, terrain, f, P);
+  for (const f of m.funnels) {
+    const sunk = sinkFunnel(m, params, terrain, f, P);
+    m.depths += sunk;
+    work.exchanges.funnelSunk += sunk;
+  }
 
   // Подвижки и толчки: подъём — из опускающегося соседа и недр, опускание
   // топит залежи в недра.
@@ -495,6 +505,7 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
     }
     const mouth = mouthCells(m, terrain, vol);
     for (let q = 0; q < mouth.length; q++) m.field[mouth[q]] += (out - thrown + left) / mouth.length;
+    work.exchanges.emitted += out;
     vol.left -= out;
     vol.rate = out / P;
     if (step >= vol.until) {

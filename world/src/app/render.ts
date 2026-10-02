@@ -6,6 +6,7 @@
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
+import { CoordinateRulers } from './rulers.ts';
 import { insideDish, cellInsideDish, type Dish, ERUPTION_RADIUS, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, DRIFT_REFERENCE, multiplierForLevel, eruptionRate, eruptionBursts, ventPush, BURST_WIDTH, flowAt, hash3, isBlocked, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, VOLCANO_BIRTH, VOLCANO_POWER, type MineralProcesses, type Volcano, type World } from '../core/index.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
@@ -429,6 +430,14 @@ function puffSprite(c: Rgb): HTMLCanvasElement {
 }
 
 export class WorldRenderer {
+  private readonly rulers: CoordinateRulers;
+
+  setRulers(enabled: boolean): void {
+    const wasFitted = this.fitted;
+    this.rulers.toggle(enabled);
+    this.resizeKeepingView();
+    if (wasFitted) this.fit();
+  }
   private get width(): number { return this.world.dish.width; }
   private get height(): number { return this.world.dish.height; }
   private traceDish(ctx: CanvasRenderingContext2D): void {
@@ -529,6 +538,7 @@ export class WorldRenderer {
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
+    this.rulers = new CoordinateRulers(canvas);
     this.ctx = canvas.getContext('2d')!;
     this.sctx = this.spots.getContext('2d')!;
     this.hctx = this.shade.getContext('2d')!;
@@ -900,6 +910,7 @@ export class WorldRenderer {
     this.drawVents(animTime);
     if (this.showProcesses) this.drawProcesses();
     this.drawWalls();
+    this.rulers.draw(ctx, this.world.dish, this.zoom, this.cx, this.cy, this.dpr);
   }
 
   /** Цвет — реальные обмены за последний промежуток; стрелки — использованная сумма течений. */

@@ -23,6 +23,7 @@ export interface PanelHandlers {
   onZoomOut(): void;
   onZoomFit(): void;
   onProcesses(enabled: boolean): void;
+  onRulers(enabled: boolean): void;
 }
 
 export interface PanelRoots {
@@ -32,6 +33,7 @@ export interface PanelRoots {
   legend: HTMLElement;
   tip: HTMLElement;
   observation: HTMLElement;
+  summary: HTMLElement;
   navigation: HTMLElement;
   viewControls: HTMLElement;
 }
@@ -158,9 +160,10 @@ export class Panel {
   private readonly errorsBox = el('div', { className: 'errors', ariaLive: 'polite' });
   private readonly dirtyNote = el('div', { className: 'note' });
   private readonly waterValue = el('span', { className: 'value' });
-  private readonly timeLabel = el('span', { className: 'time' });
+  private readonly timeLabel = el('button', { type: 'button', className: 'time' });
+  private showSteps = false;
+  private displayedStep = 0;
   private readonly ageLabel = el('span', { className: 'world-age' });
-  private readonly stepLabel = el('span', { className: 'world-step' });
   private readonly rateLabel = el('span', { className: 'world-rate' });
   private readonly pauseButton = el('button', { className: 'run-toggle', ariaLabel: 'Пауза', title: 'Пауза (Пробел)' });
   private readonly speedSlider = el('input', { type: 'range', min: '0', max: '4', step: '0.001', value: '0', ariaLabel: 'Скорость мира', className: 'speed-slider', title: '×1 — реальное время; ×10 — в 10 раз быстрее; клавиши 1–7' });
@@ -168,6 +171,7 @@ export class Panel {
   private readonly paramsToggle = el('button', { textContent: 'Новый мир', ariaLabel: 'Новый мир', ariaExpanded: 'false', title: 'Открыть настройки нового мира', className: 'params-toggle' });
   private readonly focusToggle = el('button', { className: 'focus-toggle', ariaLabel: 'На весь экран', ariaPressed: 'false', title: 'На весь экран' });
   private fullscreenPending = false;
+  private readonly summaryToggle = el('button', { className: 'legend-toggle', ariaLabel: 'Сводка мира', title: 'Сводка мира', ariaExpanded: 'false' });
   private readonly legendBody = el('div', { className: 'legend-body' });
   private readonly legendToggle = el('button', { className: 'legend-toggle', ariaLabel: 'Легенда', title: 'Легенда', ariaExpanded: 'false' });
   private readonly navigationToggle = el('button', { className: 'minimap-toggle', ariaLabel: 'Миникарта', title: 'Миникарта', ariaExpanded: 'false' });
@@ -194,6 +198,10 @@ export class Panel {
     this.buildParams();
     this.buildLegend();
     this.buildToolbar();
+    this.summaryToggle.setAttribute('aria-controls', 'world-summary');
+    this.summaryToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3v14h14 M6 13V9 M10 13V5 M14 13V7"/></svg>';
+    this.summaryToggle.addEventListener('click', () => this.toggleSummary());
+    this.roots.summary.querySelector('button')!.addEventListener('click', () => this.toggleSummary(false));
     installInfoTips();
     document.querySelector('#navigation-close')!.addEventListener('click', () => this.toggleNavigation(false));
     this.navigationToggle.addEventListener('click', () => this.toggleNavigation());
@@ -216,7 +224,7 @@ export class Panel {
   /** Открыть или закрыть настройки; черновик сохраняется при закрытии. */
   toggleParams(open?: boolean): void {
     const next = open ?? !this.roots.app.classList.contains('params-open');
-    if (next) { this.toggleFocus(false); this.toggleLegend(false); this.toggleNavigation(false); }
+    if (next) { this.toggleFocus(false); this.toggleLegend(false); this.toggleNavigation(false); this.toggleSummary(false); }
     this.roots.app.classList.toggle('params-open', next);
     this.paramsToggle.setAttribute('aria-expanded', String(next));
     this.roots.params.inert = !next;
@@ -232,7 +240,7 @@ export class Panel {
         this.setFileStatus(['Не удалось выйти из полноэкранного режима. Попробуйте Esc.'], true);
       });
     }
-    if (next) { this.toggleParams(false); this.toggleLegend(false); this.toggleNavigation(false); this.closeMenu(); }
+    if (next) { this.toggleParams(false); this.toggleLegend(false); this.toggleNavigation(false); this.toggleSummary(false); this.closeMenu(); }
     this.roots.app.classList.toggle('focus-mode', next);
     this.focusToggle.setAttribute('aria-pressed', String(next));
     this.focusToggle.ariaLabel = next ? 'Выйти из полноэкранного режима' : 'На весь экран';
@@ -256,7 +264,7 @@ export class Panel {
 
   toggleLegend(open?: boolean): void {
     const next = open ?? this.roots.legend.hidden;
-    if (next) { this.toggleFocus(false); this.toggleParams(false); }
+    if (next) { this.toggleFocus(false); this.toggleParams(false); this.toggleSummary(false); }
     this.roots.legend.hidden = !next;
     this.legendToggle.setAttribute('aria-expanded', String(next));
     this.syncObservation();
@@ -271,7 +279,17 @@ export class Panel {
     if (!next && this.roots.navigation.contains(document.activeElement)) this.navigationToggle.focus();
   }
 
+  toggleSummary(open?: boolean): void {
+    const next = open ?? this.roots.summary.hidden;
+    if (next) { this.toggleFocus(false); this.toggleParams(false); this.toggleLegend(false); }
+    this.roots.summary.hidden = !next;
+    this.summaryToggle.setAttribute('aria-expanded', String(next));
+    this.handlers.onLayoutChange();
+    if (!next && this.roots.summary.contains(document.activeElement)) this.summaryToggle.focus();
+  }
+
   closePanels(): void {
+    this.toggleSummary(false);
     this.toggleParams(false);
     this.toggleLegend(false);
     this.toggleNavigation(false);
@@ -301,7 +319,14 @@ export class Panel {
     this.pauseButton.dataset.state = 'running';
     this.pauseButton.addEventListener('click', () => this.handlers.onTogglePause());
     this.stepButton.addEventListener('click', () => this.handlers.onStepOnce());
-    this.timeLabel.append(this.ageLabel, this.stepLabel, this.rateLabel);
+    this.timeLabel.append(this.ageLabel, this.rateLabel);
+    this.timeLabel.addEventListener('click', () => {
+      this.showSteps = !this.showSteps;
+      this.syncTimeDisplay();
+    });
+    this.timeLabel.addEventListener('keydown', e => {
+      if (e.key === ' ' || e.key === 'Enter') e.stopPropagation();
+    });
     const speedTicks = el('div', { className: 'speed-ticks' });
     for (const s of [1, 10, 100, 1000, 10000]) {
       const tick = el('button', { type: 'button', textContent: s.toLocaleString('ru'), title: `Скорость ×${s.toLocaleString('ru')}`, ariaLabel: `Скорость ×${s.toLocaleString('ru')}` });
@@ -328,6 +353,13 @@ export class Panel {
     zoomOut.addEventListener('click', () => this.handlers.onZoomOut());
     zoomIn.addEventListener('click', () => this.handlers.onZoomIn());
     this.zoomButton.addEventListener('click', () => this.handlers.onZoomFit());
+    const rulers = el('button', { textContent: 'Линейки', title: 'Координатная сетка и шкалы X и Y', ariaPressed: 'false' });
+    rulers.addEventListener('click', () => {
+      const enabled = rulers.getAttribute('aria-pressed') !== 'true';
+      rulers.setAttribute('aria-pressed', String(enabled));
+      rulers.classList.toggle('active', enabled);
+      this.handlers.onRulers(enabled);
+    });
     const processes = el('button', { textContent: 'Процессы', title: 'Общее течение, размыв, оседание и уход в недра', ariaPressed: 'false' });
     const processLegend = el('span', { className: 'process-legend', hidden: true, title: 'Цвет показывает количество минерала за последнее обновление (10 с мира, 100 шагов); ярче — больше. При одновременных процессах цвета смешиваются.' });
     processLegend.innerHTML = '<span><i style="color:#e88536">↗</i>размыв</span><span><i style="color:#32c995">↧</i>оседание</span><span><i style="color:#c27bff">⊙</i>в недра</span>';
@@ -357,7 +389,7 @@ export class Panel {
       el('div', { className: 'time-controls' }, this.timeLabel, el('span', { className: 'group' }, this.pauseButton, this.stepButton)),
       speedControl,
       el('span', { className: 'spacer' }),
-      el('span', { className: 'toolbar-secondary' }, this.legendToggle, this.navigationToggle),
+      el('span', { className: 'toolbar-secondary' }, this.legendToggle, this.navigationToggle, this.summaryToggle),
       this.focusToggle,
       picker,
     );
@@ -368,6 +400,7 @@ export class Panel {
     this.roots.viewControls.append(
       el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn),
       el('span', { className: 'process-control' }, processes, processLegend),
+      rulers,
     );
   }
 
@@ -621,12 +654,17 @@ export class Panel {
     this.errorsBox.replaceChildren(...lines.map(textContent => el('div', { textContent })));
   }
 
+  private syncTimeDisplay(): void {
+    this.ageLabel.textContent = this.showSteps ? `Шаг ${stepFormatter.format(this.displayedStep)}` : formatWorldAge(this.displayedStep);
+    this.timeLabel.ariaLabel = `${this.showSteps ? 'Показать время мира' : 'Показать шаги мира'}; сейчас ${this.ageLabel.textContent}`;
+  }
+
   setTime(step: number, paused: boolean, speed: number, fps: number | null, stepsPerSecond: number, behind = false): void {
     const rate = `${Math.round(stepsPerSecond).toLocaleString('ru')} шагов/с`;
-    this.ageLabel.textContent = formatWorldAge(step);
-    this.stepLabel.textContent = `шаг ${stepFormatter.format(step)}`;
+    this.displayedStep = step;
+    this.syncTimeDisplay();
     this.rateLabel.textContent = `${fps === null ? '—' : Math.round(fps).toLocaleString('ru')} FPS${paused ? ' · пауза' : ''}`;
-    this.timeLabel.title = `Возраст мира ${this.ageLabel.textContent}\n${this.stepLabel.textContent}\n1 шаг = 0,1 с; ×1 — реальное время\n${this.rateLabel.textContent}`
+    this.timeLabel.title = `Нажмите, чтобы показать ${this.showSteps ? 'время' : 'шаги'}\nВозраст мира ${formatWorldAge(step)}\nШаг ${stepFormatter.format(step)}\n1 шаг = 0,1 с; ×1 — реальное время\n${this.rateLabel.textContent}`
       + '\nFPS — частота отрисовки карты за последнюю секунду'
       + (paused ? '\nРасчёт мира на паузе' : `\nРасчёт мира: ${rate}${behind ? ' · предел' : ''}`)
       + (behind ? `\nМир не успевает за скоростью ×${speed.toLocaleString('ru')} и идёт так быстро, как может` : '');

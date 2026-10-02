@@ -6,6 +6,7 @@ import {
   Drift, flowAt, lightDriftVelocity, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInDeposits, mineralInMedium, smoothLevelAt, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
   resistanceAt, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
+import { WorldSummary } from './world-summary.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
 import { WorldRenderer } from './render.ts';
 import { installMovableMinimap } from './minimap-panel.ts';
@@ -15,6 +16,7 @@ import type { SimulationCommand, SimulationReply } from './simulation.ts';
 
 /** Шаг масштаба кнопками и клавишами. */
 const ZOOM_STEP = 1.5;
+const worldSummary = new WorldSummary(document.querySelector<HTMLElement>('#world-summary')!);
 const GRADATION_NAMES = ['Вода', 'Отмель', 'Суша'];
 
 const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
@@ -24,9 +26,10 @@ installMovableMinimap(document.querySelector<HTMLElement>('.stage')!, document.q
   (x, y) => renderer.centerFromMinimap(minimap, x, y));
 const driftArrow = document.querySelector<SVGElement>('.light-drift svg')!;
 const mineralStats = document.querySelector<HTMLElement>('.mineral-stats')!;
-mineralStats.innerHTML = '<details class="mineral-details"><summary><b>Минерал</b><span class="mineral-bar"><i class="depths"></i><i class="out"></i><i class="deposits"></i><i class="medium"></i><i class="threshold"></i></span></summary>'
+mineralStats.innerHTML = '<details class="mineral-details"><summary><b>Минерал</b><span class="mineral-scale"><span class="mineral-bar" role="img"><i class="depths"></i><i class="out"></i><i class="deposits"></i><i class="medium"></i><i class="threshold"></i></span><span class="mineral-ticks"><span class="mass-zero"></span><span class="mass-half"></span><span class="mass-total"></span></span></span></summary>'
   + '<div class="mineral-keys"><span class="key"><i class="depths"></i>недра <span class="amount-depths"></span></span><span class="key"><i class="deposits"></i>залежи <span class="amount-deposits"></span></span><span class="key"><i class="medium"></i>в среде <span class="amount-medium"></span></span><span class="key"><i class="out"></i>извергается <span class="amount-out"></span></span><span class="volcanoes"></span></div></details>';
 const mineralBar = mineralStats.querySelector<HTMLElement>('.mineral-bar')!;
+const massTicks = ['zero', 'half', 'total'].map(name => mineralStats.querySelector<HTMLElement>(`.mass-${name}`)!);
 const [barDepths, barOut, barDeposits, barMedium, barThreshold] = mineralBar.querySelectorAll<HTMLElement>('i');
 const volcanoText = mineralStats.querySelector<HTMLElement>('.volcanoes')!;
 const amounts = ['depths', 'out', 'deposits', 'medium'].map(name => mineralStats.querySelector<HTMLElement>(`.amount-${name}`)!);
@@ -67,7 +70,7 @@ let lastTime = performance.now();
 let pointer: { x: number; y: number } | null = null;
 
 const $ = (selector: string) => document.querySelector<HTMLElement>(selector)!;
-const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#params'), legend: $('#legend'), tip: $('.tip'), observation: $('#observation'), navigation: $('#navigation'), viewControls: $('#view-controls') }, world.params, {
+const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#params'), legend: $('#legend'), tip: $('.tip'), observation: $('#observation'), navigation: $('#navigation'), viewControls: $('#view-controls'), summary: $('#world-summary') }, world.params, {
   onLayoutChange: () => { pointer = null; renderer.resizeKeepingView(); },
   onCreate: (params: WorldParams) => create(params),
   onTogglePause: () => togglePause(),
@@ -78,6 +81,7 @@ const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#pa
   onZoomIn: () => renderer.zoomBy(ZOOM_STEP),
   onZoomOut: () => renderer.zoomBy(1 / ZOOM_STEP),
   onZoomFit: () => renderer.fit(),
+  onRulers: (enabled) => renderer.setRulers(enabled),
   onProcesses: (enabled) => {
     renderer.showProcesses = enabled;
     send({ type: 'processes', epoch, enabled });
@@ -119,6 +123,7 @@ simulation.onmessage = ({ data }: MessageEvent<SimulationReply>) => {
         Object.assign(world.viscosity, data.viscosity);
         if (data.drift) world.drift.acceptNodes(data.step, data.drift.a, data.drift.b);
       }
+      worldSummary.observe(world, data.exchanges);
       renderer.processes = data.processes ?? null;
       actualRate = data.rate;
       behind = data.behind;
@@ -164,6 +169,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function setWorld(next: World): void {
+  worldSummary.reset(next);
   world = next;
   renderer.setWorld(world);
   mineralStatsVersion = -1;
@@ -298,6 +304,7 @@ function frame(now: number): void {
   lastTime = now;
   if (!paused) animTime += dt;
   if (!ready) { requestAnimationFrame(frame); return; }
+  worldSummary.render(world, now);
   renderer.draw(animTime);
   if (fpsWindowStart === null) {
     fpsWindowStart = now;
@@ -320,12 +327,13 @@ function frame(now: number): void {
   if (world.mineral.version !== mineralStatsVersion) {
     mineralStatsVersion = world.mineral.version;
     // Полоса — весь минерал, кроме грунта: недра, «в пути» (взято извержением,
-    // ещё не вышло), залежи, среда; риска — порог давления недр. Числа — в подсказке.
+    // ещё не вышло), залежи, среда; риска — порог давления недр. Под полосой — шкала массы.
     const m = world.mineral;
     const medium = mineralInMedium(m);
     const deposits = mineralInDeposits(world.terrain);
     const inTransit = mineralInEruptions(m);
     const total = m.depths + inTransit + medium + deposits;
+    for (const [i, fraction] of [0, 0.5, 1].entries()) massTicks[i].textContent = formatMass(total * fraction);
     const pct = (x: number) => (total > 0 ? Math.min(100, Math.max(0, (x / total) * 100)) : 0);
     const pctText = (x: number) => (pct(x) > 0 && pct(x) < 1 ? '<1%' : `${Math.round(pct(x))}%`);
     let left = 0;
@@ -345,7 +353,8 @@ function frame(now: number): void {
     volcanoText.textContent = `${now} · живых ${alive} · извержений ${m.eruptions}`;
     mineralBar.title = `Весь минерал, кроме грунта: ${formatMass(total)}; недра ${pctText(m.depths)} (${formatMass(m.depths)})`
       + (inTransit > 0 ? `, выходит извержением ${pctText(inTransit)}` : '')
-      + `, в залежах ${pctText(deposits)}, в среде ${pctText(medium)}. Риска — порог давления недр (${pctText(m.threshold)}): когда недра дорастут до неё, начнётся извержение.`;
+      + `, в залежах ${pctText(deposits)}, в среде ${pctText(medium)}. Риска — порог давления недр (${pctText(m.threshold)}, ${formatMass(m.threshold)}): когда недра дорастут до неё, начнётся извержение.`;
+    mineralBar.setAttribute('aria-label', mineralBar.title);
   }
   panel.setTime(world.step, paused, speed, framesPerSecond, paused ? 0 : actualRate, behind);
   probe();

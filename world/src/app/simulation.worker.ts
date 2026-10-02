@@ -1,5 +1,5 @@
 /** Мир считает шаги независимо от кадров; показ получает не больше 20 снимков/с. */
-import { createWorld, mineralProcesses, DRIFT_PERIOD, parseWorldFile, serializeWorld, stepWorld, WorldFileError, type World } from '../core/index.ts';
+import { createWorld, mineralExchanges, mineralProcesses, DRIFT_PERIOD, parseWorldFile, serializeWorld, stepWorld, WorldFileError, type World } from '../core/index.ts';
 import type { SimulationCommand, SimulationReply, SimulationSnapshot } from './simulation.ts';
 import { STEPS_PER_SECOND } from '../core/units.ts';
 
@@ -27,6 +27,7 @@ function publish(initial = false, force = false): void {
     type: 'snapshot', epoch,
     ...(initial ? { initial: { dish: world.dish, params: world.params, light: world.light, partitions: world.partitions } } : {}),
     ...(showProcesses ? { processes: mineralProcesses(world.mineral) } : {}),
+    exchanges: mineralExchanges(world.mineral),
     step: world.step, mineral: world.mineral, terrain: world.terrain, viscosity: world.viscosity,
     ...(drift ? { drift: { a: drift.a, b: drift.b } } : {}), rate: paused ? 0 : rate, behind,
   });
