@@ -344,10 +344,10 @@ function terrainSampler(world: World): (x: number, y: number, out: Uint8ClampedA
   const grain = gridField(DISH_WIDTH, DISH_HEIGHT, 1.25, (x, y) => hash3(seed ^ 0x6a41, Math.round(x * 0.8), Math.round(y * 0.8)) / 2147483648 - 1);
   const edge = cellEdges(seed ^ 0xc4ac, Math.ceil(DISH_WIDTH / STONE_SLAB), Math.ceil(DISH_HEIGHT / STONE_SLAB));
   const m = world.mineral;
-  const deposits = world.terrain.deposits;
   const stock = world.params.mineralStock;
   /** Залежи в точке относительно средней плотности запаса — билинейно по клеткам. */
   const depositAt = (x: number, y: number) => {
+    const deposits = world.terrain.deposits;
     const fx = Math.min(m.cols - 1, Math.max(0, x / m.cell - 0.5)), fy = Math.min(m.rows - 1, Math.max(0, y / m.cell - 0.5));
     const i0 = Math.floor(fx), j0 = Math.floor(fy), i1 = Math.min(m.cols - 1, i0 + 1), j1 = Math.min(m.rows - 1, j0 + 1);
     const u = fx - i0, v = fy - j0;

@@ -274,6 +274,14 @@ export class Drift {
     this.ground = null;
   }
 
+  /** Поля для показа пришли из Worker; на главном потоке решать давление не нужно. */
+  acceptNodes(t: number, a: DriftField, b: DriftField): void {
+    this.cache.clear();
+    const k = Math.floor(t / DRIFT_PERIOD);
+    this.cache.set(k, a);
+    this.cache.set(k + 1, b);
+  }
+
   /** Поля в двух узлах вокруг шага t и доля пути между ними — для обхода клеток без интерполяции по точке. */
   nodes(t: number): { a: DriftField; b: DriftField; u: number } {
     const k = Math.floor(t / DRIFT_PERIOD);

@@ -3,19 +3,13 @@
  * Скорость показа — дело приложения; мир знает только номер шага.
  */
 import {
-  WorldFileError, lightDriftVelocity, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInDeposits, mineralInMedium, smoothLevelAt, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
-  parseWorldFile, resistanceAt, serializeWorld, stepWorld, temperatureAt, type World, type WorldParams,
+  Drift, lightDriftVelocity, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInDeposits, mineralInMedium, smoothLevelAt, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
+  resistanceAt, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
 import { WorldRenderer } from './render.ts';
+import type { SimulationCommand, SimulationReply } from './simulation.ts';
 
-/** Шагов в секунду при скорости ×1. */
-const BASE_STEPS_PER_SECOND = 30;
-/**
- * Сколько миллисекунд кадра можно тратить на шаги мира. Не успевает — мир
- * идёт медленнее выбранной скорости (отставание не копится), вкладка не виснет.
- */
-const STEP_BUDGET_MS = 24;
 /** Шаг масштаба кнопками и клавишами. */
 const ZOOM_STEP = 1.5;
 const GRADATION_NAMES = ['Вода', 'Отмель', 'Суша'];
@@ -40,17 +34,34 @@ let actualRate = 0;
 let world: World = createWorld(makeParams({ seed: 1 }));
 let paused = false;
 let speed = 1;
-let carry = 0;
+const simulation = new Worker(new URL('./simulation.worker.ts', import.meta.url), { type: 'module' });
+let epoch = 0;
+let requestId = 0;
+let behind = false;
+let ready = false;
+const pendingLoads = new Map<number, string>();
+function send(command: SimulationCommand): void { simulation.postMessage(command); }
+function control(): void {
+  send({ type: 'control', epoch, paused, speed, active: document.visibilityState === 'visible' });
+}
+function togglePause(): void { paused = !paused; control(); }
+function changeSpeed(next: number): void { speed = next; control(); }
+function create(params: WorldParams): void {
+  epoch++;
+  send({ type: 'create', epoch, params });
+  control();
+}
+
 let lastTime = performance.now();
 /** Курсор над чашкой: координаты мира и окна. */
 let pointer: { x: number; y: number; clientX: number; clientY: number } | null = null;
 
 const $ = (selector: string) => document.querySelector<HTMLElement>(selector)!;
 const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#params'), legend: $('#legend'), tip: $('.tip'), scrim: $('#scrim') }, world.params, {
-  onCreate: (params: WorldParams) => setWorld(createWorld(params)),
-  onTogglePause: () => { paused = !paused; },
+  onCreate: (params: WorldParams) => create(params),
+  onTogglePause: () => togglePause(),
   onStepOnce: () => stepOnce(),
-  onSpeed: (s) => { speed = s; carry = 0; },
+  onSpeed: (s) => changeSpeed(s),
   onSave: () => saveWorld(),
   onLoad: (file) => { void loadWorld(file); },
   onZoomIn: () => renderer.zoomBy(ZOOM_STEP),
@@ -60,26 +71,75 @@ const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#pa
 renderer.onZoomChange = (relative) => panel.setZoom(relative);
 
 function saveWorld(): void {
-  const blob = new Blob([serializeWorld(world, new Date())], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `ecobugs-world-${world.params.seed}-step-${world.step}.json`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  panel.setFileStatus([`Сохранён мир на шаге ${world.step.toLocaleString('ru')}`], false);
+  send({ type: 'save', epoch, id: ++requestId });
 }
 
 async function loadWorld(file: File): Promise<void> {
   try {
-    setWorld(parseWorldFile(await file.text()));
-    carry = 0;
-    panel.setFileStatus([`Загружен «${file.name}»: шаг ${world.step.toLocaleString('ru')}`], false);
-  } catch (e) {
-    const problems = e instanceof WorldFileError ? e.problems : [String(e)];
-    panel.setFileStatus([`«${file.name}» не загружен:`, ...problems], true);
+    const text = await file.text();
+    const id = ++requestId;
+    pendingLoads.set(id, file.name);
+    epoch++;
+    send({ type: 'load', epoch, id, text });
+    control();
+  } catch (error) {
+    panel.setFileStatus([`«${file.name}» не загружен:`, String(error)], true);
   }
 }
+
+simulation.onmessage = ({ data }: MessageEvent<SimulationReply>) => {
+  if (data.epoch !== epoch) return;
+  switch (data.type) {
+    case 'snapshot': {
+      ready = true;
+      if (data.initial) {
+        const next: World = { ...data.initial, step: data.step, mineral: data.mineral, terrain: data.terrain,
+          viscosity: data.viscosity, drift: new Drift({ ...data.initial, viscosity: data.viscosity }) };
+        if (data.drift) next.drift.acceptNodes(data.step, data.drift.a, data.drift.b);
+        setWorld(next);
+      } else {
+        world.step = data.step;
+        Object.assign(world.mineral, data.mineral);
+        Object.assign(world.terrain, data.terrain);
+        Object.assign(world.viscosity, data.viscosity);
+        if (data.drift) world.drift.acceptNodes(data.step, data.drift.a, data.drift.b);
+      }
+      actualRate = data.rate;
+      behind = data.behind;
+      send({ type: 'ack', epoch });
+      break;
+    }
+    case 'saved': {
+      const blob = new Blob([data.text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ecobugs-world-${data.seed}-step-${data.step}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      panel.setFileStatus([`Сохранён мир на шаге ${data.step.toLocaleString('ru')}`], false);
+      break;
+    }
+    case 'loaded': {
+      const name = pendingLoads.get(data.id) ?? 'мир';
+      pendingLoads.delete(data.id);
+      panel.setFileStatus([`Загружен «${name}»: шаг ${data.step.toLocaleString('ru')}`], false);
+      break;
+    }
+    case 'error': {
+      if (data.fatal) { paused = true; actualRate = 0; behind = false; }
+      const name = data.id === undefined ? undefined : pendingLoads.get(data.id);
+      if (data.id !== undefined) pendingLoads.delete(data.id);
+      panel.setFileStatus([...(name ? [`«${name}» не загружен:`] : []), ...data.problems], true);
+      break;
+    }
+  }
+};
+simulation.onerror = (event) => {
+  paused = true;
+  panel.setFileStatus([`Расчёт мира остановлен: ${event.message}`], true);
+};
+document.addEventListener('visibilitychange', control);
 
 function setWorld(next: World): void {
   world = next;
@@ -92,7 +152,7 @@ function setWorld(next: World): void {
 /** Один шаг: ставит на паузу, если время шло. */
 function stepOnce(): void {
   paused = true;
-  stepWorld(world);
+  send({ type: 'step', epoch });
 }
 
 // Камера: колесо — масштаб у курсора, щипок и прокрутка двумя пальцами на
@@ -156,7 +216,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === ' ') {
     e.preventDefault();
     (document.activeElement as HTMLElement | null)?.blur();
-    paused = !paused;
+    togglePause();
   } else if (e.key === 'ArrowRight') {
     e.preventDefault();
     stepOnce();
@@ -167,8 +227,7 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === '0') {
     renderer.fit();
   } else if (SPEED_KEYS.includes(e.key)) {
-    speed = SPEEDS[SPEED_KEYS.indexOf(e.key)];
-    carry = 0;
+    changeSpeed(SPEEDS[SPEED_KEYS.indexOf(e.key)]);
   }
 });
 
@@ -218,26 +277,8 @@ function probe(): void {
 function frame(now: number): void {
   const dt = Math.min(0.25, (now - lastTime) / 1000);
   lastTime = now;
-  const stepsPerSecond = BASE_STEPS_PER_SECOND * speed;
-  let behind = false;
-  if (!paused) {
-    carry += dt * stepsPerSecond;
-    const want = Math.floor(carry);
-    const start = performance.now();
-    let n = 0;
-    while (n < want) {
-      stepWorld(world);
-      n++;
-      if ((n & 63) === 0 && performance.now() - start > STEP_BUDGET_MS) break;
-    }
-    behind = n < want;
-    carry = behind ? 0 : carry - n;
-    animTime += dt;
-    // Настоящая скорость — сглаженно.
-    if (dt > 0) actualRate += (n / dt - actualRate) * Math.min(1, dt * 2);
-  } else {
-    actualRate = 0;
-  }
+  if (!paused) animTime += dt;
+  if (!ready) { requestAnimationFrame(frame); return; }
   renderer.draw(animTime);
   renderer.drawMinimap(minimap);
   const [dvx, dvy] = lightDriftVelocity(world.light, world.step);
@@ -273,10 +314,11 @@ function frame(now: number): void {
       + (inTransit > 0 ? `, выходит извержением ${pctText(inTransit)}` : '')
       + `, в залежах ${pctText(deposits)}, в среде ${pctText(medium)}. Риска — порог давления недр (${pctText(m.threshold)}): когда недра дорастут до неё, начнётся извержение.`;
   }
-  panel.setTime(world.step, paused, speed, behind || actualRate < stepsPerSecond * 0.9 ? actualRate : stepsPerSecond, behind);
+  panel.setTime(world.step, paused, speed, paused ? 0 : actualRate, behind);
   probe();
   requestAnimationFrame(frame);
 }
 
 setWorld(world);
+create(world.params);
 requestAnimationFrame(frame);
