@@ -167,7 +167,7 @@ export class Panel {
   private readonly focusToggle = el('button', { className: 'focus-toggle', ariaLabel: 'На весь экран', ariaPressed: 'false', title: 'На весь экран' });
   private fullscreenPending = false;
   private readonly legendBody = el('div', { className: 'legend-body' });
-  private readonly legendToggle = el('button', { textContent: 'Легенда', className: 'legend-toggle', ariaExpanded: 'false' });
+  private readonly legendToggle = el('button', { className: 'legend-toggle', ariaLabel: 'Легенда', title: 'Легенда', ariaExpanded: 'false' });
   private readonly navigationToggle = el('button', { className: 'minimap-toggle', ariaLabel: 'Миникарта', title: 'Миникарта', ariaExpanded: 'false' });
   private readonly fileMenu = el('details', { className: 'file-menu' });
   private readonly menuToggle = el('summary', { ariaLabel: 'Меню мира', title: 'Меню мира' });
@@ -422,6 +422,7 @@ export class Panel {
     const rh = el('input', { type: 'number', min: '0.1', step: 'any', ariaLabel: 'Высота пропорции' });
     const custom = el('span', { className: 'row' }, rw, el('span', { textContent: ':' }), rh);
     const screen = el('button', { textContent: 'По области карты', title: 'Взять пропорции текущей области карты; после создания они останутся постоянными' });
+    const monitor = el('button', { textContent: 'Как экран', title: 'Взять пропорции текущего экрана; после создания они останутся постоянными' });
     const size = el('span', { className: 'note' });
     let rectangleRatio = 4 / 3;
     const syncShape = () => {
@@ -435,7 +436,7 @@ export class Panel {
         if (Math.abs(w / h - r) < 1e-10) { shown = [w, h]; break; }
       }
       rw.value = String(shown ? shown[0] : r); rh.value = String(shown ? shown[1] : 1);
-      ratios.disabled = screen.disabled = this.draft.shape === 'circle';
+      ratios.disabled = screen.disabled = monitor.disabled = this.draft.shape === 'circle';
       custom.hidden = this.draft.shape === 'circle' || !!pair;
       if (this.draft.shape === 'rectangle') rectangleRatio = r;
     };
@@ -455,6 +456,12 @@ export class Panel {
       this.draft.aspectRatio = Math.min(4, Math.max(0.25, rect.width / rect.height));
       syncShape(); this.refresh();
     });
+    monitor.addEventListener('click', () => {
+      const { width, height } = window.screen;
+      if (width <= 0 || height <= 0) return;
+      this.draft.aspectRatio = Math.min(4, Math.max(0.25, width / height));
+      syncShape(); this.refresh();
+    });
     this.inputs.push(syncShape);
     const updateSize = () => {
       const r = this.draft.aspectRatio;
@@ -464,6 +471,7 @@ export class Panel {
     };
     shape.addEventListener('change', updateSize); ratios.addEventListener('change', updateSize);
     rw.addEventListener('input', updateSize); rh.addEventListener('input', updateSize); screen.addEventListener('click', updateSize);
+    monitor.addEventListener('click', updateSize);
     this.inputs.push(updateSize);
     syncShape(); updateSize();
     const seed = el('input', { type: 'number', min: '0', max: String(0xffffffff), step: '1' });
@@ -480,7 +488,7 @@ export class Panel {
     });
     return [
       this.mark(el('label', {}, this.caption('Форма чашки', 'Круглая или прямоугольная граница мира. Площадь одинакова; форма фиксируется при создании.'), shape), () => this.draft.shape !== this.current.shape),
-      this.mark(el('label', {}, this.caption('Пропорции', 'Ширина к высоте, от 1:4 до 4:1. У круга всегда 1:1; изменение окна не меняет созданный мир.'), ratios, custom, screen, size), () => this.draft.aspectRatio !== this.current.aspectRatio),
+      this.mark(el('label', {}, this.caption('Пропорции', 'Ширина к высоте, от 1:4 до 4:1. У круга всегда 1:1; изменение окна не меняет созданный мир.'), ratios, custom, el('span', { className: 'row' }, screen, monitor), size), () => this.draft.aspectRatio !== this.current.aspectRatio),
       this.mark(el('label', {}, this.caption('Сид', 'Из него строится вся случайность мира: один сид — один и тот же мир.'), el('span', { className: 'row' }, seed, random)),
         () => this.draft.seed !== this.current.seed),
       el('div', { className: 'layout' },
@@ -530,17 +538,19 @@ export class Panel {
   /** Справочник в отдельной панели: обозначения и пояснение выбранного пункта. */
   private buildLegend(): void {
     const css = (c: Rgb) => `rgb(${c.map(Math.round).join(',')})`;
-    const detail = el('div', { className: 'legend-detail', textContent: 'Нажмите на обозначение, чтобы узнать больше.' });
+    const detail = el('div', { className: 'legend-detail', hidden: true });
+    detail.setAttribute('aria-live', 'polite');
     const item = (color: string, name: string, description: string, glyph = '') => {
       const sw = el('span', { className: 'swatch', ariaHidden: 'true' });
       sw.style.background = color;
       sw.textContent = glyph;
-      return { button: el('button', { className: 'legend-item', title: description, ariaPressed: 'false' }, sw, name), description };
+      return { button: el('button', { className: 'legend-item', title: description, ariaPressed: 'false' }, sw, name), name, description };
     };
     const section = (name: string, entries: ReturnType<typeof item>[]) => {
       for (const entry of entries) entry.button.addEventListener('click', () => {
-        for (const other of entries) other.button.setAttribute('aria-pressed', String(other === entry));
-        detail.textContent = entry.description;
+        for (const other of this.legendBody.querySelectorAll('.legend-item')) other.setAttribute('aria-pressed', String(other === entry.button));
+        detail.replaceChildren(el('strong', { textContent: entry.name }), el('p', { textContent: entry.description }));
+        detail.hidden = false;
       });
       return el('section', { className: 'legend-section' }, el('h3', { textContent: name }),
         el('div', { className: 'legend-items' }, ...entries.map(e => e.button)));
@@ -567,10 +577,12 @@ export class Panel {
       el('details', { className: 'legend-extras' }, el('summary', { textContent: 'Блики и нагрев' }),
         el('p', { className: 'note', textContent: 'Блики отмечают воду на свету. Светлые пятна теплее; точные значения температуры доступны в панели «Точка на карте».' })),
     );
-    const close = el('button', { textContent: '×', ariaLabel: 'Закрыть легенду', title: 'Закрыть (Esc)' });
+    const close = el('button', { className: 'legend-close', ariaLabel: 'Закрыть легенду', title: 'Закрыть (Esc)' });
+    close.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m5 5 10 10 M15 5 5 15"/></svg>';
     close.addEventListener('click', () => this.toggleLegend(false));
     this.legendToggle.addEventListener('click', () => this.toggleLegend());
     this.legendToggle.setAttribute('aria-controls', 'legend');
+    this.legendToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><rect x="2" y="3" width="4" height="4" rx="1"/><rect x="2" y="12" width="4" height="4" rx="1"/><path d="M10 5h8 M10 14h8"/></svg>';
     this.roots.legend.append(el('div', { className: 'legend-head' }, el('h2', { textContent: 'Легенда' }), close), this.legendBody, detail);
 
   }
