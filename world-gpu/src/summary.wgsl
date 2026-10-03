@@ -1,5 +1,5 @@
 struct Params { cols: u32, rows: u32, cell: f32, dt: f32,
-  step: u32, source: u32, burst: u32, pad: u32 }
+  step: u32, source: u32, burst: u32, pad: u32, emission: vec4u }
 @group(0) @binding(0) var<uniform> cfg: Params;
 @group(0) @binding(1) var<storage, read> geo: array<vec4f>;
 @group(0) @binding(2) var<storage, read> state: array<vec4u>;
@@ -7,6 +7,7 @@ struct Params { cols: u32, rows: u32, cell: f32, dt: f32,
 struct Summary { mass: vec4u, accuracy: vec4u }
 @group(0) @binding(4) var<storage, read_write> summary: array<Summary>;
 @group(0) @binding(5) var<storage, read> field: array<vec4f>;
+@group(0) @binding(6) var<storage, read> vents: array<vec4f>;
 @compute @workgroup_size(1) fn summarize(@builtin(global_invocation_id) id: vec3u) {
   let start = id.x * 64u;
   var masses = vec3u(0u); var maxSpeed = 0.; var residual = 0.; var scale = 0.; var leak = 0u;
@@ -18,7 +19,7 @@ struct Summary { mass: vec4u, accuracy: vec4u }
     var balance = flow[k].x + flow[k].y;
     if (x > 0u) { balance -= flow[k - 1u].x; }
     if (y > 0u) { balance -= flow[k - cfg.cols].y; }
-    let source = select(geo[k].y, field[k].w, cfg.pad == 1u);
+    let source = select(geo[k].y, field[k].w, cfg.pad == 1u) + vents[k].y - vents[k].z * vents[k].x;
     residual += (balance - source) * (balance - source);
     scale += source * source;
   }

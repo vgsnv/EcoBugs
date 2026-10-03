@@ -1,3 +1,5 @@
+import ventsShader from './vents.wgsl?raw';
+import { averagedVents, emittedQuanta } from './vents.ts';
 import physics from './physics.wgsl?raw';
 import drawing from './render.wgsl?raw';
 import summaryShader from './summary.wgsl?raw';
@@ -6,7 +8,7 @@ import velocityShader from './velocity.wgsl?raw';
 import sorShader from './pressure-sor.wgsl?raw';
 import { type Grid } from './model.ts';
 
-export interface Snapshot { state: Uint32Array; pressure: Float32Array; flow: Float32Array; field: Float32Array; step: number }
+export interface Snapshot { state: Uint32Array; pressure: Float32Array; flow: Float32Array; field: Float32Array; vents: Float32Array; step: number }
 export type PressureMethod = 'sor' | 'jacobi';
 export interface PressureOptions { method?: PressureMethod; iterations?: number }
 export interface PressureResult { method: PressureMethod; iterations: number; passes: number; milliseconds: number }
@@ -38,6 +40,11 @@ export class GpuWorld {
   private lightGroup!: GPUBindGroup;
   private velocityPipeline!: GPUComputePipeline;
   private velocityGroups!: GPUBindGroup[];
+  private ventField!: GPUBuffer;
+  private ventEvents!: GPUBuffer;
+  private ventPipelines!: GPUComputePipeline[];
+  private ventGroup!: GPUBindGroup;
+  private previousVentRates: Float32Array | null = null;
   private sorGroup!: GPUBindGroup;
   private current = 0;
   private pressureIndex = 0;
@@ -45,6 +52,7 @@ export class GpuWorld {
   step = 0;
   lost = false;
   errors: string[] = [];
+  ventMilliseconds = 0;
   pressureResult: PressureResult | null = null;
 
   private constructor(canvas: HTMLCanvasElement, adapter: GPUAdapter, device: GPUDevice) {
@@ -74,15 +82,22 @@ export class GpuWorld {
 
   async reset(grid: Grid, options: PressureOptions = {}): Promise<void> {
     if (this.lost) throw new Error('Устройство GPU потеряно. Перезагрузите прототип.');
+    const emitters = grid.vents?.filter(vent => !!vent.mass) ?? [];
+    if (emitters.length > 1 || emitters.some(vent => vent.cell !== grid.sourceCell)) {
+      throw new Error('Стенд поддерживает одно активное жерло с резервом.');
+    }
     await this.device.queue.onSubmittedWorkDone();
     for (const b of this.buffers) b.destroy(); this.buffers = [];
     this.grid = grid; this.step = 0; this.current = 0; this.pressureIndex = 0;
     const d = this.device, n = grid.cols * grid.rows;
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
-    this.uniform = this.buffer('physics params', 32, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    this.uniform = this.buffer('physics params', 48, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.view = this.buffer('render params', 32, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.geometry = this.buffer('geometry', grid.geometry, storage);
     this.field = this.buffer('physical light field', n * 16, storage);
+    this.ventField = this.buffer('screened push field', n * 16, storage);
+    this.ventMilliseconds = 0;
+    this.previousVentRates = null;
     this.states = [this.buffer('state A', grid.state, storage), this.buffer('state B', grid.state, storage)];
     this.pressures = [this.buffer('pressure A', n * 4, storage), this.buffer('pressure B', n * 4, storage)];
     this.flow = this.buffer('face velocities', n * 8, storage);
@@ -111,12 +126,12 @@ export class GpuWorld {
       fragment: { module: renderModule, entryPoint: 'fragment', targets: [{ format: navigator.gpu.getPreferredCanvasFormat() }] },
     });
     this.renderGroups = this.states.map(state => d.createBindGroup({ layout: this.render.getBindGroupLayout(0), entries:
-      [this.view, this.geometry, state, this.flow, this.field].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+      [this.view, this.geometry, state, this.flow, this.field, this.ventField].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
     this.summaries = this.buffer('partial summary', Math.ceil(n / 64) * 32, storage);
     this.summaryPipeline = await d.createComputePipelineAsync({ layout: 'auto', compute: {
       module: d.createShaderModule({ label: 'diagnostic reduction', code: summaryShader }), entryPoint: 'summarize' } });
     this.summaryGroups = this.states.map(state => d.createBindGroup({ layout: this.summaryPipeline.getBindGroupLayout(0), entries:
-      [this.uniform, this.geometry, state, this.flow, this.summaries, this.field].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+      [this.uniform, this.geometry, state, this.flow, this.summaries, this.field, this.ventField].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
     const sorModule = d.createShaderModule({ label: 'red-black SOR pressure', code: sorShader });
     const sorLayout = d.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
@@ -133,7 +148,7 @@ export class GpuWorld {
     this.velocityPipeline = await d.createComputePipelineAsync({ layout: 'auto', compute: {
       module: d.createShaderModule({code: velocityShader}), entryPoint: 'velocity' } });
     this.velocityGroups = this.pressures.map(pressure => d.createBindGroup({ layout: this.velocityPipeline.getBindGroupLayout(0), entries:
-      [this.uniform, this.geometry, pressure, this.flow, this.field].map((buffer, binding) => ({binding, resource: {buffer}})) }));
+      [this.uniform, this.geometry, pressure, this.flow, this.field, this.ventField].map((buffer, binding) => ({binding, resource: {buffer}})) }));
     if (grid.light) {
       const regions = Math.max(...grid.components) + 1;
       this.lightParams = this.buffer('light parameters', 48, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
@@ -147,10 +162,24 @@ export class GpuWorld {
       for (const entryPoint of ['illuminate', 'average', 'entrain', 'sources']) this.lightPipelines[entryPoint] = await d.createComputePipelineAsync({layout: pipelineLayout, compute: {module, entryPoint}});
       this.lightGroup = d.createBindGroup({layout: lightLayout, entries: [this.lightParams, this.geometry, areas, this.field, means].map((buffer, binding) => ({binding, resource: {buffer}}))});
     }
+    if (grid.vents) {
+      const settings = new ArrayBuffer(32); new Uint32Array(settings).set([grid.cols, grid.rows, grid.vents.length]);
+      new Float32Array(settings).set([grid.cell, grid.pushLength ?? 200, 1.6, 0],4);
+      const uniform = this.buffer('push settings', new Uint8Array(settings), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+      this.ventEvents = this.buffer('integrated push events', grid.vents.length * 16, storage);
+      const layout = d.createBindGroupLayout({entries: [
+        {binding:0, visibility:GPUShaderStage.COMPUTE, buffer:{type:'uniform'}},
+        ...[1,2,3].map(binding => ({binding, visibility:GPUShaderStage.COMPUTE, buffer:{type:binding === 3 ? 'storage' as const : 'read-only-storage' as const}}))]});
+      const module = d.createShaderModule({code:ventsShader}), pipelineLayout = d.createPipelineLayout({bindGroupLayouts:[layout]});
+      this.ventPipelines = [];
+      for (const entryPoint of ['prepare','red','black']) this.ventPipelines.push(await d.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}}));
+      this.ventGroup = d.createBindGroup({layout, entries:[uniform,this.geometry,this.ventEvents,this.ventField].map((buffer,binding)=>({binding,resource:{buffer}}))});
+    }
     const error = await d.popErrorScope(); if (error) throw new Error(error.message);
     this.writeParams();
     if (grid.light) this.prepareLight();
     await this.solvePressure(options);
+    if (grid.vents) await this.solveVents();
     if (this.errors.length) throw new Error(this.errors.join('\n'));
   }
 
@@ -186,9 +215,11 @@ export class GpuWorld {
   }
 
   private writeParams(): void {
-    const data = new ArrayBuffer(32), u = new Uint32Array(data), f = new Float32Array(data);
+    const data = new ArrayBuffer(48), u = new Uint32Array(data), f = new Float32Array(data);
     u[0] = this.grid.cols; u[1] = this.grid.rows; f[2] = this.grid.cell; f[3] = .1;
-    u[4] = this.step; u[5] = this.grid.sourceCell; u[6] = Number(this.grid.scene === 'burst'); u[7] = Number(!!this.grid.light);
+    u[4] = this.step; u[5] = this.grid.sourceCell; u[6] = this.grid.vents ? 2 : Number(this.grid.scene === 'burst'); u[7] = Number(!!this.grid.light);
+    const emitter = this.grid.vents?.find(vent => !!vent.mass);
+    u[8] = emitter ? emittedQuanta(emitter, this.step) : 0;
     this.device.queue.writeBuffer(this.uniform, 0, data);
   }
   private dispatch(encoder: GPUCommandEncoder, entry: string): void {
@@ -217,10 +248,36 @@ export class GpuWorld {
     this.device.queue.submit([encoder.finish()]);
   }
 
-  /** Fixed one-second field intervals; refresh before the corresponding transport step. */
+  private async solveVents(): Promise<void> {
+    const started = performance.now(), queue = this.device.queue;
+    const rates = averagedVents(this.grid.vents!, Math.floor(this.step / 10));
+    // Geometry is fixed until reset in this stand. Reuse only an exactly identical forcing.
+    if (this.previousVentRates?.length === rates.length && rates.every((value,k) => value === this.previousVentRates![k])) return;
+    queue.writeBuffer(this.ventEvents, 0, rates);
+    const dispatch = (encoder: GPUCommandEncoder, pipeline: GPUComputePipeline) => {
+      const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0,this.ventGroup);
+      pass.dispatchWorkgroups(Math.ceil(this.grid.cols * this.grid.rows / 64)); pass.end();
+    };
+    const prepare = this.device.createCommandEncoder(); dispatch(prepare,this.ventPipelines[0]); queue.submit([prepare.finish()]);
+    const cycles = Math.max(256,this.grid.cols ** 2 / 8);
+    for (let start=0;start<cycles;start+=128) {
+      const encoder=this.device.createCommandEncoder();
+      for (let k=start;k<Math.min(start+128,cycles);k++) {
+        dispatch(encoder,this.ventPipelines[1]); dispatch(encoder,this.ventPipelines[2]);
+      }
+      queue.submit([encoder.finish()]); await queue.onSubmittedWorkDone();
+    }
+    const encoder=this.device.createCommandEncoder(); this.dispatch(encoder,'velocity'); queue.submit([encoder.finish()]);
+    await queue.onSubmittedWorkDone(); this.ventMilliseconds=performance.now()-started;
+    this.previousVentRates = rates;
+  }
+
+  /** One-second model intervals include every short impulse through its exact interval integral. */
   async advanceDynamic(): Promise<void> {
-    if (this.grid.light && this.step > 0 && this.step % 10 === 0) {
-      this.prepareLight(); this.writeParams(); await this.solvePressure();
+    if (this.step > 0 && this.step % 10 === 0) {
+      this.writeParams();
+      if (this.grid.light) { this.prepareLight(); await this.solvePressure(); }
+      if (this.grid.vents) await this.solveVents();
     }
     this.advance();
   }
@@ -252,20 +309,21 @@ export class GpuWorld {
 
   /** Full readback is for checks only; drawing never reads physics back to CPU. */
   async snapshot(): Promise<Snapshot> {
-    const n = this.grid.cols * this.grid.rows, size = n * 44;
+    const n = this.grid.cols * this.grid.rows, size = n * 60;
     const buffer = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder();
     encoder.copyBufferToBuffer(this.states[this.current], 0, buffer, 0, n * 16);
     encoder.copyBufferToBuffer(this.pressures[this.pressureIndex], 0, buffer, n * 16, n * 4);
     encoder.copyBufferToBuffer(this.flow, 0, buffer, n * 20, n * 8);
     encoder.copyBufferToBuffer(this.field, 0, buffer, n * 28, n * 16);
+    encoder.copyBufferToBuffer(this.ventField, 0, buffer, n * 44, n * 16);
     const step = this.step;
     this.device.queue.submit([encoder.finish()]);
     try {
       await buffer.mapAsync(GPUMapMode.READ);
       const copy = buffer.getMappedRange().slice(0);
       return { state: new Uint32Array(copy, 0, n * 4), pressure: new Float32Array(copy, n * 16, n),
-        flow: new Float32Array(copy, n * 20, n * 2), field: new Float32Array(copy, n * 28, n * 4), step };
+        flow: new Float32Array(copy, n * 20, n * 2), field: new Float32Array(copy, n * 28, n * 4), vents: new Float32Array(copy,n*44,n*4), step };
     } finally { buffer.unmap(); buffer.destroy(); }
   }
 

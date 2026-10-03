@@ -1,6 +1,9 @@
+import { type Vent } from './vents.ts';
+
 /** Controlled physical scenes, not the complete world generator. */
-export type Scene = 'light' | 'light-wall' | 'quiet' | 'contrast' | 'wall' | 'passage' | 'circle' | 'layers' | 'funnel' | 'burst';
+export type Scene = 'vents' | 'vent-wall' | 'vent-passage' | 'vent-layers' | 'sun-vents' | 'light' | 'light-wall' | 'quiet' | 'contrast' | 'wall' | 'passage' | 'circle' | 'layers' | 'funnel' | 'burst';
 export const SCENES: Record<Scene, string> = {
+  vents: 'Залп и тяга', 'vent-wall': 'Толчки в закрытых отсеках', 'vent-passage': 'Толчок через проход', 'vent-layers': 'Толчок и сопротивление', 'sun-vents': 'Свет + залп + воронка',
   light: 'Дрейф света', 'light-wall': 'Свет в закрытых отсеках',
   contrast: 'Свет → тень', passage: 'Узкий проход', wall: 'Закрытые отсеки',
   circle: 'Круглая чашка', layers: 'Вода / отмель / суша', funnel: 'Отверстие воронки',
@@ -16,6 +19,8 @@ export interface Grid {
   components: Int32Array;
   total: number;
   sourceCell: number;
+  vents?: Vent[];
+  pushLength?: number;
   light?: { drift: number; sun: number; background: number; rhythm: number; contrast: number; entrainment: number };
 }
 
@@ -60,14 +65,14 @@ export function createGrid(scene: Scene, cols = 64): Grid {
   for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
     const k = y * cols + x, u = (x + .5) / cols, v = (y + .5) / rows;
     const circleOutside = scene === 'circle' && Math.hypot(u - .5, v - .5) >= .5;
-    const wall = (scene === 'wall' || scene === 'light-wall' || scene === 'passage') && x === Math.floor(cols / 2)
-      && (scene === 'wall' || scene === 'light-wall' || Math.abs(v - .5) > .08);
+    const wall = (scene === 'wall' || scene === 'light-wall' || scene === 'vent-wall' || scene === 'vent-passage' || scene === 'passage') && x === Math.floor(cols / 2)
+      && (scene === 'wall' || scene === 'light-wall' || scene === 'vent-wall' || Math.abs(v - .5) > .08);
     geometry[k * 4 + 2] = Number(circleOutside || wall);
     if (circleOutside || wall) continue;
-    geometry[k * 4] = scene === 'layers' ? (u < 1 / 3 ? 1 : u < 2 / 3 ? 1 / 3 : 1 / 9) : 1;
+    geometry[k * 4] = (scene === 'layers' || scene === 'vent-layers') ? (u < 1 / 3 ? 1 : u < 2 / 3 ? 1 / 3 : 1 / 9) : 1;
     if (scene === 'contrast' || scene === 'wall' || scene === 'layers') {
       geometry[k * 4 + 1] = .018 * Math.cos(u * Math.PI * 2);
-    } else if (scene !== 'quiet' && scene !== 'light' && scene !== 'light-wall') {
+    } else if (scene !== 'quiet' && scene !== 'light' && scene !== 'light-wall' && !scene.includes('vent')) {
       // A prescribed balanced source/return pair; full sunlight and damped vent solves come later.
       const left = Math.exp(-((u - .24) ** 2 + (v - .5) ** 2) / .009);
       const right = Math.exp(-((u - .76) ** 2 + (v - .5) ** 2) / .009);
@@ -76,18 +81,22 @@ export function createGrid(scene: Scene, cols = 64): Grid {
     const initialDensity = scene === 'quiet' ? .01 : .08 * Math.exp(-((u - .24) ** 2 + (v - .5) ** 2) / .005);
     state[k * 4] = Math.round(initialDensity * cell * cell / QUANTUM_MG);
     if (scene === 'wall' && x > cols / 2) state[k * 4] = 0;
-    if (scene === 'burst') state[k * 4] = 0;
-    if (scene === 'funnel' && Math.hypot(u - .76, v - .5) < .05) {
+    if (scene === 'burst' || scene.includes('vent')) state[k * 4] = 0;
+    if ((scene === 'funnel' || scene.includes('vent')) && Math.hypot(u - .76, v - .5) < .05) {
       geometry[k * 4 + 3] = 1;
     }
   }
-  if (scene === 'burst') state[sourceCell * 4 + 2] = 1_000_000; // Exactly 1 g, reserved underground.
+  if (scene === 'burst' || scene.includes('vent')) state[sourceCell * 4 + 2] = 1_000_000; // Exactly 1 g, reserved underground.
   const components = connectedAreas(cols, rows, geometry);
   balanceSources(geometry, components);
   const total = state.reduce((a, b) => a + b, 0);
   if (total >= 0xffffffff) throw new Error('Стенд превышает диапазон массы u32.');
-  const light = scene.startsWith('light') ? { drift: .012, sun: 1, background: .12, rhythm: .2, contrast: .035, entrainment: 1 } : undefined;
-  return { scene, cols, rows, width, height, cell, geometry, state, components, total, sourceCell, light };
+  const light = (scene.startsWith('light') || scene === 'sun-vents') ? { drift: .012, sun: 1, background: .12, rhythm: .2, contrast: .035, entrainment: 1 } : undefined;
+  const vents = scene.includes('vent') ? [
+    {cell: sourceCell, rate: 50000, start: .25, end: .45, mass: 1_000_000},
+    {cell: sy * cols + Math.floor(cols * .76), rate: -8000, start: 0, end: 1e9},
+  ] : undefined;
+  return { scene, cols, rows, width, height, cell, geometry, state, components, total, sourceCell, light, vents, pushLength: 200 };
 }
 
 export function massByComponent(grid: Grid, state: Uint32Array): number[] {

@@ -14,7 +14,7 @@ export function diagnose(grid: Grid, shot: Snapshot) {
     if (y + 1 < grid.rows) balance += shot.flow[k * 2 + 1];
     if (x > 0) balance -= shot.flow[(k - 1) * 2];
     if (y > 0) balance -= shot.flow[(k - grid.cols) * 2 + 1];
-    const source = grid.light ? shot.field[k * 4 + 3] : grid.geometry[k * 4 + 1];
+    const source = (grid.light ? shot.field[k * 4 + 3] : grid.geometry[k * 4 + 1]) + shot.vents[k*4+1] - shot.vents[k*4+2] * shot.vents[k*4];
     residual += (balance - source) ** 2;
     sourceNorm += source ** 2;
   }

@@ -1,5 +1,5 @@
 struct Params { cols: u32, rows: u32, cell: f32, dt: f32,
-  step: u32, source: u32, burst: u32, pad: u32 }
+  step: u32, source: u32, burst: u32, pad: u32, emission: vec4u }
 @group(0) @binding(0) var<uniform> cfg: Params;
 @group(0) @binding(1) var<storage, read> geo: array<vec4f>;
 @group(0) @binding(2) var<storage, read> before: array<vec4u>;
@@ -82,6 +82,9 @@ fn outward(k: u32, d: u32) -> f32 {
   if (cfg.burst == 1u && k == cfg.source && cfg.step < 20u) {
     // Two-second controlled emission: reserve is a real part of the mass ledger.
     let emitted = min(state.z, 50000u); state.z -= emitted; state.x += emitted;
+  }
+  if (cfg.burst == 2u && k == cfg.source) {
+    let emitted = min(state.z, cfg.emission.x); state.z -= emitted; state.x += emitted;
   }
   if (geo[k].w > 0.5) {
     let threshold = u32(cfg.cell * cfg.cell / 0.001 * 0.005);
