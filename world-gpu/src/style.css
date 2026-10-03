@@ -1,0 +1,8 @@
+/* GPU observation overlays; the shell and its styles come from the original world. */
+.stage{display:flex;align-items:center;justify-content:center}#world{flex:none;height:auto}.stage .gpu-probe{position:absolute;width:14px;height:14px;border:1px solid #ffe7ad;border-radius:50%;transform:translate(-50%,-50%);pointer-events:none;box-shadow:0 0 0 1px #0006}.gpu-diagnostics{padding:12px;font-size:11px}.gpu-diagnostics select{max-width:100%;margin:6px 0}.gpu-diagnostics button{margin:4px 4px 0 0}.gpu-diagnostics pre{white-space:pre-wrap;max-height:260px;overflow:auto;font-size:10px}.gpu-scale{position:absolute;pointer-events:none;font-size:10px;color:#425465;background:#f3f5f8dd;padding:2px 4px;border-bottom:1px solid #536957;bottom:8px;left:34px;min-width:80px}.gpu-point-values{margin:0;white-space:pre-wrap}
+
+.stage .gpu-ruler-overlay{position:absolute;pointer-events:none}
+
+/* Original glass rim, outside the physical field and visible when fitted. */
+#world[data-fitted="true"]{outline:9px solid #e8f4f5;box-shadow:0 0 0 10px #ffffffdf,0 4px 12px #1e375a66,inset 0 0 0 1px #edfaff}
+#world[data-fitted="true"][data-shape="circle"]{border-radius:50%}

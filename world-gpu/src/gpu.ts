@@ -6,7 +6,8 @@ import surfaceShader from './surface.wgsl?raw';
 import observationShader from './observe.wgsl?raw';
 import materialShader from './material.wgsl?raw';
 import type { Checkpoint } from './checkpoint.ts';
-import { lightOffset, lightDriftVelocity } from './generation/light.ts';
+import { rippleBytes } from './legacy/ripple.ts';
+import { lightOffset, lightDriftVelocity, sunRhythmAt } from './generation/light.ts';
 import funnelShader from './funnels.wgsl?raw';
 import { Funnels } from './funnels.ts';
 import geologyShader from './geology.wgsl?raw';
@@ -40,6 +41,7 @@ export class GpuWorld {
   private observePipeline!:GPUComputePipeline;
   private observeGroup!:GPUBindGroup;
   private surface!:GPUBuffer;
+  private rippleTexture:GPUTexture|null=null;
   private surfacePipeline!:GPUComputePipeline;
   private surfaceGroup!:GPUBindGroup;
   private material!:[GPUBuffer,GPUBuffer];
@@ -184,6 +186,7 @@ export class GpuWorld {
       }
     }
     await this.device.queue.onSubmittedWorkDone();
+    this.rippleTexture?.destroy();
     for (const b of this.buffers) b.destroy(); this.buffers = [];
     this.grid = grid;this.funnels=grid.funnels?new Funnels(grid.funnels,grid.cols,grid.rows,grid.cell,grid.geometry):null;this.geology=grid.geology?new Geology(grid.geology,grid.width,grid.height):null; this.sources=grid.sources?new Sources(grid.sources):null;this.sourceUpdateStep=-1;this.markerCells=[];this.visualBursts.clear(); this.step = 0;this.transportSubsteps=1;this.mineralSubsteps=1; this.current = 0; this.pressureIndex = 0;
     const d = this.device, n = grid.cols * grid.rows;
@@ -242,12 +245,19 @@ export class GpuWorld {
       [this.uniform, this.geometry, this.states[s], this.states[1 - s], this.pressures[p], this.pressures[1 - p],
         this.flow, this.outgoing, this.carry].map((buffer, binding) => ({ binding, resource: { buffer } })) })));
     const renderModule = d.createShaderModule({ label: 'surface image', code: drawing });
+    const renderErrors=(await renderModule.getCompilationInfo()).messages.filter(message=>message.type==='error');
+    if(renderErrors.length)throw new Error(renderErrors.map(message=>`render.wgsl:${message.lineNum}:${message.linePos} ${message.message}`).join('\n'));
     this.render = await d.createRenderPipelineAsync({ layout: 'auto',
       vertex: { module: renderModule, entryPoint: 'vertex' },
       fragment: { module: renderModule, entryPoint: 'fragment', targets: [{ format: navigator.gpu.getPreferredCanvasFormat() }] },
     });
-    this.renderGroups = this.states.map(state => [0,1].map(material=>d.createBindGroup({ layout: this.render.getBindGroupLayout(0), entries:
-      [this.view, this.surface, state, this.flow, this.field, this.ventField, this.markers,this.terrain,this.material[material]].map((buffer, binding) => ({ binding, resource: { buffer } })) })));
+    this.rippleTexture=d.createTexture({label:'original world ripple',size:[256,256],format:'rgba8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+    d.queue.writeTexture({texture:this.rippleTexture},rippleBytes(),{bytesPerRow:1024},[256,256]);
+    const rippleSampler=d.createSampler({addressModeU:'repeat',addressModeV:'repeat',magFilter:'linear',minFilter:'linear'});
+    this.renderGroups = this.states.map(state => [0,1].map(material=>d.createBindGroup({layout:this.render.getBindGroupLayout(0),entries:[
+      ...[this.view,this.surface,state,this.flow,this.field,this.ventField,this.markers,this.terrain,this.material[material]].map((buffer,binding)=>({binding,resource:{buffer}})),
+      {binding:9,resource:this.rippleTexture!.createView()},{binding:10,resource:rippleSampler}
+    ]})));
     this.summaries = this.buffer('partial summary', Math.ceil(n / 64) * 48, storage);
     this.summaryPipeline = await d.createComputePipelineAsync({ layout: 'auto', compute: {
       module: d.createShaderModule({ label: 'diagnostic reduction', code: summaryShader }), entryPoint: 'summarize' } });
@@ -616,7 +626,8 @@ export class GpuWorld {
     const data = new ArrayBuffer(64), u = new Uint32Array(data), f = new Float32Array(data);
     f.set([camera.x,camera.y,camera.zoom,camera.layer],12);
     u[0] = this.grid.cols; u[1] = this.grid.rows; f[2] = this.grid.cell; f[3] = this.step * .1;
-    f[7]=effectTime;u[4] = Number(arrows); u[5] = Number(this.grid.scene === 'burst'); u[6] = Number(!!this.grid.light);f[8]=this.grid.quantum??.001;f[9]=this.grid.referenceDensity??(5/75);f[10]=Number(this.grid.scene==='world');f[11]=Number(this.grid.shape==='circle');
+    // Preserve the 64-byte checkpoint layout. Render flags pack CSS width and heat; pad0 holds visual sun tone.
+    f[7]=effectTime;u[4] = (Math.min(32767,Math.round(canvas.clientWidth))<<1)|Number(arrows)|(Math.round(Math.min(1,(this.grid.params?.spotHeat??1)/2)*255)<<16); u[5] = ((this.grid.params?.seed??1)<<1)|Number(this.grid.scene === 'burst'); const sun=(this.grid.params?.sun??this.grid.light?.sun??1)*(this.grid.lightMap?sunRhythmAt(this.grid.lightMap,this.step):1);f[6]=this.grid.light?(1-Math.exp(-1.1*sun))/(1-Math.exp(-1.1)):0;f[8]=this.grid.quantum??.001;f[9]=this.grid.referenceDensity??(5/75);f[10]=Number(this.grid.scene==='world');f[11]=Number(this.grid.shape==='circle');
     this.device.queue.writeBuffer(this.view, 0, data);
     const encoder = this.device.createCommandEncoder();
     {const pack=encoder.beginComputePass();pack.setPipeline(this.surfacePipeline);pack.setBindGroup(0,this.surfaceGroup);pack.dispatchWorkgroups(Math.ceil(this.grid.cols*this.grid.rows/64));pack.end();}
@@ -663,6 +674,24 @@ export class GpuWorld {
     const result={step:this.step,shares:[u[0]/free,u[1]/free,u[2]/free],averageSpeed:f[8],emitted:(u[4]+u[5]*2**32)*(this.grid.quantum??.001),captured:(u[6]+u[7]*2**32)*(this.grid.quantum??.001)};read.unmap();read.destroy();return result;
   }
   get allocatedBytes():number{return this.buffers.reduce((sum,b)=>sum+b.size,0);}
+
+  /** Bounded inspector read: one cell and its incident velocity faces, 104 bytes total. */
+  async inspect(x:number,y:number){
+    const grid=this.grid,step=this.step;
+    const px=Math.min(grid.cols-1,Math.max(0,Math.floor(x*grid.cols)));
+    const py=Math.min(grid.rows-1,Math.max(0,Math.floor(y*grid.rows))),k=py*grid.cols+px;
+    const read=this.device.createBuffer({label:'point inspector read',size:104,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+    try{
+      const encoder=this.device.createCommandEncoder();
+      for(const [buffer,offset,size,destination] of [[this.states[this.current],k*16,16,0],[this.terrain,k*16,16,16],[this.geometry,k*16,16,32],[this.climate,k*16,16,48],[this.field,k*16,16,64],[this.flow,k*8,8,80],[this.flow,(px>0?k-1:k)*8,8,88],[this.flow,(py>0?k-grid.cols:k)*8,8,96]] as [GPUBuffer,number,number,number][]){encoder.copyBufferToBuffer(buffer,offset,read,destination,size);}
+      this.device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);
+      const bytes=read.getMappedRange(),u=new Uint32Array(bytes),f=new Float32Array(bytes),quantum=grid.quantum??.001,area=grid.cell**2;
+      const resistance=1/Math.max(.0001,f[8]);
+      const grade=grid.scene==='world'?(u[4]+u[5])*quantum/area/20:resistance>3?1+(resistance-3)/6:(resistance-1)/2;
+      const vx=(f[20]+(px>0?f[22]:0))*.5*grid.cell,vy=(f[21]+(py>0?f[25]:0))*.5*grid.cell;
+      return {grid,step,cell:k,blocked:f[10]>.5,hole:f[11]>.5,grade,mineral:u[0]*quantum/area,deposits:u[5]*quantum/area,ground:u[4]*quantum/area,light:f[16],temperature:f[14],vx,vy};
+    }finally{if(read.mapState==='mapped')read.unmap();read.destroy();}
+  }
 
   /** Full readback is for checks only; drawing never reads physics back to CPU. */
   async snapshot(): Promise<Snapshot> {

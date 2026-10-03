@@ -4,12 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 5174 --strictPort",
+    "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "check": "node --experimental-strip-types scripts/check-model.mjs && node --experimental-strip-types scripts/check-sources.mjs && node --experimental-strip-types scripts/check-funnels.mjs && node --experimental-strip-types scripts/check-world.mjs"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "simulate": "node --experimental-strip-types scripts/simulate.mjs",
+    "benchmark": "node --experimental-strip-types scripts/benchmark.mjs"
+  },
+  "overrides": {
+    "source-map-js": "1.2.1"
   },
   "devDependencies": {
-    "@webgpu/types": "^0.1.69",
     "typescript": "^7.0.2",
     "vite": "^8.3.1"
   }

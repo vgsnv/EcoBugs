@@ -8,4 +8,4 @@ struct Vertex { @builtin(position) pos:vec4f,@location(0) local:vec2f,@location(
  let uv=((p.pos+c*p.size)/vec2f(f32(view.cols),f32(view.rows))-view.camera.xy)*view.camera.z+.5;
  return Vertex(vec4f(uv.x*2.-1.,1.-uv.y*2.,0.,1.),c,p.alpha*min(1.,view.camera.z*.65));
 }
-@fragment fn fragment(v:Vertex)->@location(0) vec4f {return vec4f(.6,.8,.87,v.alpha*(1.-smoothstep(.25,1.,length(v.local))));}
+@fragment fn fragment(v:Vertex)->@location(0) vec4f {return vec4f(236./255.,214./255.,1.,v.alpha*(1.-smoothstep(.25,1.,length(v.local))));}

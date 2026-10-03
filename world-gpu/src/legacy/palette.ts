@@ -1,0 +1,2 @@
+export type Rgb=readonly [number,number,number];
+export const DEEP_WATER:Rgb=[28,101,142], DEPOSIT_COLOR:Rgb=[101,57,137], MINERAL_COLOR:Rgb=[216,165,255], SHADE_COLOR:Rgb=[140,150,185], SHALLOWS_SAMPLE:Rgb=[102.42,146.4,149.78], STONE_SAMPLE:Rgb=[67,64,61], SUN_COLOR:Rgb=[255,232,185];

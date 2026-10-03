@@ -8,11 +8,11 @@ struct Vertex { @builtin(position) pos: vec4f, @location(0) local: vec2f }
   let corners = array<vec2f,6>(vec2f(-1.,-1.),vec2f(1.,-1.),vec2f(-1.,1.),vec2f(-1.,1.),vec2f(1.,-1.),vec2f(1.,1.));
   let corner = corners[vertex]; let packet = packets[instance];
   if (packet.mass == 0u) { return Vertex(vec4f(2.,2.,0.,1.),corner); }
-  let world=(packet.pos+corner*.16)/vec2f(f32(view.cols),f32(view.rows));
+  let world=(packet.pos+corner*(.55*f32(view.cols)/max(1.,f32((view.arrows>>1u)&32767u)*view.camera.z))*(.8+.4*f32(packet.serial%17u)/16.))/vec2f(f32(view.cols),f32(view.rows));
   let uv=(world-view.camera.xy)*view.camera.z+.5;
   return Vertex(vec4f(uv.x*2.-1.,1.-uv.y*2.,0.,1.),corner);
 }
 @fragment fn fragment(in: Vertex) -> @location(0) vec4f {
-  let alpha = 1.-smoothstep(.35,1.,length(in.local));
-  return vec4f(.88,.69,1.,alpha);
+  let alpha = 1.-smoothstep(.65,1.,max(abs(in.local.x),abs(in.local.y)));
+  return vec4f(236./255.,214./255.,1.,alpha*.6);
 }
