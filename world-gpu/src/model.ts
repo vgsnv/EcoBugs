@@ -1,10 +1,11 @@
+import { type GeologyConfig } from './geology.ts';
 import { type SourceConfig } from './sources.ts';
 import { type Vent } from './vents.ts';
 
 /** Controlled physical scenes, not the complete world generator. */
-export type Scene = 'mineral' | 'volcanoes' | 'volcano-wall' | 'flight-impact' | 'flight-slide' | 'flight' | 'flight-wall' | 'flight-island' | 'flight-hole' | 'sun-flight' | 'vents' | 'vent-wall' | 'vent-passage' | 'vent-layers' | 'sun-vents' | 'light' | 'light-wall' | 'quiet' | 'contrast' | 'wall' | 'passage' | 'circle' | 'layers' | 'funnel' | 'burst';
+export type Scene = 'geology' | 'terrain' | 'mineral' | 'volcanoes' | 'volcano-wall' | 'flight-impact' | 'flight-slide' | 'flight' | 'flight-wall' | 'flight-island' | 'flight-hole' | 'sun-flight' | 'vents' | 'vent-wall' | 'vent-passage' | 'vent-layers' | 'sun-vents' | 'light' | 'light-wall' | 'quiet' | 'contrast' | 'wall' | 'passage' | 'circle' | 'layers' | 'funnel' | 'burst';
 export const SCENES: Record<Scene, string> = {
-  mineral:'Растекание и залежи', volcanoes:'Жизнь вулканов', 'volcano-wall':'Общие недра в отсеках',
+  geology:'Подвижки и толчки', terrain:'Изменение местности', mineral:'Растекание и залежи', volcanoes:'Жизнь вулканов', 'volcano-wall':'Общие недра в отсеках',
   'flight-impact': 'Прямой удар о стену', 'flight-slide': 'Скольжение вдоль стены', flight: 'Залп: полёт', 'flight-wall': 'Полёт и стенка', 'flight-island': 'Полёт через сушу', 'flight-hole': 'Полёт и отверстие', 'sun-flight': 'Свет + полёт + воронка',
   vents: 'Залп и тяга', 'vent-wall': 'Толчки в закрытых отсеках', 'vent-passage': 'Толчок через проход', 'vent-layers': 'Толчок и сопротивление', 'sun-vents': 'Свет + залп + воронка',
   light: 'Дрейф света', 'light-wall': 'Свет в закрытых отсеках',
@@ -26,9 +27,10 @@ export interface Grid {
   pushLength?: number;
   sources?: SourceConfig;
   underground?: number;
+  geology?: GeologyConfig;
   /** Ground and deposits in integer quanta; remaining channels reserved. */
   terrain?: Uint32Array;
-  mineral?: { diffusion:number; settling:number; dissolution:number; runoff:number };
+  mineral?: { diffusion:number; settling:number; dissolution:number; runoff:number; erosion?:number; weathering?:number; speed?:number; evolving?:boolean };
   ballistics?: { range: number; speed: number; capacity: number; seed: number; count?: number; direction?: [number,number] };
   light?: { drift: number; sun: number; background: number; rhythm: number; contrast: number; entrainment: number };
 }
@@ -85,7 +87,7 @@ export function createGrid(scene: Scene, cols = 64): Grid {
     if (scene === 'flight-island' && u * width > 540 && u * width < 575 && v > .25 && v < .75) geometry[k * 4] = 1 / 9;
     if (scene === 'contrast' || scene === 'wall' || scene === 'layers') {
       geometry[k * 4 + 1] = .018 * Math.cos(u * Math.PI * 2);
-    } else if (scene !== 'quiet' && scene !== 'mineral' && scene !== 'light' && scene !== 'light-wall' && !hasSource) {
+    } else if (scene !== 'quiet' && scene !== 'mineral' && scene !== 'terrain' && scene !== 'geology' && scene !== 'light' && scene !== 'light-wall' && !hasSource) {
       // A prescribed balanced source/return pair; full sunlight and damped vent solves come later.
       const left = Math.exp(-((u - .24) ** 2 + (v - .5) ** 2) / .009);
       const right = Math.exp(-((u - .76) ** 2 + (v - .5) ** 2) / .009);
@@ -104,7 +106,7 @@ export function createGrid(scene: Scene, cols = 64): Grid {
   balanceSources(geometry, components);
   const total = state.reduce((a, b) => a + b, 0);
   if (total >= 0xffffffff) throw new Error('Стенд превышает диапазон массы u32.');
-  const light = (scene.startsWith('light') || scene === 'sun-vents' || scene === 'sun-flight') ? { drift: .012, sun: 1, background: .12, rhythm: .2, contrast: .035, entrainment: 1 } : undefined;
+  const light = (scene.startsWith('light') || scene === 'sun-vents' || scene === 'sun-flight' || scene === 'terrain') ? { drift: .012, sun: 1, background: .12, rhythm: .2, contrast: .035, entrainment: 1 } : undefined;
   const vents = hasSource ? [
     {cell: sourceCell, rate: 50000, start: .25, end: .45, mass: 1_000_000},
     {cell: sy * cols + Math.floor(cols * holeU), rate: -8000, start: 0, end: 1e9},
@@ -119,6 +121,12 @@ export function createGrid(scene: Scene, cols = 64): Grid {
     const sources:SourceConfig={seed:9307,stock,sites:Array.from(components,(_,k)=>k).filter(k=>components[k]>=0&&!geometry[k*4+3])};
     const events:Vent[]=Array.from({length:5},()=>({cell:0,rate:0,start:0,end:0}));events.push({cell:sy*cols+Math.floor(cols*.76),rate:-8000,start:0,end:1e9});
     return {scene,cols,rows,width,height,cell,geometry,state,components,total:stock,sourceCell,vents:events,sources,underground:stock,mineral:{diffusion:100,settling:.0001,dissolution:.00005,runoff:100},ballistics:{range:150,speed:240,capacity:1024,seed:6107},pushLength:200};
+  }
+  if(scene==='terrain'||scene==='geology'){
+    state.fill(0);const terrain=new Uint32Array(n*4);
+    for(let k=0;k<n;k++){const u=(k%cols+.5)/cols,v=(Math.floor(k/cols)+.5)/rows;terrain[k*4]=Math.round((.002+.035*Math.exp(-((u-.5)**2+(v-.5)**2)/.025))*cell*cell/.001);}
+    const underground=scene==='geology'?5_000_000:0;
+    return {scene,cols,rows,width,height,cell,geometry,state,terrain,components,total:underground+terrain.reduce((a,b)=>a+b,0),sourceCell,light,underground,geology:scene==='geology'?{seed:6107,moveGap:1000,moveDuration:3000,quakeGap:2000,quakeDuration:300}:undefined,mineral:{diffusion:100,settling:.0001,dissolution:.00005,runoff:100,erosion:.0003,weathering:.00001,speed:1,evolving:true}};
   }
   const mineral=scene==='mineral'?{diffusion:100,settling:.0001,dissolution:.00005,runoff:100}:undefined;
   return { mineral, scene, cols, rows, width, height, cell, geometry, state, components, total, sourceCell, light, vents, ballistics, pushLength: 200 };

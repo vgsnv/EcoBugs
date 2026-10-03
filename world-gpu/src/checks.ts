@@ -8,7 +8,7 @@ export function diagnose(grid: Grid, shot: Snapshot) {
   for (let k = 0; k < grid.cols * grid.rows; k++) {
     deposits+=shot.terrain[k*4+1];ground+=shot.terrain[k*4];
     dissolved += shot.state[k * 4]; captured += shot.state[k * 4 + 1]; reserved += shot.state[k * 4 + 2]; flying += shot.state[k * 4 + 3];
-    if (grid.geometry[k * 4 + 2]) leak += shot.state[k * 4];
+    if (shot.geometry[k * 4 + 2]) leak += shot.state[k * 4];
     maxSpeed = Math.max(maxSpeed, Math.abs(shot.flow[k * 2]), Math.abs(shot.flow[k * 2 + 1]));
     const x = k % grid.cols, y = Math.floor(k / grid.cols);
     let balance = 0;
@@ -16,7 +16,7 @@ export function diagnose(grid: Grid, shot: Snapshot) {
     if (y + 1 < grid.rows) balance += shot.flow[k * 2 + 1];
     if (x > 0) balance -= shot.flow[(k - 1) * 2];
     if (y > 0) balance -= shot.flow[(k - grid.cols) * 2 + 1];
-    const source = (grid.light ? shot.field[k * 4 + 3] : grid.geometry[k * 4 + 1]) + shot.vents[k*4+1] - shot.vents[k*4+2] * shot.vents[k*4];
+    const source = (grid.light ? shot.field[k * 4 + 3] : shot.geometry[k * 4 + 1]) + shot.vents[k*4+1] - shot.vents[k*4+2] * shot.vents[k*4];
     residual += (balance - source) ** 2;
     sourceNorm += source ** 2;
   }

@@ -1,6 +1,6 @@
-struct Params { cols:u32, rows:u32, cell:f32, dt:f32, diffusion:f32, settling:f32, dissolution:f32, runoff:f32, cap:u32, pad0:u32, pad1:u32, pad2:u32 }
+struct Params { cols:u32, rows:u32, cell:f32, dt:f32, diffusion:f32, settling:f32, dissolution:f32, runoff:f32, cap:u32, pad0:u32, pad1:u32, pad2:u32, erosion:f32, weathering:f32, speed:f32, evolving:u32 }
 @group(0) @binding(0) var<uniform> cfg:Params;
-@group(0) @binding(1) var<storage,read> geo:array<vec4f>;
+@group(0) @binding(1) var<storage,read_write> geo:array<vec4f>;
 @group(0) @binding(2) var<storage,read> before:array<vec4u>;
 @group(0) @binding(3) var<storage,read_write> after:array<vec4u>;
 @group(0) @binding(4) var<storage,read_write> terrain:array<vec4u>;
@@ -16,6 +16,8 @@ fn neighbor(k:u32,d:u32)->u32 {
 @compute @workgroup_size(64) fn spread(@builtin(global_invocation_id) id:vec3u){
  let k=id.x;if(k>=cfg.cols*cfg.rows){return;}
  outgoing[k]=vec4u(0u);
+ var steepness=0.;for(var d=0u;d<4u;d++){let j=neighbor(k,d);if(j!=k&&geo[j].z<.5){steepness=max(steepness,f32(terrain[k].x+terrain[k].y)-f32(terrain[j].x+terrain[j].y));}}
+ terrain[k].z=bitcast<u32>(steepness*.001/(cfg.cell*cfg.cell));
  if(geo[k].z>.5||geo[k].w>.5){carry[k]=vec4f(0.);return;}
  let mass=before[k].x;var wanted=vec4f(0.);
  let area=cfg.cell*cfg.cell;let surface=f32(terrain[k].x+terrain[k].y+mass)*.001/area;
@@ -24,7 +26,7 @@ fn neighbor(k:u32,d:u32)->u32 {
   let mobility=2.*geo[k].x*geo[j].x/(geo[k].x+geo[j].x);
   let gradient=max(0.,f32(mass)-f32(before[j].x));
   let slope=max(0.,surface-f32(terrain[j].x+terrain[j].y+before[j].x)*.001/area);
-  wanted[d]=(cfg.diffusion*gradient+cfg.runoff*f32(mass)*slope/.02)*mobility*cfg.dt/area;
+  wanted[d]=(cfg.diffusion*gradient+cfg.runoff*cfg.speed*f32(mass)*slope/.02)*mobility*cfg.dt/area;
  }
  let sum=dot(wanted,vec4f(1.));if(sum>f32(mass)*.5){wanted*=f32(mass)*.5/sum;}
  var remaining=mass;
@@ -45,10 +47,26 @@ fn neighbor(k:u32,d:u32)->u32 {
  let convergence=max(0.,west+north-flow[k].x-flow[k].y);
  let cap=cfg.cap;
  let occupied=terrain[k].x+terrain[k].y;let room=cap-min(cap,occupied);
- let settleWanted=f32(state.x)*cfg.settling*cfg.dt*(1.+min(2.,convergence))/(1.+speed/10.);
+ let settleWanted=f32(state.x)*cfg.settling*cfg.speed*cfg.dt*(1.+min(2.,convergence))/(1.+speed/10.);
  let a=settleWanted+phaseCarry[k].x;let settled=min(min(state.x,room),u32(floor(a)));
  phaseCarry[k].x=select(0.,fract(a),settled<room);state.x-=settled;terrain[k].y+=settled;
- let b=f32(terrain[k].y)*cfg.dissolution*cfg.dt+phaseCarry[k].y;
+ let b=f32(terrain[k].y)*cfg.dissolution*cfg.speed*cfg.dt+phaseCarry[k].y;
  let dissolved=min(terrain[k].y,u32(floor(b)));phaseCarry[k].y=fract(b);
- terrain[k].y-=dissolved;state.x+=dissolved;after[k]=state;
+ terrain[k].y-=dissolved;state.x+=dissolved;
+ // Dissipative stripping: deposits receive the entire demand before ground can erode.
+ let erosion=f32(terrain[k].x+terrain[k].y)*cfg.erosion*cfg.speed*cfg.dt*max(0.,speed/30.-1.)+phaseCarry[k].z;
+ let stripped=min(terrain[k].x+terrain[k].y,u32(floor(min(erosion, f32(terrain[k].x+terrain[k].y)))));
+ phaseCarry[k].z=fract(erosion);let depositStrip=min(terrain[k].y,stripped);
+ terrain[k].y-=depositStrip;terrain[k].x-=stripped-depositStrip;state.x+=stripped;
+ let above=terrain[k].x-min(terrain[k].x,cfg.cap/2u);
+ let weather=f32(above)*cfg.weathering*cfg.speed*cfg.dt*bitcast<f32>(terrain[k].z)/.02+phaseCarry[k].w;
+ let weathered=min(above,u32(floor(weather)));phaseCarry[k].w=fract(weather);
+ terrain[k].x-=weathered;state.x+=weathered;after[k]=state;
+}
+
+@compute @workgroup_size(64) fn refresh(@builtin(global_invocation_id) id:vec3u){
+ let k=id.x;if(k>=cfg.cols*cfg.rows||geo[k].z>.5||cfg.evolving==0u){return;}
+ let level=f32(terrain[k].x+terrain[k].y)*.001/(cfg.cell*cfg.cell);
+ let resistance=1.+2.*smoothstep(.004,.012,level)+6.*smoothstep(.012,.024,level);
+ geo[k].x=1./resistance;
 }
