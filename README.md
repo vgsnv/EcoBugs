@@ -95,3 +95,10 @@ To learn more about React Native, take a look at the following resources:
 - [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
 - [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
 - [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+
+## Браузерный мир
+
+- `world-2` — развиваемая WebGPU-версия: `npm --prefix world-2 run dev`, порт 5174.
+- `world-1` — архив прежней версии без дальнейшей разработки и поддержки совместимости. Запуск: `npm --prefix world-1 run dev -- --host 127.0.0.1 --port 5173 --strictPort`.
+
+Удаление `world-1` — только по отдельному решению пользователя.

@@ -4,14 +4,20 @@ struct Surface{geometry:vec4f,climate:vec4f}
 @group(0) @binding(1) var<storage, read> surface: array<Surface>;
 @group(0) @binding(2) var<storage, read> state: array<vec4u>;
 @group(0) @binding(3) var<storage, read> flow: array<vec2f>;
-@group(0) @binding(4) var<storage, read> field: array<vec4f>;
-@group(0) @binding(5) var<storage, read> vents: array<vec4f>;
+struct LightSettings { cols:u32,rows:u32,regions:u32,count:u32,time:f32,drift:f32,sun:f32,background:f32,rhythm:f32,contrast:f32,entrainment:f32,pad:f32,world:vec4f,offset:vec4f,cycle:vec4f,spatial:vec4f }
+struct Ellipse {a:vec4f,b:vec4f,c:vec4f}
+struct Blob {a:vec4f,b:vec4f,c:vec4f,d:vec4f,e:vec4f,f:vec4f,ellipse:Ellipse,next:u32,pad0:u32,pad1:u32,pad2:u32}
+@group(0) @binding(4) var<storage,read> blobs:array<Blob>;
+@group(0) @binding(5) var<storage,read> lightHeads:array<u32>;
 struct Marker { state:vec4f,animation:vec4f }
 @group(0) @binding(6) var<storage,read> markers:array<Marker>;
 @group(0) @binding(7) var<storage,read> terrain:array<vec4u>;
 @group(0) @binding(8) var<storage,read> material:array<vec4f>;
 @group(0) @binding(9) var rippleTexture:texture_2d<f32>;
 @group(0) @binding(10) var rippleSampler:sampler;
+@group(0) @binding(11) var<uniform> lightSettings:LightSettings;
+struct GlassGeometry { info:vec4f, segments:array<vec4f,64> }
+@group(0) @binding(12) var<uniform> glassGeometry:GlassGeometry;
 struct Varying { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertex(@builtin(vertex_index) i: u32) -> Varying {
   let p = array<vec2f, 3>(vec2f(-1., -1.), vec2f(3., -1.), vec2f(-1., 3.))[i];
@@ -30,9 +36,33 @@ fn levels(k:u32,px:i32,py:i32)->vec3f {
 fn nearby(k:u32,x:i32,y:i32)->u32{
  if(x<0||y<0||x>=i32(view.cols)||y>=i32(view.rows)){return k;}let j=u32(y)*view.cols+u32(x);if(surface[j].geometry.z>.5||(surface[j].geometry.w>.5)!=(surface[k].geometry.w>.5)){return k;}return j;
 }
-fn lightAt(k:u32,x:i32,y:i32)->f32{return field[nearby(k,x,y)].x;}
+fn lightAt(k:u32,x:i32,y:i32)->f32{
+ let climate=surface[nearby(k,x,y)].climate;let cfg=lightSettings;
+ var wave=sin(cfg.time*.1+.7);if(cfg.count>0u){wave=sin(cfg.time*6.2831853/cfg.cycle.x+cfg.cycle.y);}
+ return cfg.sun*(1.+cfg.rhythm*wave)*mix(cfg.background,1.,climate.x)*climate.y;
+}
 fn temperatureAt(k:u32,x:i32,y:i32)->f32{return surface[nearby(k,x,y)].climate.z;}
 fn materialAt(k:u32,x:i32,y:i32)->vec4f{return material[nearby(k,x,y)];}
+// Same prepared ellipses and spatial bins as physics; visual edge width follows pixels.
+fn visualSpot(pos:vec2f,pixel:f32)->f32{
+ let cfg=lightSettings;let size=vec2i(cfg.spatial.xy);let period=cfg.world.xy*2.;
+ let wrapped=pos-floor(pos/period)*period;let center=vec2i(wrapped/period*cfg.spatial.xy);var intensity=0.;
+ for(var dy=-min(1,size.y-1);dy<=min(1,size.y-1);dy++){
+  for(var dx=-min(1,size.x-1);dx<=min(1,size.x-1);dx++){
+   let bin=(center+vec2i(dx,dy)+size)%size;var i=lightHeads[u32(bin.y*size.x+bin.x)];
+   loop{
+    if(i==0xffffffffu){break;}let e=blobs[i].ellipse;i=blobs[i].next;
+    var delta=pos-e.a.xy;delta-=round(delta/period)*period;
+    if(abs(delta.x)>e.c.z||abs(delta.y)>e.c.z){continue;}
+    let uv=vec2f(dot(delta,e.b.xy)*e.a.z,dot(delta,vec2f(-e.b.y,e.b.x))*e.a.w);
+    let angle=atan2(uv.y,uv.x);let boundary=1.+e.c.x*sin(3.*angle+e.b.z)+e.c.y*sin(5.*angle+e.b.w);
+    let edge=max(.09,max(pixel,e.c.z*.035)*max(e.a.z,e.a.w)*2.);
+    intensity=max(intensity,1.-smoothstep(boundary-edge,boundary+edge,length(uv)));
+   }
+  }
+ }
+ return intensity;
+}
 // Integer hashing keeps material anchored to the world, without animated screen noise.
 fn grainHash(p:vec2i)->f32 {
   var h=(bitcast<u32>(p.x)*1597334677u) ^ (bitcast<u32>(p.y)*3812015801u) ^ (view.burstAndSeed>>1u);
@@ -43,11 +73,41 @@ fn stoneNoise(p:vec2f)->f32 {
   let i=vec2i(floor(p));let f=fract(p);let t=f*f*(3.-2.*f);
   return mix(mix(grainHash(i),grainHash(i+vec2i(1,0)),t.x),mix(grainHash(i+vec2i(0,1)),grainHash(i+vec2i(1,1)),t.x),t.y);
 }
-fn fracturedStone(p:vec2f)->f32 {
-  let i=vec2i(floor(p));let f=fract(p);
-  let a=grainHash(i);let b=grainHash(i+vec2i(1,0));let c=grainHash(i+vec2i(0,1));let d=grainHash(i+vec2i(1,1));
-  if(f.x+f.y<1.){return a+(b-a)*f.x+(c-a)*f.y;}
-  return d+(c-d)*(1.-f.x)+(b-d)*(1.-f.y);
+// Cellular slab borders, as in the original stone material; evaluated only at resolved scales.
+fn fracturedStone(p:vec2f)->f32{
+ let cell=vec2i(floor(p));var first=100.;var second=100.;
+ for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
+  let q=cell+vec2i(x,y);let site=vec2f(q)+vec2f(grainHash(q),grainHash(q+vec2i(37,59)));
+  let distance=dot(site-p,site-p);
+  if(distance<first){second=first;first=distance;}else if(distance<second){second=distance;}
+ }}
+ return sqrt(second)-sqrt(first);
+}
+fn stoneMottle(mm:vec2f,pixel:f32)->f32{
+ return (filteredStone(mm,40.,pixel)-.5)*1.07+(filteredStone(mm+vec2f(13.,47.),20.,pixel)-.5)*.53+(filteredStone(mm+vec2f(31.,19.),10.,pixel)-.5)*.27+(filteredStone(mm,5.,pixel)-.5)*.13;
+}
+// SHARED_GLASS_MATERIAL
+fn glassDistance(mm:vec2f)->f32{
+ var distance=1e8;
+ for(var i=0u;i<u32(glassGeometry.info.x);i++){
+  let segment=glassGeometry.segments[i];let q=abs(mm-segment.xy)-segment.zw;
+  distance=min(distance,length(max(q,vec2f(0.)))+min(max(q.x,q.y),0.));
+ }
+ return distance;
+}
+fn glassTone(pos:vec2f,pixel:f32)->vec3f{
+ let cell=vec2i(floor(pos));let horizontal=blockedAt(cell+vec2i(-1,0))+blockedAt(cell+vec2i(1,0))>=blockedAt(cell+vec2i(0,-1))+blockedAt(cell+vec2i(0,1));
+ let step=select(vec2i(1,0),vec2i(0,1),horizontal);let at=select(fract(pos).x,fract(pos).y,horizontal);
+ var before=0.;var after=0.;
+ for(var n=1;n<=4;n++){if(blockedAt(cell-step*n)>.5){before+=1.;}else{break;}}
+ for(var n=1;n<=4;n++){if(blockedAt(cell+step*n)>.5){after+=1.;}else{break;}}
+ let phase=clamp(pos.y/f32(view.rows),0.,1.);
+ var edge=min(before+at,after+1.-at)*view.cell;
+ if(glassGeometry.info.y>.5){edge=max(0.,-glassDistance(pos*view.cell));}
+ let rim=1.-smoothstep(pixel*.35,pixel*1.3,edge);
+ let glass=glassMaterial(phase);
+ // Tint is composited onto the adjacent scene below, rather than a white backing.
+ return mix(glass.rgb,vec3f(1.),rim*.9);
 }
 // Fade unresolved scales before they alias; all derivatives are evaluated before branching.
 fn resolved(scale:f32,pixel:f32)->f32{return 1.-smoothstep(scale*.16,scale*.65,pixel);}
@@ -77,11 +137,15 @@ fn fluidTexture(mm:vec2f,pixel:f32)->f32{
 }
 fn blockedAt(p:vec2i)->f32{
   if(any(p<vec2i(0))||p.x>=i32(view.cols)||p.y>=i32(view.rows)){return 0.;}
+  // Outside-dish cells belong to the smooth circular cup rim, not glass partitions.
+  if(view.appearance.w>.5){let centre=(vec2f(p)+.5)-vec2f(f32(view.cols),f32(view.rows))*.5;if(length(abs(centre)+.5)>f32(view.cols)*.5){return 0.;}}
   return select(0.,1.,surface[u32(p.y)*view.cols+u32(p.x)].geometry.z>.5);
 }
 // Exact pixel coverage of the cell mask (for pixels smaller than a cell).
 // This smooths raster edges without inventing traversable gaps or changing the mask.
 fn wallCoverage(pos:vec2f,footprint:vec2f)->f32{
+  if(glassGeometry.info.y>.5&&(view.arrows&0x80000000u)!=0u){return 0.;}
+  if(glassGeometry.info.y>.5){let pixel=max(footprint.x,footprint.y)*view.cell;return 1.-smoothstep(-pixel*.5,pixel*.5,glassDistance(pos*view.cell));}
   if(any(footprint>=vec2f(1.))){return blockedAt(vec2i(floor(pos)));}
   let half=min(footprint*.5,vec2f(.49));let lo=vec2i(floor(pos-half));let hi=vec2i(floor(pos+half));
   if(all(lo==hi)){return blockedAt(lo);}
@@ -94,16 +158,29 @@ fn wallCoverage(pos:vec2f,footprint:vec2f)->f32{
   let pos = uv * vec2f(f32(view.cols), f32(view.rows));
   let mm=pos*view.cell;
   let pixel=max(length(dpdx(mm)),length(dpdy(mm)));
-  let wall=vec3f(.65,.76,.83);
-  let wallAmount=wallCoverage(pos,fwidth(pos));
+  let footprint=fwidth(pos);
+  let wallAmount=wallCoverage(pos,footprint);
+  var wall=vec3f(.65,.76,.83);
+  if(wallAmount>.001){wall=glassTone(pos,pixel);}
   let circleDistance=(length(uv-.5)-.5)*f32(view.cols)*view.cell;
   let circleCoverage=select(0.,smoothstep(-pixel*.5,pixel*.5,circleDistance),view.appearance.w>.5);
   if(any(uv<vec2f(0.))||any(uv>vec2f(1.))){return vec4f(.949,.957,.937,1.);}
   let x = min(view.cols - 1u, u32(pos.x)); let y = min(view.rows - 1u, u32(pos.y));
-  let k = y * view.cols + x;
+  var k = y * view.cols + x;
+  // The physical mask is conservative: fill its excess border from the closest
+  // free cell before drawing the continuous glass shape over it.
+  if(glassGeometry.info.y>.5 && surface[k].geometry.z>.5){
+    var best=1e8;
+    for(var dy=-3;dy<=3;dy++){for(var dx=-3;dx<=3;dx++){
+      let p=vec2i(i32(x)+dx,i32(y)+dy);
+      if(any(p<vec2i(0))||p.x>=i32(view.cols)||p.y>=i32(view.rows)){continue;}
+      let j=u32(p.y)*view.cols+u32(p.x);let d=distance(vec2f(p)+.5,pos);
+      if(surface[j].geometry.z<.5 && d<best){best=d;k=j;}
+    }}
+  }
   if(view.appearance.w>.5&&circleDistance>pixel*.5){return vec4f(.949,.957,.937,1.);}
-  if (wallAmount>.999) {
-    let wallMaterial=wall*(1.+(filteredStone(mm,5.,pixel)-.5)*.08);
+  if (glassGeometry.info.y<.5 && wallAmount>.999) {
+    let wallMaterial=wall;
     return vec4f(mix(wallMaterial,vec3f(.949,.957,.937),circleCoverage),1.);
   }
   let mobility = surface[k].geometry.x;
@@ -115,11 +192,12 @@ fn wallCoverage(pos:vec2f,footprint:vec2f)->f32{
   let grade=select(level,(samples.y+samples.z)/20.,view.appearance.z>.5);
   // Original CPU world's thresholds, palette, material coverage and layer ordering.
   let shallow=smoothstep(.2,1.3,grade);let land=smoothstep(1.35,1.75,grade);
-  let broad=filteredStone(mm+vec2f(73.,19.),40.,pixel);
+  let broad=stoneMottle(mm+vec2f(73.,19.),pixel);
   let fine=filteredStone(mm+vec2f(23.,97.),1.25,pixel);
   let detail=resolved(1.25,pixel);
-  let crack=1.-smoothstep(.02,.07,abs(fracturedStone(mm/14.)-.5));
-  let stone=61.+15.*(broad*2.-1.)+6.*(fine*2.-1.)-12.*crack*detail+36.*(1.-land);
+  var crack=0.;let slabDetail=resolved(14.,pixel);
+  if(slabDetail>.01&&land>.01){let aa=max(.015,pixel/14.);crack=(1.-smoothstep(.02,.07+aa,fracturedStone(mm/14.)))*slabDetail;}
+  let stone=61.+15.*broad+6.*(fine*2.-1.)-12.*crack+36.*(1.-land);
   var base=(vec3f(stone)+vec3f(6.,3.,0.))/255.;
   let deposit=smoothstep(.5,8.,samples.z/view.appearance.y);
   let crystal=mineralGrain(mm,pixel)*deposit;
@@ -131,7 +209,8 @@ fn wallCoverage(pos:vec2f,footprint:vec2f)->f32{
   base=mix(base,vec3f(151.,201.,194.)/255.,shore);
   base=mix(base,vec3f(31.,51.,55.)/255.,wet);
   let illumination=mix(mix(lightAt(k,corner.x,corner.y),lightAt(k,corner.x+1,corner.y),blend.x),mix(lightAt(k,corner.x,corner.y+1),lightAt(k,corner.x+1,corner.y+1),blend.x),blend.y);
-  let spot=mix(mix(surface[nearby(k,corner.x,corner.y)].climate.x,surface[nearby(k,corner.x+1,corner.y)].climate.x,blend.x),mix(surface[nearby(k,corner.x,corner.y+1)].climate.x,surface[nearby(k,corner.x+1,corner.y+1)].climate.x,blend.x),blend.y);
+  var spot=mix(mix(surface[nearby(k,corner.x,corner.y)].climate.x,surface[nearby(k,corner.x+1,corner.y)].climate.x,blend.x),mix(surface[nearby(k,corner.x,corner.y+1)].climate.x,surface[nearby(k,corner.x+1,corner.y+1)].climate.x,blend.x),blend.y);
+  if(lightSettings.count>0u){spot=visualSpot(mm,pixel);}
   let lit=bitcast<f32>(view.pad0);let clarity=1./(1.+.11*density);
   let mask=spot*clarity;
   let sunlight=vec3f(255.,232.,185.)/255.;
@@ -184,9 +263,9 @@ fn wallCoverage(pos:vec2f,footprint:vec2f)->f32{
     let edge = length(fract(pos) - .5);
     if (edge < .11) { color = mix(color, select(vec3f(.30, .76, .85), vec3f(.98, .70, .53), surface[k].geometry.y > 0.), .7); }
   }
-  if (abs(vents[k].y) > .001 || state[k].z > 0u) {
+  if (state[k].z > 0u) {
     let disk = 1. - smoothstep(.18,.45,length(fract(pos)-.5));
-    color = mix(color, select(vec3f(.18,.68,.8),vec3f(.95,.67,.81),vents[k].y > 0. || state[k].z > 0u),disk);
+    color = mix(color, select(vec3f(.18,.68,.8),vec3f(.95,.67,.81),state[k].z > 0u),disk);
   }
   if(markers[k].state.x>0.){
     let m=markers[k];let stage=m.state.x;let progress=clamp((view.time*10.-m.state.z)/max(1.,m.state.w-m.state.z),0.,1.);
@@ -200,7 +279,10 @@ fn wallCoverage(pos:vec2f,footprint:vec2f)->f32{
     color=mix(color,vec3f(1.,.98,.93),(1.-smoothstep(0.,radius*.6,d))*flash);
   }
   if (surface[k].geometry.w > .5) { let strength=select(1.,surface[k].geometry.w-2.,surface[k].geometry.w>1.5);let d=length(fract(pos)-.5);color*=mix(1.,.2+.65*smoothstep(0.,.6,d),strength);color+=vec3f(.08,.18,.2)*exp(-pow((d-.42)*25.,2.))*strength;}
-  color=mix(color,wall,wallAmount);
+  let contact=wallCoverage(pos-vec2f(pixel/view.cell,pixel*2./view.cell),footprint)*(1.-wallAmount);
+  color*=1.-contact*.28;
+  let glass=glassMaterial(clamp(pos.y/f32(view.rows),0.,1.));
+  color=mix(color,mix(color,wall,glass.a),wallAmount);
   color=mix(color,vec3f(.949,.957,.937),circleCoverage);
   return vec4f(color, 1.);
 }

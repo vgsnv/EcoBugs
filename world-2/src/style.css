@@ -3,6 +3,6 @@
 
 .stage .gpu-ruler-overlay{position:absolute;pointer-events:none}
 
-/* Original glass rim, outside the physical field and visible when fitted. */
-#world[data-fitted="true"]{outline:9px solid #e8f4f5;box-shadow:0 0 0 10px #ffffffdf,0 4px 12px #1e375a66,inset 0 0 0 1px #edfaff}
+/* Same glass gradient and light/dark edges as the archived cup. */
+.stage .cup-rim{position:absolute;pointer-events:none;overflow:visible;filter:drop-shadow(0 3px 5px #1e375a60)}
 #world[data-fitted="true"][data-shape="circle"]{border-radius:50%}

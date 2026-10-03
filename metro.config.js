@@ -14,8 +14,8 @@ const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
  */
 const config = {
   resolver: {
-    // world/ — отдельный браузерный пакет со своим node_modules, RN-сборке он не нужен.
-    blockList: [/\/world\/.*/],
+    // world-1/ и world-2/ — отдельные браузерные пакеты; RN-сборке они не нужны.
+    blockList: [/\/world-[12]\/.*/],
     resolveRequest: (context, moduleName, platform) => {
       const stripped = moduleName.startsWith('.')
         ? moduleName.replace(/\.(ts|tsx)$/, '')

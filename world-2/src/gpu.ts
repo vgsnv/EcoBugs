@@ -1,3 +1,6 @@
+import { layoutPartitions, layoutForSeed } from './generation/partitions.ts';
+import { dishOf } from './generation/dish.ts';
+import { PARTITION_THICKNESS } from './generation/constants.ts';
 import funnelParticleShader from './funnel-particles.wgsl?raw';
 import funnelParticleDrawing from './funnel-particles-render.wgsl?raw';
 import courantShader from './advection-courant.wgsl?raw';
@@ -21,6 +24,7 @@ import ventsShader from './vents.wgsl?raw';
 import { averagedVents, emittedQuanta } from './vents.ts';
 import physics from './physics.wgsl?raw';
 import drawing from './render.wgsl?raw';
+import { glassShader } from './glass.ts';
 import summaryShader from './summary.wgsl?raw';
 import lightShader from './light.wgsl?raw';
 import velocityShader from './velocity.wgsl?raw';
@@ -56,6 +60,7 @@ export class GpuWorld {
   private courantGroup!:GPUBindGroup;
   private uniform!: GPUBuffer;
   private view!: GPUBuffer;
+  private glassGeometry!: GPUBuffer;
   private geometry!: GPUBuffer;
   private states!: [GPUBuffer, GPUBuffer];
   private pressures!: [GPUBuffer, GPUBuffer];
@@ -193,6 +198,20 @@ export class GpuWorld {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     this.uniform = this.buffer('physics params', 64, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.view = this.buffer('render params', 64, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    // Display geometry uses the actual layout, independent of the collision raster.
+    const glass = new Float32Array(4 + 64 * 4);
+    if(grid.scene==='world' && grid.params){
+      glass[1]=1;
+      for(const part of layoutPartitions(layoutForSeed(grid.params.seed),dishOf(grid.params))){
+        for(let i=1;i<part.points.length;i++){
+          const a=part.points[i-1],b=part.points[i],at=4+glass[0]*4;
+          if(glass[0]>=64)throw new Error('Слишком много отрезков перегородок');
+          glass.set([(a[0]+b[0])/2,(a[1]+b[1])/2,(Math.abs(a[0]-b[0])+PARTITION_THICKNESS)/2,(Math.abs(a[1]-b[1])+PARTITION_THICKNESS)/2],at);
+          glass[0]++;
+        }
+      }
+    }
+    this.glassGeometry=this.buffer('continuous glass geometry',glass,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
     this.geometry = this.buffer('geometry', grid.geometry, storage);
     this.terrain=this.buffer('ground and deposits',grid.terrain??new Uint32Array(n*4),storage);
     this.climate=this.buffer('spot intensity and temperature',n*16,storage);
@@ -244,7 +263,7 @@ export class GpuWorld {
     this.groups = [0, 1].map(s => [0, 1].map(p => d.createBindGroup({ layout, entries:
       [this.uniform, this.geometry, this.states[s], this.states[1 - s], this.pressures[p], this.pressures[1 - p],
         this.flow, this.outgoing, this.carry].map((buffer, binding) => ({ binding, resource: { buffer } })) })));
-    const renderModule = d.createShaderModule({ label: 'surface image', code: drawing });
+    const renderModule = d.createShaderModule({ label: 'surface image', code: drawing.replace('// SHARED_GLASS_MATERIAL', glassShader) });
     const renderErrors=(await renderModule.getCompilationInfo()).messages.filter(message=>message.type==='error');
     if(renderErrors.length)throw new Error(renderErrors.map(message=>`render.wgsl:${message.lineNum}:${message.linePos} ${message.message}`).join('\n'));
     this.render = await d.createRenderPipelineAsync({ layout: 'auto',
@@ -254,10 +273,6 @@ export class GpuWorld {
     this.rippleTexture=d.createTexture({label:'original world ripple',size:[256,256],format:'rgba8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
     d.queue.writeTexture({texture:this.rippleTexture},rippleBytes(),{bytesPerRow:1024},[256,256]);
     const rippleSampler=d.createSampler({addressModeU:'repeat',addressModeV:'repeat',magFilter:'linear',minFilter:'linear'});
-    this.renderGroups = this.states.map(state => [0,1].map(material=>d.createBindGroup({layout:this.render.getBindGroupLayout(0),entries:[
-      ...[this.view,this.surface,state,this.flow,this.field,this.ventField,this.markers,this.terrain,this.material[material]].map((buffer,binding)=>({binding,resource:{buffer}})),
-      {binding:9,resource:this.rippleTexture!.createView()},{binding:10,resource:rippleSampler}
-    ]})));
     this.summaries = this.buffer('partial summary', Math.ceil(n / 64) * 48, storage);
     this.summaryPipeline = await d.createComputePipelineAsync({ layout: 'auto', compute: {
       module: d.createShaderModule({ label: 'diagnostic reduction', code: summaryShader }), entryPoint: 'summarize' } });
@@ -289,6 +304,7 @@ export class GpuWorld {
       module: d.createShaderModule({code: velocityShader}), entryPoint: 'velocity' } });
     this.velocityGroups = this.pressures.map(pressure => d.createBindGroup({ layout: this.velocityPipeline.getBindGroupLayout(0), entries:
       [this.uniform, this.geometry, pressure, this.flow, this.field, this.ventField].map((buffer, binding) => ({binding, resource: {buffer}})) }));
+    let visualBlobs!:GPUBuffer,visualIndex!:GPUBuffer;
     if (grid.light) {
       const regions = Math.max(...grid.components) + 1;
       this.lightParams = this.buffer('light parameters', 112, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
@@ -298,6 +314,7 @@ export class GpuWorld {
       let reach=1;for(const spot of grid.lightMap?.spots??[])for(const b of spot.blobs)reach=Math.max(reach,b.radius*Math.sqrt(b.aspect)*1.14*1.35);
       this.lightIndexSize=[Math.max(1,Math.min(512,Math.floor(grid.width*2/reach))),Math.max(1,Math.min(512,Math.floor(grid.height*2/reach)))];
       const blobs=this.buffer('indexed light blobs',encoded.length?new Float32Array(encoded):new Float32Array(40),storage),index=this.buffer('light spatial index',this.lightIndexSize[0]*this.lightIndexSize[1]*4,storage);
+      visualBlobs=blobs;visualIndex=index;
       const lightLayout = d.createBindGroupLayout({entries: [
         {binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: {type: 'uniform'}},
         ...[1,2,3,4,5,6,7].map(binding => ({binding, visibility: GPUShaderStage.COMPUTE, buffer: {type: binding === 2 ? 'read-only-storage' as const : 'storage' as const}}))]});
@@ -306,6 +323,16 @@ export class GpuWorld {
       for (const entryPoint of ['clearIndex','prepareBlobs','illuminate', 'average', 'entrain', 'sources']) this.lightPipelines[entryPoint] = await d.createComputePipelineAsync({layout: pipelineLayout, compute: {module, entryPoint}});
       this.lightGroup = d.createBindGroup({layout: lightLayout, entries: [this.lightParams, this.geometry, areas, this.field, means,blobs,this.climate,index].map((buffer, binding) => ({binding, resource: {buffer}}))});
     }
+    if(!grid.light){
+      this.lightParams=this.buffer('visual light parameters',112,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
+      visualBlobs=this.buffer('visual light placeholder',160,storage);
+      visualIndex=this.buffer('visual light index placeholder',new Uint32Array([0xffffffff]),storage);
+    }
+    // Eight storage bindings: reuse the prepared spatial index instead of adding a light raster pass.
+    this.renderGroups=this.states.map(state=>[0,1].map(material=>d.createBindGroup({layout:this.render.getBindGroupLayout(0),entries:[
+      ...[this.view,this.surface,state,this.flow,visualBlobs,visualIndex,this.markers,this.terrain,this.material[material]].map((buffer,binding)=>({binding,resource:{buffer}})),
+      {binding:9,resource:this.rippleTexture!.createView()},{binding:10,resource:rippleSampler},{binding:11,resource:{buffer:this.lightParams}},{binding:12,resource:{buffer:this.glassGeometry}}
+    ]})));
     if (grid.vents) {
       const settings = new ArrayBuffer(32); new Uint32Array(settings).set([grid.cols, grid.rows, grid.vents.length]);
       new Float32Array(settings).set([grid.cell, grid.pushLength ?? 200, 1.6, 0],4);
@@ -627,7 +654,7 @@ export class GpuWorld {
     f.set([camera.x,camera.y,camera.zoom,camera.layer],12);
     u[0] = this.grid.cols; u[1] = this.grid.rows; f[2] = this.grid.cell; f[3] = this.step * .1;
     // Preserve the 64-byte checkpoint layout. Render flags pack CSS width and heat; pad0 holds visual sun tone.
-    f[7]=effectTime;u[4] = (Math.min(32767,Math.round(canvas.clientWidth))<<1)|Number(arrows)|(Math.round(Math.min(1,(this.grid.params?.spotHeat??1)/2)*255)<<16); u[5] = ((this.grid.params?.seed??1)<<1)|Number(this.grid.scene === 'burst'); const sun=(this.grid.params?.sun??this.grid.light?.sun??1)*(this.grid.lightMap?sunRhythmAt(this.grid.lightMap,this.step):1);f[6]=this.grid.light?(1-Math.exp(-1.1*sun))/(1-Math.exp(-1.1)):0;f[8]=this.grid.quantum??.001;f[9]=this.grid.referenceDensity??(5/75);f[10]=Number(this.grid.scene==='world');f[11]=Number(this.grid.shape==='circle');
+    f[7]=effectTime;u[4] = (Math.min(32767,Math.round(canvas.clientWidth))<<1)|Number(arrows)|(Math.round(Math.min(1,(this.grid.params?.spotHeat??1)/2)*255)<<16); if(!target)u[4]|=0x80000000; u[5] = ((this.grid.params?.seed??1)<<1)|Number(this.grid.scene === 'burst'); const sun=(this.grid.params?.sun??this.grid.light?.sun??1)*(this.grid.lightMap?sunRhythmAt(this.grid.lightMap,this.step):1);f[6]=this.grid.light?(1-Math.exp(-1.1*sun))/(1-Math.exp(-1.1)):0;f[8]=this.grid.quantum??.001;f[9]=this.grid.referenceDensity??(5/75);f[10]=Number(this.grid.scene==='world');f[11]=Number(this.grid.shape==='circle');
     this.device.queue.writeBuffer(this.view, 0, data);
     const encoder = this.device.createCommandEncoder();
     {const pack=encoder.beginComputePass();pack.setPipeline(this.surfacePipeline);pack.setBindGroup(0,this.surfaceGroup);pack.dispatchWorkgroups(Math.ceil(this.grid.cols*this.grid.rows/64));pack.end();}
