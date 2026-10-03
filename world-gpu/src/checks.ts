@@ -14,8 +14,9 @@ export function diagnose(grid: Grid, shot: Snapshot) {
     if (y + 1 < grid.rows) balance += shot.flow[k * 2 + 1];
     if (x > 0) balance -= shot.flow[(k - 1) * 2];
     if (y > 0) balance -= shot.flow[(k - grid.cols) * 2 + 1];
-    residual += (balance - grid.geometry[k * 4 + 1]) ** 2;
-    sourceNorm += grid.geometry[k * 4 + 1] ** 2;
+    const source = grid.light ? shot.field[k * 4 + 3] : grid.geometry[k * 4 + 1];
+    residual += (balance - source) ** 2;
+    sourceNorm += source ** 2;
   }
   total = dissolved + captured + reserved;
   return { step: shot.step, total, dissolved, captured, reserved, massError: total - grid.total, leak,
