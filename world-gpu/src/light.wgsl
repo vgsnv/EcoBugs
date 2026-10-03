@@ -1,6 +1,6 @@
 struct Settings { cols: u32, rows: u32, regions: u32, pad: u32,
   time: f32, drift: f32, sun: f32, background: f32,
-  rhythm: f32, contrast: f32, entrainment: f32, pad2: f32, world:vec4f, offset:vec4f, cycle:vec4f }
+  rhythm: f32, contrast: f32, entrainment: f32, pad2: f32, world:vec4f, offset:vec4f, cycle:vec4f, spatial:vec4f }
 @group(0) @binding(0) var<uniform> cfg: Settings;
 @group(0) @binding(1) var<storage, read_write> geo: array<vec4f>;
 @group(0) @binding(2) var<storage, read> areas: array<i32>;
@@ -8,25 +8,37 @@ struct Settings { cols: u32, rows: u32, regions: u32, pad: u32,
 @group(0) @binding(3) var<storage, read_write> field: array<vec4f>;
 @group(0) @binding(4) var<storage, read_write> means: array<f32>;
 
-struct Blob{a:vec4f,b:vec4f,c:vec4f,d:vec4f,e:vec4f,f:vec4f}
 struct Ellipse{a:vec4f,b:vec4f,c:vec4f}
-@group(0) @binding(5) var<storage,read> blobs:array<Blob>;
+struct Blob{a:vec4f,b:vec4f,c:vec4f,d:vec4f,e:vec4f,f:vec4f,ellipse:Ellipse,next:u32,pad0:u32,pad1:u32,pad2:u32}
+@group(0) @binding(5) var<storage,read_write> blobs:array<Blob>;
 @group(0) @binding(6) var<storage,read_write> climate:array<vec4f>;
-@group(0) @binding(7) var<storage,read_write> ellipses:array<Ellipse>;
+@group(0) @binding(7) var<storage,read_write> heads:array<atomic<u32>>;
+@compute @workgroup_size(64) fn clearIndex(@builtin(global_invocation_id) id:vec3u){if(id.x<u32(cfg.spatial.x*cfg.spatial.y)){atomicStore(&heads[id.x],0xffffffffu);}}
 @compute @workgroup_size(64) fn prepareBlobs(@builtin(global_invocation_id) id:vec3u){
  let k=id.x;if(k>=cfg.pad){return;}let b=blobs[k];let t=cfg.time*10.;
  let center=b.a.xy+b.b.zw*t+vec2f(b.c.x*sin(b.c.y*t+b.c.z),b.c.w*sin(b.d.x*t+b.d.y))+cfg.offset.xy;
  let radius=b.a.z*(.775+.225*sin(b.d.z*t+b.d.w));let aspect=sqrt(b.a.w);let angle=b.b.x+b.b.y*t;
- ellipses[k]=Ellipse(vec4f(center,1./(radius*aspect),aspect/radius),vec4f(cos(angle),sin(angle),b.e.y+b.e.z*t,b.f.x+b.f.y*t),vec4f(b.e.x,b.e.w,radius*aspect*1.14*1.35,0.));
+ blobs[k].ellipse=Ellipse(vec4f(center,1./(radius*aspect),aspect/radius),vec4f(cos(angle),sin(angle),b.e.y+b.e.z*t,b.f.x+b.f.y*t),vec4f(b.e.x,b.e.w,radius*aspect*1.14*1.35,0.));
+ let period=cfg.world.xy*2.;let wrapped=center-floor(center/period)*period;let bin=vec2u(wrapped/period*cfg.spatial.xy);
+ blobs[k].next=atomicExchange(&heads[bin.y*u32(cfg.spatial.x)+bin.x],k);
 }
 fn generatedSpot(pos:vec2f)->f32{
- var intensity=0.;let period=cfg.world.xy*2.;
- for(var i=0u;i<cfg.pad;i++){
-  let e=ellipses[i];var delta=pos-e.a.xy;delta-=round(delta/period)*period;
-  if(abs(delta.x)>e.c.z||abs(delta.y)>e.c.z){continue;}
-  let uv=vec2f(dot(delta,e.b.xy)*e.a.z,dot(delta,vec2f(-e.b.y,e.b.x))*e.a.w);
-  let angle=atan2(uv.y,uv.x);let boundary=1.+e.c.x*sin(3.*angle+e.b.z)+e.c.y*sin(5.*angle+e.b.w);
-  intensity=max(intensity,1.-smoothstep(boundary,boundary*1.35,length(uv)));
+ var intensity=0.;let period=cfg.world.xy*2.;let size=vec2i(cfg.spatial.xy);
+ let wrapped=pos-floor(pos/period)*period;let center=vec2i(wrapped/period*cfg.spatial.xy);
+ // Bin width is at least the maximum possible reach of any blob.
+ for(var dy=-min(1,size.y-1);dy<=min(1,size.y-1);dy++){
+  for(var dx=-min(1,size.x-1);dx<=min(1,size.x-1);dx++){
+   let bin=(center+vec2i(dx,dy)+size)%size;
+   var i=atomicLoad(&heads[u32(bin.y*size.x+bin.x)]);
+   loop {
+    if(i==0xffffffffu){break;}let e=blobs[i].ellipse;i=blobs[i].next;
+    var delta=pos-e.a.xy;delta-=round(delta/period)*period;
+    if(abs(delta.x)>e.c.z||abs(delta.y)>e.c.z){continue;}
+    let uv=vec2f(dot(delta,e.b.xy)*e.a.z,dot(delta,vec2f(-e.b.y,e.b.x))*e.a.w);
+    let angle=atan2(uv.y,uv.x);let boundary=1.+e.c.x*sin(3.*angle+e.b.z)+e.c.y*sin(5.*angle+e.b.w);
+    intensity=max(intensity,1.-smoothstep(boundary,boundary*1.35,length(uv)));
+   }
+  }
  }
  return intensity;
 }

@@ -29,11 +29,25 @@ fn weight(pos:vec2f,center:vec2f,radius:f32,angle:f32,band:f32)->f32{
  let k=id.x;if(k>=cfg.cols*cfg.rows){return;}let down=min(terrain[k].x,orders[k].y);
  if(down>0u){let drowned=terrain[k].y;terrain[k].x-=down;terrain[k].y=0u;atomicAdd(&depths[0],down+drowned);}
 }
-@compute @workgroup_size(1) fn raise(){
- var total=0u;for(var k=0u;k<cfg.cols*cfg.rows;k++){total+=orders[k].x;}
- let budget=min(total,atomicLoad(&depths[0]));if(budget==0u){return;}atomicSub(&depths[0],budget);
- var cumulative=0u;var assigned=0u;
- for(var k=0u;k<cfg.cols*cfg.rows;k++){
+// Exact integer prefixes in blocks: reserve once, allocate in parallel without atomics
+// competing for the shared stock. Cumulative rounding matches the serial rule.
+@group(0) @binding(7) var<storage,read_write> groups:array<vec2u>;
+@compute @workgroup_size(64) fn totals(@builtin(global_invocation_id) id:vec3u){
+ let g=id.x;let count=(cfg.cols*cfg.rows+63u)/64u;if(g>=count){return;}
+ var sum=0u;for(var k=g*64u;k<min((g+1u)*64u,cfg.cols*cfg.rows);k++){sum+=orders[k].x;}
+ groups[g]=vec2u(sum,0u);
+}
+@compute @workgroup_size(1) fn reserveRaise(){
+ let count=(cfg.cols*cfg.rows+63u)/64u;var total=0u;
+ for(var g=0u;g<count;g++){groups[g].y=total;total+=groups[g].x;}
+ let budget=min(total,atomicLoad(&depths[0]));atomicSub(&depths[0],budget);groups[count]=vec2u(total,budget);
+}
+@compute @workgroup_size(64) fn allocate(@builtin(global_invocation_id) id:vec3u){
+ let g=id.x;let count=(cfg.cols*cfg.rows+63u)/64u;if(g>=count){return;}
+ let total=groups[count].x;let budget=groups[count].y;if(budget==0u){return;}
+ var cumulative=groups[g].y;
+ var assigned=select(min(budget,u32(floor(f32(budget)*f32(cumulative)/f32(total)))),budget,cumulative==total);
+ for(var k=g*64u;k<min((g+1u)*64u,cfg.cols*cfg.rows);k++){
   cumulative+=orders[k].x;let allocation=select(min(budget,u32(floor(f32(budget)*f32(cumulative)/f32(total)))),budget,cumulative==total);
   terrain[k].x+=allocation-assigned;assigned=allocation;
  }

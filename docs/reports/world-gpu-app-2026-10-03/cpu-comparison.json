@@ -1,0 +1,30 @@
+{
+  "runtime": "v24.11.1",
+  "notes": "Node CPU vs browser GPU: preliminary throughput comparison; different update frequency and algorithms, not equal numerical quality.",
+  "results": [
+    {
+      "trial": 1,
+      "modelSteps": 1500,
+      "ms": 183.59970800000008,
+      "stepsPerSecond": 8169.947634121506,
+      "cells": 30000,
+      "mineralPeriod": 100
+    },
+    {
+      "trial": 2,
+      "modelSteps": 1500,
+      "ms": 146.07129099999997,
+      "stepsPerSecond": 10268.958326657086,
+      "cells": 30000,
+      "mineralPeriod": 100
+    },
+    {
+      "trial": 3,
+      "modelSteps": 1500,
+      "ms": 144.46716700000002,
+      "stepsPerSecond": 10382.98203771103,
+      "cells": 30000,
+      "mineralPeriod": 100
+    }
+  ]
+}

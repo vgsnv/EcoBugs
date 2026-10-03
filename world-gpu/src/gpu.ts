@@ -1,3 +1,9 @@
+import funnelParticleShader from './funnel-particles.wgsl?raw';
+import funnelParticleDrawing from './funnel-particles-render.wgsl?raw';
+import surfaceShader from './surface.wgsl?raw';
+import observationShader from './observe.wgsl?raw';
+import materialShader from './material.wgsl?raw';
+import type { Checkpoint } from './checkpoint.ts';
 import { lightOffset, lightDriftVelocity } from './generation/light.ts';
 import funnelShader from './funnels.wgsl?raw';
 import { Funnels } from './funnels.ts';
@@ -27,6 +33,18 @@ export class GpuWorld {
   readonly adapter: GPUAdapter;
   readonly context: GPUCanvasContext;
   readonly canvas: HTMLCanvasElement;
+  private observation!:GPUBuffer;
+  private observations!:GPUBuffer;
+  private observePipeline!:GPUComputePipeline;
+  private observeGroup!:GPUBindGroup;
+  private surface!:GPUBuffer;
+  private surfacePipeline!:GPUComputePipeline;
+  private surfaceGroup!:GPUBindGroup;
+  private material!:[GPUBuffer,GPUBuffer];
+  private materialPipeline!:GPUComputePipeline;
+  private materialGroups!:GPUBindGroup[];
+  private profiling:GPUQuerySet|null=null;
+  private lastEncodingMs=0;
   private uniform!: GPUBuffer;
   private view!: GPUBuffer;
   private geometry!: GPUBuffer;
@@ -36,16 +54,18 @@ export class GpuWorld {
   private outgoing!: GPUBuffer;
   private carry!: GPUBuffer;
   private buffers: GPUBuffer[] = [];
+
   private compute!: Record<string, GPUComputePipeline>;
   private render!: GPURenderPipeline;
   private groups!: GPUBindGroup[][];
-  private renderGroups!: GPUBindGroup[];
+  private renderGroups!: GPUBindGroup[][];
   private summaries!: GPUBuffer;
   private summaryPipeline!: GPUComputePipeline;
   private summaryGroups!: GPUBindGroup[];
   private sor!: [GPUComputePipeline, GPUComputePipeline];
   private climate!:GPUBuffer;
   private field!: GPUBuffer;
+  private lightIndexSize=[1,1];
   private lightParams!: GPUBuffer;
   private lightPipelines!: Record<string, GPUComputePipeline>;
   private lightGroup!: GPUBindGroup;
@@ -56,10 +76,20 @@ export class GpuWorld {
   private ventPipelines!: GPUComputePipeline[];
   private ventGroup!: GPUBindGroup;
   funnels:Funnels|null=null;
+  private funnelParticleParams!:GPUBuffer;
+  private funnelParticleObjects!:GPUBuffer;
+  private funnelParticles!:GPUBuffer;
+  private funnelParticlePipeline!:GPUComputePipeline;
+  private funnelParticleGroup!:GPUBindGroup;
+  private funnelParticleRender!:GPURenderPipeline;
+  private funnelParticleRenderGroup!:GPUBindGroup;
+  private funnelParticleCapacity=0;
   private funnelMask!:GPUBuffer;
   private funnelPipelines!:GPUComputePipeline[];
   private funnelGroups!:GPUBindGroup[];
   geology:Geology|null=null;
+  private geologyOrders!:GPUBuffer;
+  private geologyResidues!:GPUBuffer;
   private geologyParams!:GPUBuffer;
   private geologyEvents!:GPUBuffer;
   private geologyGroup!:GPUBindGroup;
@@ -73,6 +103,7 @@ export class GpuWorld {
   private sourceGroups!: GPUBindGroup[];
   private markers!: GPUBuffer;
   private markerCells:number[]=[];
+  private visualBursts=new Map<number,{signature:string;start:number}>();
   private sourceUpdateStep=-1;
   sources:Sources|null=null;
   private packets!: GPUBuffer;
@@ -108,13 +139,13 @@ export class GpuWorld {
     if (!navigator.gpu) throw new Error('Этот браузер не предоставляет WebGPU. Откройте прототип в браузере с WebGPU.');
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) throw new Error('WebGPU доступен, но GPU-адаптер не найден.');
-    const device = await adapter.requestDevice();
+    const device = await adapter.requestDevice({requiredFeatures:adapter.features.has('timestamp-query')?['timestamp-query']:[]});
     return new GpuWorld(canvas, adapter, device);
   }
 
   private buffer(label: string, data: ArrayBufferView | number, usage: number): GPUBuffer {
     const size = typeof data === 'number' ? data : data.byteLength;
-    const b = this.device.createBuffer({ label, size, usage }); this.buffers.push(b);
+    const b = this.device.createBuffer({label,size,usage:usage|GPUBufferUsage.COPY_SRC}); this.buffers.push(b);
     if (typeof data !== 'number') this.device.queue.writeBuffer(b, 0, data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
     return b;
   }
@@ -145,27 +176,40 @@ export class GpuWorld {
     }
     await this.device.queue.onSubmittedWorkDone();
     for (const b of this.buffers) b.destroy(); this.buffers = [];
-    this.grid = grid;this.funnels=grid.funnels?new Funnels(grid.funnels,grid.cols,grid.rows,grid.cell,grid.geometry):null;this.geology=grid.geology?new Geology(grid.geology,grid.width,grid.height):null; this.sources=grid.sources?new Sources(grid.sources):null;this.sourceUpdateStep=-1;this.markerCells=[]; this.step = 0; this.current = 0; this.pressureIndex = 0;
+    this.grid = grid;this.funnels=grid.funnels?new Funnels(grid.funnels,grid.cols,grid.rows,grid.cell,grid.geometry):null;this.geology=grid.geology?new Geology(grid.geology,grid.width,grid.height):null; this.sources=grid.sources?new Sources(grid.sources):null;this.sourceUpdateStep=-1;this.markerCells=[];this.visualBursts.clear(); this.step = 0; this.current = 0; this.pressureIndex = 0;
     const d = this.device, n = grid.cols * grid.rows;
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     this.uniform = this.buffer('physics params', 64, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-    this.view = this.buffer('render params', 48, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    this.view = this.buffer('render params', 64, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.geometry = this.buffer('geometry', grid.geometry, storage);
     this.terrain=this.buffer('ground and deposits',grid.terrain??new Uint32Array(n*4),storage);
     this.climate=this.buffer('spot intensity and temperature',n*16,storage);
     this.field = this.buffer('physical light field', n * 16, storage);
     this.common=this.buffer('shared underground',new Uint32Array([grid.underground??0,0,0,0]),storage);
     this.funnelMask=this.buffer('funnel influence',n*16,storage);
-    this.markers=this.buffer('volcano markers',n*16,storage);
+    this.markers=this.buffer('volcano markers',n*32,storage);
     this.packets = this.buffer('ballistic packets', (grid.ballistics?.capacity ?? 1) * 64, storage);
     this.landing = this.buffer('atomic landings', n * 8, storage);
     this.flightLedger = this.buffer('flight ledger', 16, storage);
+    this.observation=this.buffer('observation counters',16,storage);
+    this.observations=this.buffer('observation statistics',48,storage);
     this.ventField = this.buffer('screened push field', n * 16, storage);
     this.ventMilliseconds = 0;
     this.previousVentRates = null;
+    const material=Float32Array.from({length:n*4},(_,i)=>i%2===0?(Math.floor(i/4)%grid.cols+.5):(Math.floor(Math.floor(i/4)/grid.cols)+.5));
+    this.material=[this.buffer('material A',material,storage),this.buffer('material B',material,storage)];
+    const materialModule=d.createShaderModule({code:materialShader});
+    this.materialPipeline=await d.createComputePipelineAsync({layout:'auto',compute:{module:materialModule,entryPoint:'advect'}});
     this.states = [this.buffer('state A', grid.state, storage), this.buffer('state B', grid.state, storage)];
     this.pressures = [this.buffer('pressure A', n * 4, storage), this.buffer('pressure B', n * 4, storage)];
     this.flow = this.buffer('face velocities', n * 8, storage);
+    this.surface=this.buffer('render surface climate',n*32,storage);
+    this.surfacePipeline=await d.createComputePipelineAsync({layout:'auto',compute:{module:d.createShaderModule({code:surfaceShader}),entryPoint:'pack'}});
+    this.surfaceGroup=d.createBindGroup({layout:this.surfacePipeline.getBindGroupLayout(0),entries:[this.uniform,this.geometry,this.climate,this.surface].map((buffer,binding)=>({binding,resource:{buffer}}))});
+    this.materialGroups=[0,1].map(i=>d.createBindGroup({layout:this.materialPipeline.getBindGroupLayout(0),entries:[this.uniform,this.geometry,this.flow,this.material[i],this.material[1-i]].map((buffer,binding)=>({binding,resource:{buffer}}))}));
+    this.observePipeline=await d.createComputePipelineAsync({layout:'auto',compute:{module:d.createShaderModule({code:observationShader}),entryPoint:'observe'}});
+    this.observeGroup=d.createBindGroup({layout:this.observePipeline.getBindGroupLayout(0),entries:[this.uniform,this.geometry,this.flow,this.observation,this.observations].map((buffer,binding)=>({binding,resource:{buffer}}))});
+
     this.outgoing = this.buffer('integer transfers', n * 16, storage);
     this.carry = this.buffer('fractional transfer residues', n * 16, storage);
     d.pushErrorScope('validation');
@@ -190,8 +234,8 @@ export class GpuWorld {
       vertex: { module: renderModule, entryPoint: 'vertex' },
       fragment: { module: renderModule, entryPoint: 'fragment', targets: [{ format: navigator.gpu.getPreferredCanvasFormat() }] },
     });
-    this.renderGroups = this.states.map(state => d.createBindGroup({ layout: this.render.getBindGroupLayout(0), entries:
-      [this.view, this.geometry, state, this.flow, this.field, this.ventField, this.markers,this.terrain].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+    this.renderGroups = this.states.map(state => [0,1].map(material=>d.createBindGroup({ layout: this.render.getBindGroupLayout(0), entries:
+      [this.view, this.surface, state, this.flow, this.field, this.ventField, this.markers,this.terrain,this.material[material]].map((buffer, binding) => ({ binding, resource: { buffer } })) })));
     this.summaries = this.buffer('partial summary', Math.ceil(n / 64) * 48, storage);
     this.summaryPipeline = await d.createComputePipelineAsync({ layout: 'auto', compute: {
       module: d.createShaderModule({ label: 'diagnostic reduction', code: summaryShader }), entryPoint: 'summarize' } });
@@ -206,7 +250,7 @@ export class GpuWorld {
     const sorPipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [sorLayout] });
     this.sor = await Promise.all(['red', 'black'].map(entryPoint => d.createComputePipelineAsync({
       layout: sorPipelineLayout, compute: { module: sorModule, entryPoint } }))) as [GPUComputePipeline, GPUComputePipeline];
-    const sorData = new ArrayBuffer(16); new Uint32Array(sorData).set([grid.cols, grid.rows]); new Float32Array(sorData)[2] = grid.light ? 1.6 : 1.95;
+    const sorData = new ArrayBuffer(16); new Uint32Array(sorData).set([grid.cols, grid.rows]); new Float32Array(sorData)[2] = grid.scene==='world'?1.95:grid.light ? 1.6 : 1.95;
     const sorParams = this.buffer('SOR dimensions', new Uint8Array(sorData), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.sorGroup = d.createBindGroup({ layout: sorLayout, entries: [sorParams, this.geometry, this.pressures[0]]
       .map((buffer, binding) => ({ binding, resource: { buffer } })) });
@@ -216,18 +260,20 @@ export class GpuWorld {
       [this.uniform, this.geometry, pressure, this.flow, this.field, this.ventField].map((buffer, binding) => ({binding, resource: {buffer}})) }));
     if (grid.light) {
       const regions = Math.max(...grid.components) + 1;
-      this.lightParams = this.buffer('light parameters', 96, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+      this.lightParams = this.buffer('light parameters', 112, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
       const areas = this.buffer('closed regions', grid.components, storage);
       const means = this.buffer('mean light per region', regions * 4, storage);
-      const encoded:number[]=[];for(const spot of grid.lightMap?.spots??[])for(const b of spot.blobs)encoded.push(spot.x0,spot.y0,b.radius,b.aspect,b.a0,b.wa,spot.vx,spot.vy,b.ax,b.wx,b.px,b.ay,b.wy,b.py,b.wr,b.pr,b.e3,b.p3,b.w3,b.e5,b.p5,b.w5,0,0);
-      const blobs=this.buffer('seeded light blobs',encoded.length?new Float32Array(encoded):new Float32Array(24),storage),ellipses=this.buffer('current light ellipses',Math.max(1,encoded.length/24)*48,storage);
+      const encoded:number[]=[];for(const spot of grid.lightMap?.spots??[])for(const b of spot.blobs)encoded.push(spot.x0,spot.y0,b.radius,b.aspect,b.a0,b.wa,spot.vx,spot.vy,b.ax,b.wx,b.px,b.ay,b.wy,b.py,b.wr,b.pr,b.e3,b.p3,b.w3,b.e5,b.p5,b.w5,0,0,...new Array(16).fill(0));
+      let reach=1;for(const spot of grid.lightMap?.spots??[])for(const b of spot.blobs)reach=Math.max(reach,b.radius*Math.sqrt(b.aspect)*1.14*1.35);
+      this.lightIndexSize=[Math.max(1,Math.min(512,Math.floor(grid.width*2/reach))),Math.max(1,Math.min(512,Math.floor(grid.height*2/reach)))];
+      const blobs=this.buffer('indexed light blobs',encoded.length?new Float32Array(encoded):new Float32Array(40),storage),index=this.buffer('light spatial index',this.lightIndexSize[0]*this.lightIndexSize[1]*4,storage);
       const lightLayout = d.createBindGroupLayout({entries: [
         {binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: {type: 'uniform'}},
-        ...[1,2,3,4,5,6,7].map(binding => ({binding, visibility: GPUShaderStage.COMPUTE, buffer: {type: binding === 2 || binding===5 ? 'read-only-storage' as const : 'storage' as const}}))]});
+        ...[1,2,3,4,5,6,7].map(binding => ({binding, visibility: GPUShaderStage.COMPUTE, buffer: {type: binding === 2 ? 'read-only-storage' as const : 'storage' as const}}))]});
       const pipelineLayout = d.createPipelineLayout({bindGroupLayouts: [lightLayout]});
       const module = d.createShaderModule({code: lightShader}); this.lightPipelines = {};
-      for (const entryPoint of ['prepareBlobs','illuminate', 'average', 'entrain', 'sources']) this.lightPipelines[entryPoint] = await d.createComputePipelineAsync({layout: pipelineLayout, compute: {module, entryPoint}});
-      this.lightGroup = d.createBindGroup({layout: lightLayout, entries: [this.lightParams, this.geometry, areas, this.field, means,blobs,this.climate,ellipses].map((buffer, binding) => ({binding, resource: {buffer}}))});
+      for (const entryPoint of ['clearIndex','prepareBlobs','illuminate', 'average', 'entrain', 'sources']) this.lightPipelines[entryPoint] = await d.createComputePipelineAsync({layout: pipelineLayout, compute: {module, entryPoint}});
+      this.lightGroup = d.createBindGroup({layout: lightLayout, entries: [this.lightParams, this.geometry, areas, this.field, means,blobs,this.climate,index].map((buffer, binding) => ({binding, resource: {buffer}}))});
     }
     if (grid.vents) {
       const settings = new ArrayBuffer(32); new Uint32Array(settings).set([grid.cols, grid.rows, grid.vents.length]);
@@ -244,11 +290,11 @@ export class GpuWorld {
     }
     if(grid.sources||grid.funnels){
       this.sourceParams=this.buffer('underground exchange parameters',32,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
-      const layout=d.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},...[1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage' as const}}))]});
+      const layout=d.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},...[1,2,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage' as const}}))]});
       const module=d.createShaderModule({code:reservoirShader}),pipelineLayout=d.createPipelineLayout({bindGroupLayouts:[layout]});
       const compilation=await module.getCompilationInfo();const failures=compilation.messages.filter(m=>m.type==='error');if(failures.length)throw new Error(failures.map(m=>`Недра ${m.lineNum}: ${m.message}`).join('\n'));
       this.sourcePipelines=[];for(const entryPoint of ['reserve','effuse','collect'])this.sourcePipelines.push(await d.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}}));
-      this.sourceGroups=this.states.map(state=>d.createBindGroup({layout,entries:[this.sourceParams,this.common,state].map((buffer,binding)=>({binding,resource:{buffer}}))}));
+      this.sourceGroups=this.states.map(state=>d.createBindGroup({layout,entries:[this.sourceParams,this.common,state,this.observation].map((buffer,binding)=>({binding,resource:{buffer}}))}));
     }
     if(grid.mineral){
       const settings=new ArrayBuffer(80);new Uint32Array(settings).set([grid.cols,grid.rows]);new Uint32Array(settings)[8]=Math.round(grid.cell*grid.cell*(grid.mineral.full?30:.02)/(grid.quantum??.001));
@@ -264,13 +310,24 @@ export class GpuWorld {
     }
     if(grid.geology){
       this.geologyParams=this.buffer('geology parameters',48,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);this.geologyEvents=this.buffer('geology events',16*48,storage);
-      const orders=this.buffer('geology requests',n*8,storage),residues=this.buffer('geology residues',n*8,storage);
-      const layout=d.createBindGroupLayout({entries:Array.from({length:7},(_,binding)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0?'uniform':[1,2].includes(binding)?'read-only-storage':'storage'}}))});
+      const orders=this.geologyOrders=this.buffer('geology requests',n*8,storage),residues=this.geologyResidues=this.buffer('geology residues',n*8,storage);
+      const blockTotals=this.buffer('geology block prefixes',(Math.ceil(n/64)+1)*8,storage);
+      const layout=d.createBindGroupLayout({entries:Array.from({length:8},(_,binding)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0?'uniform':[1,2].includes(binding)?'read-only-storage':'storage'}}))});
       const module=d.createShaderModule({code:geologyShader}),pipelineLayout=d.createPipelineLayout({bindGroupLayouts:[layout]});const compilation=await module.getCompilationInfo();const failures=compilation.messages.filter(m=>m.type==='error');if(failures.length)throw new Error(failures.map(m=>`Подвижки ${m.lineNum}: ${m.message}`).join('\n'));
-      this.geologyPipelines=[];for(const entryPoint of ['request','lower','raise'])this.geologyPipelines.push(await d.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}}));
-      this.geologyGroup=d.createBindGroup({layout,entries:[this.geologyParams,this.geometry,this.geologyEvents,this.terrain,this.common,orders,residues].map((buffer,binding)=>({binding,resource:{buffer}}))});
+      this.geologyPipelines=[];for(const entryPoint of ['request','lower','totals','reserveRaise','allocate'])this.geologyPipelines.push(await d.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}}));
+      this.geologyGroup=d.createBindGroup({layout,entries:[this.geologyParams,this.geometry,this.geologyEvents,this.terrain,this.common,orders,residues,blockTotals].map((buffer,binding)=>({binding,resource:{buffer}}))});
     }
     if(grid.funnels){
+      this.funnelParticleCapacity=Math.min(n,Math.ceil(grid.width*grid.height/(grid.funnels.minimumArea??1920))+1);
+      this.funnelParticleParams=this.buffer('funnel particle parameters',32,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
+      this.funnelParticleObjects=this.buffer('funnel particle emitters',this.funnelParticleCapacity*16,storage);
+      this.funnelParticles=this.buffer('funnel visual particles',this.funnelParticleCapacity*40*32,storage);
+      const particleModule=d.createShaderModule({code:funnelParticleShader});
+      this.funnelParticlePipeline=await d.createComputePipelineAsync({layout:'auto',compute:{module:particleModule,entryPoint:'advect'}});
+      this.funnelParticleGroup=d.createBindGroup({layout:this.funnelParticlePipeline.getBindGroupLayout(0),entries:[this.funnelParticleParams,this.geometry,this.flow,this.funnelParticleObjects,this.funnelParticles].map((buffer,binding)=>({binding,resource:{buffer}}))});
+      const particleDrawing=d.createShaderModule({code:funnelParticleDrawing});
+      this.funnelParticleRender=await d.createRenderPipelineAsync({layout:'auto',vertex:{module:particleDrawing,entryPoint:'vertex'},fragment:{module:particleDrawing,entryPoint:'fragment',targets:[{format:navigator.gpu.getPreferredCanvasFormat(),blend:{color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha',operation:'add'},alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha',operation:'add'}}}]}});
+      this.funnelParticleRenderGroup=d.createBindGroup({layout:this.funnelParticleRender.getBindGroupLayout(0),entries:[this.view,this.funnelParticles].map((buffer,binding)=>({binding,resource:{buffer}}))});
       const data=new ArrayBuffer(32);new Uint32Array(data).set([grid.cols,grid.rows,this.funnels!.shape,0]);new Float32Array(data)[4]=grid.mineral?.speed??1;
       const params=this.buffer('funnel parameters',new Uint8Array(data),GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
       const layout=d.createBindGroupLayout({entries:Array.from({length:5},(_,binding)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0?'uniform':binding===4?'read-only-storage':'storage'}}))});
@@ -282,14 +339,14 @@ export class GpuWorld {
     this.flightRenderGroup = d.createBindGroup({layout:this.flightRender.getBindGroupLayout(0),entries:[this.view,this.packets].map((buffer,binding)=>({binding,resource:{buffer}}))});
     if (grid.ballistics) {
       this.flightParams = this.buffer('ballistic parameters',64,GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-      const layout=d.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},...[1,2,3,4,5,6].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:[1,5].includes(binding)?'read-only-storage' as const:'storage' as const}}))]});
+      const layout=d.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},...[1,2,3,4,5,6,7].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:[1,5].includes(binding)?'read-only-storage' as const:'storage' as const}}))]});
       const module=d.createShaderModule({code:ballisticShader}),pipelineLayout=d.createPipelineLayout({bindGroupLayouts:[layout]});
       const compilation = await module.getCompilationInfo();
       const errors = compilation.messages.filter(message => message.type === 'error');
       if (errors.length) throw new Error(errors.map(message => `Баллистика ${message.lineNum}:${message.linePos}: ${message.message}`).join('\n'));
       this.flightPipelines=[];
       for(const entryPoint of ['spawn','fly','gather']) this.flightPipelines.push(await d.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}}));
-      this.flightGroups=this.states.map(state=>d.createBindGroup({layout,entries:[this.flightParams,this.geometry,state,this.packets,this.landing,this.flow,this.flightLedger].map((buffer,binding)=>({binding,resource:{buffer}}))}));
+      this.flightGroups=this.states.map(state=>d.createBindGroup({layout,entries:[this.flightParams,this.geometry,state,this.packets,this.landing,this.flow,this.flightLedger,this.observation].map((buffer,binding)=>({binding,resource:{buffer}}))}));
     }
     const error = await d.popErrorScope(); if (error) throw new Error(error.message);
     this.writeParams();
@@ -305,10 +362,10 @@ export class GpuWorld {
     const d = this.device, method = options.method ?? 'sor';
     const iterations = options.iterations ?? (method === 'jacobi'
       ? this.grid.cols ** 2 * (this.grid.scene === 'passage' ? 32 : 4)
-      : Math.max(256, this.grid.cols ** 2 * (this.grid.scene === 'passage' ? 1 : this.grid.light ? 1 / 2 : 1 / 8)));
+      : this.grid.scene==='world'&&this.step>0?Math.max(512,this.grid.cols**2/32):Math.max(256, this.grid.cols ** 2 * (this.grid.scene === 'passage' ? 1 : this.grid.light ? 1 / 2 : 1 / 8)));
     this.pressureIndex = 0;
     const started = performance.now(), clear = d.createCommandEncoder();
-    for (const buffer of this.pressures) clear.clearBuffer(buffer);
+    if(!(method==='sor'&&this.grid.scene==='world'&&this.step>0))for (const buffer of this.pressures) clear.clearBuffer(buffer);
     d.queue.submit([clear.finish()]);
     const chunk = method === 'sor' ? 128 : 256;
     for (let start = 0; start < iterations; start += chunk) {
@@ -317,7 +374,7 @@ export class GpuWorld {
         if (method === 'jacobi') { this.dispatch(encoder, 'solve'); this.pressureIndex = 1 - this.pressureIndex; }
         else {
           for (const pipeline of this.sor) {
-            const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, this.sorGroup);
+            const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0,this.sorGroup);
             pass.dispatchWorkgroups(Math.ceil(this.grid.cols * this.grid.rows / 64)); pass.end();
           }
         }
@@ -340,7 +397,7 @@ export class GpuWorld {
     u[11]=this.funnels?.shape??0;f[12]=this.grid.quantum??.001;
     u[8] = emission?.burst ?? (emitter ? emittedQuanta(emitter, this.step) : 0);
     if(this.sources||this.funnels){const params=new Uint32Array([this.grid.cols,this.grid.rows,this.grid.sourceCell,0,0,emission?.effusion??0,0,0]);this.device.queue.writeBuffer(this.sourceParams,0,params);}
-    this.device.queue.writeBuffer(this.uniform, 0, data);
+    this.device.queue.writeBuffer(this.uniform,0,data);
     if (this.grid.ballistics) {
       const config=this.grid.ballistics, packetData=new ArrayBuffer(64), packetU=new Uint32Array(packetData), packetF=new Float32Array(packetData);
       packetU.set([this.grid.cols,this.grid.rows]);packetF[2]=this.grid.cell;packetF[3]=.1;
@@ -351,26 +408,27 @@ export class GpuWorld {
     }
   }
   private dispatch(encoder: GPUCommandEncoder, entry: string): void {
-    const pass = encoder.beginComputePass();
+    const pass = encoder.beginComputePass(this.profiling&&entry==='transfer'?{timestampWrites:{querySet:this.profiling,beginningOfPassWriteIndex:0}}:undefined);
     if (entry === 'velocity') {
-      pass.setPipeline(this.velocityPipeline); pass.setBindGroup(0, this.velocityGroups[this.pressureIndex]);
+      pass.setPipeline(this.velocityPipeline); pass.setBindGroup(0,this.velocityGroups[this.pressureIndex]);
       pass.dispatchWorkgroups(Math.ceil(this.grid.cols * this.grid.rows / 64)); pass.end(); return;
     }
     pass.setPipeline(this.compute[entry]);
-    pass.setBindGroup(0, this.groups[this.current][this.pressureIndex]);
+    pass.setBindGroup(0,this.groups[this.current][this.pressureIndex]);
     pass.dispatchWorkgroups(Math.ceil(this.grid.cols * this.grid.rows / 64)); pass.end();
   }
 
   private prepareLight(): void {
-    const light=this.grid.light!,map=this.grid.lightMap,data=new ArrayBuffer(96),u=new Uint32Array(data),f=new Float32Array(data),regions=Math.max(...this.grid.components)+1;
+    const light=this.grid.light!,map=this.grid.lightMap,data=new ArrayBuffer(112),u=new Uint32Array(data),f=new Float32Array(data),regions=Math.max(...this.grid.components)+1;
     const count=map?.spots.reduce((sum,spot)=>sum+spot.blobs.length,0)??0;u.set([this.grid.cols,this.grid.rows,regions,count]);
     f.set([this.step*.1,light.drift,light.sun,light.background,light.rhythm,light.contrast,light.entrainment,0],4);
     f.set([this.grid.width,this.grid.height,this.grid.params?.baseTemperature??1,this.grid.params?.spotHeat??1],12);
     if(map){f.set([...lightOffset(map,this.step),...lightDriftVelocity(map,this.step)],16);f.set([map.rhythm.period*.1,map.rhythm.phase,0,0],20);}
+    f.set([...this.lightIndexSize,0,0],24);
     this.device.queue.writeBuffer(this.lightParams,0,data);
     const encoder=this.device.createCommandEncoder();
-    for(const entry of ['prepareBlobs','illuminate','average','entrain','sources']){
-      const pass=encoder.beginComputePass();pass.setPipeline(this.lightPipelines[entry]);pass.setBindGroup(0,this.lightGroup);pass.dispatchWorkgroups(entry==='average'?regions:Math.ceil((entry==='prepareBlobs'?Math.max(1,count):this.grid.cols*this.grid.rows)/64));pass.end();
+    for(const entry of ['clearIndex','prepareBlobs','illuminate','average','entrain','sources']){
+      const pass=encoder.beginComputePass();pass.setPipeline(this.lightPipelines[entry]);pass.setBindGroup(0,this.lightGroup);pass.dispatchWorkgroups(entry==='average'?regions:Math.ceil((entry==='clearIndex'?this.lightIndexSize[0]*this.lightIndexSize[1]:entry==='prepareBlobs'?Math.max(1,count):this.grid.cols*this.grid.rows)/64));pass.end();
     }
     this.device.queue.submit([encoder.finish()]);
   }
@@ -386,7 +444,7 @@ export class GpuWorld {
       pass.dispatchWorkgroups(Math.ceil(this.grid.cols * this.grid.rows / 64)); pass.end();
     };
     const prepare = this.device.createCommandEncoder(); dispatch(prepare,this.ventPipelines[0]); queue.submit([prepare.finish()]);
-    const cycles = Math.max(256,this.grid.cols ** 2 / 8);
+    const cycles = this.grid.scene==='world'?Math.max(256,this.grid.cols**2/32):Math.max(256,this.grid.cols ** 2 / 8);
     for (let start=0;start<cycles;start+=128) {
       const encoder=this.device.createCommandEncoder();
       for (let k=start;k<Math.min(start+128,cycles);k++) {
@@ -408,10 +466,10 @@ export class GpuWorld {
       const encoder=this.device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(this.sourcePipelines[0]);pass.setBindGroup(0,this.sourceGroups[this.current]);pass.dispatchWorkgroups(1);pass.end();this.device.queue.submit([encoder.finish()]);
     }
     const sink=this.grid.vents!.at(-1)!;this.grid.vents=this.sources.events(sink);
-    for(const cell of this.markerCells)this.device.queue.writeBuffer(this.markers,cell*16,new Float32Array(4));
+    for(const cell of this.markerCells)this.device.queue.writeBuffer(this.markers,cell*32,new Float32Array(8));
     this.markerCells=this.sources.volcanoes.map(v=>v.cell);
     const codes={preparing:1,erupting:2,sleeping:3,fading:4};
-    for(const v of this.sources.volcanoes)this.device.queue.writeBuffer(this.markers,v.cell*16,new Float32Array([codes[v.stage],v.power,v.begin,v.until]));
+    for(const v of this.sources.volcanoes)this.device.queue.writeBuffer(this.markers,v.cell*32,new Float32Array([codes[v.stage],v.power,v.begin,v.until,0,0,0,0]));
     this.sourceUpdateStep=this.step;
   }
 
@@ -419,6 +477,8 @@ export class GpuWorld {
     if(!this.funnels)return;const n=this.grid.cols*this.grid.rows,buffer=this.device.createBuffer({size:n*16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}),encoder=this.device.createCommandEncoder();encoder.copyBufferToBuffer(this.terrain,0,buffer,0,n*16);this.device.queue.submit([encoder.finish()]);
     try{await buffer.mapAsync(GPUMapMode.READ);const terrain=new Uint32Array(buffer.getMappedRange().slice(0));this.funnels.update(this.step,terrain,this.grid.mineral?.speed??1);if(this.sources)this.sources.siteWeights=this.funnels.siteWeights(terrain);this.device.queue.writeBuffer(this.funnelMask,0,this.funnels.mask());}
     finally{buffer.unmap();buffer.destroy();}
+    if(this.funnels.active.length>this.funnelParticleCapacity)throw new Error('Превышена ёмкость визуальных воронок.');
+    if(this.funnels.active.length)this.device.queue.writeBuffer(this.funnelParticleObjects,0,Float32Array.from(this.funnels.active.flatMap(f=>[f.core%this.grid.cols+.5,Math.floor(f.core/this.grid.cols)+.5,f.strength,f.id])));
     const commands=this.device.createCommandEncoder(),pass=commands.beginComputePass();pass.setPipeline(this.funnelPipelines[0]);pass.setBindGroup(0,this.funnelGroups[this.current]);pass.dispatchWorkgroups(Math.ceil(n/64));pass.end();this.device.queue.submit([commands.finish()]);this.previousVentRates=null;
   }
 
@@ -439,9 +499,18 @@ export class GpuWorld {
     this.advance();
   }
 
+  async profileStep(){
+    if(!this.device.features.has('timestamp-query'))return null;
+    await this.device.queue.onSubmittedWorkDone();const query=this.device.createQuerySet({type:'timestamp',count:2});this.profiling=query;
+    await this.advanceDynamic();const cpu=this.lastEncodingMs;this.profiling=null;
+    const resolved=this.device.createBuffer({size:256,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC}),read=this.device.createBuffer({size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}),encoder=this.device.createCommandEncoder();encoder.resolveQuerySet(query,0,2,resolved,0);encoder.copyBufferToBuffer(resolved,0,read,0,16);this.device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);const times=new BigUint64Array(read.getMappedRange());const result=times[0]>0n&&times[1]>=times[0]?{cpu,gpu:Number(times[1]-times[0])/1e6}:null;read.unmap();read.destroy();resolved.destroy();query.destroy();return result;
+  }
+  async advanceBatch(count:number,keepGoing=()=>true):Promise<number>{let done=0;for(;done<count&&keepGoing();done++)await this.advanceDynamic();return done;}
   advance(): void {
+    const encodeStart=performance.now();
     if (this.lost) throw new Error('GPU потерян.');
     this.writeParams();
+    const hadGeology=!!this.geology?.active.length;
     if(this.geology){
       const time=this.step*(this.grid.mineral?.speed??1);this.geology.update(time);this.device.queue.writeBuffer(this.geologyEvents,0,this.geology.encoded());
       const data=new ArrayBuffer(48);new Uint32Array(data).set([this.grid.cols,this.grid.rows]);new Float32Array(data).set([this.grid.cell,time],2);new Float32Array(data)[8]=this.grid.quantum??.001;new Uint32Array(data)[4]=this.geology.active.length;new Float32Array(data)[5]=this.grid.mineral?.speed??1;this.device.queue.writeBuffer(this.geologyParams,0,data);
@@ -462,29 +531,85 @@ export class GpuWorld {
       for(const pipeline of this.mineralPipelines.slice(0,2)){const pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,this.mineralGroups[1-this.current]);pass.dispatchWorkgroups(Math.ceil(this.grid.cols*this.grid.rows/64));pass.end();}
     }
     if(this.funnels){const pass=encoder.beginComputePass();pass.setPipeline(this.funnelPipelines[1]);pass.setBindGroup(0,this.funnelGroups[this.grid.mineral?this.current:1-this.current]);pass.dispatchWorkgroups(Math.ceil(this.grid.cols*this.grid.rows/64));pass.end();}
-    if(this.geology&&(this.grid.mineral?.speed??1)>0){
-      for(let i=0;i<3;i++){const pass=encoder.beginComputePass();pass.setPipeline(this.geologyPipelines[i]);pass.setBindGroup(0,this.geologyGroup);pass.dispatchWorkgroups(i===2?1:Math.ceil(this.grid.cols*this.grid.rows/64));pass.end();}
+    if(hadGeology&&!this.geology?.active.length){encoder.clearBuffer(this.geologyOrders);encoder.clearBuffer(this.geologyResidues);}
+    if(this.geology?.active.length&&(this.grid.mineral?.speed??1)>0){
+      for(let i=0;i<5;i++){const pass=encoder.beginComputePass();pass.setPipeline(this.geologyPipelines[i]);pass.setBindGroup(0,this.geologyGroup);pass.dispatchWorkgroups(i===3?1:i>=2?Math.ceil(Math.ceil(this.grid.cols*this.grid.rows/64)/64):Math.ceil(this.grid.cols*this.grid.rows/64));pass.end();}
     }
-    this.device.queue.submit([encoder.finish()]); if(!this.grid.mineral)this.current = 1 - this.current; this.step++;
+    {const pass=encoder.beginComputePass(this.profiling?{timestampWrites:{querySet:this.profiling,beginningOfPassWriteIndex:1}}:undefined);pass.setPipeline(this.materialPipeline);pass.setBindGroup(0,this.materialGroups[this.step%2]);pass.dispatchWorkgroups(Math.ceil(this.grid.cols*this.grid.rows/64));pass.end();}
+    if(this.funnels?.active.length){
+      const data=new ArrayBuffer(32);new Uint32Array(data).set([this.grid.cols,this.grid.rows]);new Float32Array(data).set([this.grid.cell,.1],2);new Uint32Array(data).set([this.step,this.funnels.active.length],4);this.device.queue.writeBuffer(this.funnelParticleParams,0,data);
+      const pass=encoder.beginComputePass();pass.setPipeline(this.funnelParticlePipeline);pass.setBindGroup(0,this.funnelParticleGroup);pass.dispatchWorkgroups(Math.ceil(this.funnels.active.length*40/64));pass.end();
+    }
+    this.device.queue.submit([encoder.finish()]); if(!this.grid.mineral)this.current = 1 - this.current; this.step++;this.lastEncodingMs=performance.now()-encodeStart;
   }
 
-  draw(arrows: boolean): void {
+  draw(arrows: boolean, camera={x:.5,y:.5,zoom:1,layer:0}, target?:HTMLCanvasElement,effectTime=this.step*.1): void {
     if (this.lost || !this.grid) return;
-    this.canvas.dataset.shape = this.grid.shape??(this.grid.scene === 'circle' ? 'circle' : 'rectangle');
-    const w = Math.max(1, Math.round(this.canvas.clientWidth * Math.min(devicePixelRatio, 2)));
+    const canvas=target??this.canvas;
+    if(!target)this.canvas.parentElement?.style.setProperty('--world-aspect',String(this.grid.cols/this.grid.rows));
+    const codes={preparing:1,erupting:2,sleeping:3,fading:4};
+    for(const v of this.sources?.volcanoes??[]){
+      const passed=v.bursts.filter(b=>b.start<=this.step*.1).length,signature=`${v.eruptions}:${passed}`;
+      let flash=this.visualBursts.get(v.id);
+      if(v.stage==='erupting'&&passed>0&&flash?.signature!==signature){flash={signature,start:effectTime};this.visualBursts.set(v.id,flash);}
+      this.device.queue.writeBuffer(this.markers,v.cell*32,new Float32Array([codes[v.stage],v.power,v.begin,v.until,flash?.start??-1000,Number(v.stage==='erupting'&&passed>0),0,0]));
+    }
+    const context=target?target.getContext('webgpu')!:this.context;
+    if(target)context.configure({device:this.device,format:navigator.gpu.getPreferredCanvasFormat(),alphaMode:'opaque'});
+    canvas.dataset.shape = this.grid.shape??(this.grid.scene === 'circle' ? 'circle' : 'rectangle');
+    const w = Math.max(1, Math.round(canvas.clientWidth * Math.min(devicePixelRatio, 2)));
     const h = Math.max(1, Math.round(w * this.grid.rows / this.grid.cols));
-    if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
-    const data = new ArrayBuffer(48), u = new Uint32Array(data), f = new Float32Array(data);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    const data = new ArrayBuffer(64), u = new Uint32Array(data), f = new Float32Array(data);
+    f.set([camera.x,camera.y,camera.zoom,camera.layer],12);
     u[0] = this.grid.cols; u[1] = this.grid.rows; f[2] = this.grid.cell; f[3] = this.step * .1;
-    u[4] = Number(arrows); u[5] = Number(this.grid.scene === 'burst'); u[6] = Number(!!this.grid.light);f[8]=this.grid.quantum??.001;f[9]=this.grid.referenceDensity??(5/75);
+    f[7]=effectTime;u[4] = Number(arrows); u[5] = Number(this.grid.scene === 'burst'); u[6] = Number(!!this.grid.light);f[8]=this.grid.quantum??.001;f[9]=this.grid.referenceDensity??(5/75);f[10]=Number(this.grid.scene==='world');f[11]=Number(this.grid.shape==='circle');
     this.device.queue.writeBuffer(this.view, 0, data);
     const encoder = this.device.createCommandEncoder();
-    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: this.context.getCurrentTexture().createView(),
+    {const pack=encoder.beginComputePass();pack.setPipeline(this.surfacePipeline);pack.setBindGroup(0,this.surfaceGroup);pack.dispatchWorkgroups(Math.ceil(this.grid.cols*this.grid.rows/64));pack.end();}
+    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: context.getCurrentTexture().createView(),
       clearValue: { r: .05, g: .08, b: .1, a: 1 }, loadOp: 'clear', storeOp: 'store' }] });
-    pass.setPipeline(this.render); pass.setBindGroup(0, this.renderGroups[this.current]); pass.draw(3);
-    pass.setPipeline(this.flightRender);pass.setBindGroup(0,this.flightRenderGroup);pass.draw(6,this.grid.ballistics?.capacity ?? 1);pass.end();
+    pass.setPipeline(this.render); pass.setBindGroup(0,this.renderGroups[this.current][this.step%2]); pass.draw(3);
+    pass.setPipeline(this.flightRender);pass.setBindGroup(0,this.flightRenderGroup);pass.draw(6,Math.min(70,this.grid.ballistics?.capacity ?? 1));
+    if(this.funnels?.active.length&&camera.layer===0){pass.setPipeline(this.funnelParticleRender);pass.setBindGroup(0,this.funnelParticleRenderGroup);pass.draw(6,this.funnels.active.length*40);}
+    pass.end();
     this.device.queue.submit([encoder.finish()]);
   }
+
+  /** Consistent device checkpoint, including every fractional residue and controller. */
+  async checkpoint():Promise<Checkpoint>{
+    await this.device.queue.onSubmittedWorkDone();
+    const buffers=this.buffers.filter(b=>!b.label.startsWith('observation'));
+    let size=0;const offsets=buffers.map(b=>{const offset=size;size+=b.size;return offset;});
+    const read=this.device.createBuffer({size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    const encoder=this.device.createCommandEncoder();buffers.forEach((b,i)=>encoder.copyBufferToBuffer(b,0,read,offsets[i],b.size));
+    this.device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);const bytes=new Uint8Array(read.getMappedRange()).slice();read.unmap();read.destroy();
+    return structuredClone({version:'ecobugs-gpu-1',grid:this.grid,step:this.step,current:this.current,pressureIndex:this.pressureIndex,
+      buffers:buffers.map((b,i)=>({label:b.label,bytes:bytes.slice(offsets[i],offsets[i]+b.size)})),
+      sources:this.sources,funnels:this.funnels,geology:this.geology,sourceUpdateStep:this.sourceUpdateStep,
+      markerCells:this.markerCells,previousVentRates:this.previousVentRates});
+  }
+  async restore(saved:Checkpoint):Promise<void>{
+    if(saved.version!=='ecobugs-gpu-1')throw new Error('Несовместимая версия мира.');
+    await this.reset(structuredClone(saved.grid));
+    const buffers=this.buffers.filter(b=>!b.label.startsWith('observation'));
+    if(saved.buffers.length!==buffers.length||saved.buffers.some((b,i)=>b.label!==buffers[i].label||b.bytes.byteLength!==buffers[i].size))throw new Error('Размеры полей сохранения не соответствуют модели.');
+    for(let i=0;i<buffers.length;i++)this.device.queue.writeBuffer(buffers[i],0,saved.buffers[i].bytes);
+    if(this.sources&&saved.sources)Object.assign(this.sources,structuredClone(saved.sources));
+    if(this.funnels&&saved.funnels)Object.assign(this.funnels,structuredClone(saved.funnels));
+    if(this.geology&&saved.geology)Object.assign(this.geology,structuredClone(saved.geology));
+    this.step=saved.step;this.current=saved.current;this.pressureIndex=saved.pressureIndex;this.sourceUpdateStep=saved.sourceUpdateStep;
+    this.markerCells=[...saved.markerCells];this.previousVentRates=saved.previousVentRates?.slice()??null;
+    await this.device.queue.onSubmittedWorkDone();
+  }
+  async observe(){
+    this.writeParams();
+    const read=this.device.createBuffer({size:48,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST}),encoder=this.device.createCommandEncoder(),pass=encoder.beginComputePass();
+    pass.setPipeline(this.observePipeline);pass.setBindGroup(0,this.observeGroup);pass.dispatchWorkgroups(1);pass.end();encoder.copyBufferToBuffer(this.observations,0,read,0,48);this.device.queue.submit([encoder.finish()]);
+    await read.mapAsync(GPUMapMode.READ);const bytes=read.getMappedRange(),u=new Uint32Array(bytes),f=new Float32Array(bytes),free=u[0]+u[1]+u[2];
+    const result={step:this.step,shares:[u[0]/free,u[1]/free,u[2]/free],averageSpeed:f[8],emitted:(u[4]+u[5]*2**32)*(this.grid.quantum??.001),captured:(u[6]+u[7]*2**32)*(this.grid.quantum??.001)};read.unmap();read.destroy();return result;
+  }
+  get allocatedBytes():number{return this.buffers.reduce((sum,b)=>sum+b.size,0);}
 
   /** Full readback is for checks only; drawing never reads physics back to CPU. */
   async snapshot(): Promise<Snapshot> {
@@ -513,11 +638,12 @@ export class GpuWorld {
 
   async summary() {
     this.writeParams();
+    this.writeParams();
     const grid = this.grid;
     const groups = Math.ceil(grid.cols * grid.rows / 64), size = groups * 48 + 32;
     const buffer = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder(), pass = encoder.beginComputePass();
-    pass.setPipeline(this.summaryPipeline); pass.setBindGroup(0, this.summaryGroups[this.current]);
+    pass.setPipeline(this.summaryPipeline); pass.setBindGroup(0,this.summaryGroups[this.current]);
     pass.dispatchWorkgroups(groups); pass.end(); encoder.copyBufferToBuffer(this.summaries, 0, buffer, 0, groups * 48);
     encoder.copyBufferToBuffer(this.flightLedger, 0, buffer, groups * 48, 16);
     encoder.copyBufferToBuffer(this.common,0,buffer,groups*48+16,16);

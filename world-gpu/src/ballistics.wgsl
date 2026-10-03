@@ -10,6 +10,7 @@ struct Packet { pos: vec2f, direction: vec2f, remaining: f32, speed: f32, mass: 
 @group(0) @binding(4) var<storage, read_write> landing: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read> flow: array<vec2f>;
 // serial, pending emission, landed this step, integration guard hits.
+@group(0) @binding(7) var<storage,read_write> observation:array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read_write> ledger: array<atomic<u32>>;
 fn hash(value: u32) -> u32 {
   var h = value; h = (h ^ (h >> 16u)) * 2246822519u;
@@ -26,6 +27,7 @@ fn radical(value:u32,base:u32)->f32 {
   atomicStore(&ledger[2], 0u);
   let queued = min(state[cfg.source].z, atomicLoad(&ledger[1]));
   let pending = queued + min(cfg.emission, state[cfg.source].z - queued);
+  if(pending==0u){atomicStore(&ledger[1],0u);return;}
   var free = 0u;
   for (var i = 0u; i < cfg.capacity; i++) { if (packets[i].mass == 0u) { free++; } }
   let count = min(min(free, cfg.count), pending);
@@ -44,6 +46,7 @@ fn radical(value:u32,base:u32)->f32 {
     packets[i] = Packet(origin, direction, range, cfg.speed, mass, serial, origin, range, mass, 0u, 0., 0., cfg.step);
     made++; serial++;
   }
+  let old=atomicAdd(&observation[0],pending);if(old>0xffffffffu-pending){atomicAdd(&observation[1],1u);}
   state[cfg.source].z -= pending; state[cfg.source].w += pending;
   atomicStore(&ledger[0], serial); atomicStore(&ledger[1], 0u);
 }
