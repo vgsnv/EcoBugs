@@ -17,6 +17,8 @@ import { comparePressure } from './pressure-checks.ts';
 import { checkSources } from './source-checks.ts';
 import { checkFlight } from './flight-checks.ts';
 import { checkVents } from './vent-checks.ts';
+import { checkAdvection } from './advection-checks.ts';
+import { checkMultigrid } from './multigrid-checks.ts';
 import { checkLight } from './light-checks.ts';
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
@@ -31,7 +33,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <p class="caption">Сиреневый цвет — минерал. Оранжевые точки — источник, голубые — возвратный поток. Тёмные границы непроницаемы.</p></section>
   <aside><h2>Баланс среды</h2><div id="status" role="status">Создание устройства…</div><dl id="metrics"></dl>
   <p class="note">Течение, минерал и местность используют общие GPU-поля. Камера меняет только изображение.</p>
-  <button id="interface-checks">Проверить интерфейс</button><button id="audit">Измерить и проверить цикл</button><button id="checkpoint-checks">Проверить сохранение</button><button id="checks">Проверить физику GPU</button><button id="pressure-checks">Сравнить решатели</button><button id="light-checks">Проверить свет</button><button id="vent-checks">Проверить толчки</button><button id="flight-checks">Проверить полёт</button><button id="world-checks">Проверить полный мир</button><button id="funnel-checks">Проверить воронки</button><button id="terrain-checks">Проверить местность</button><button id="mineral-checks">Проверить залежи</button><button id="source-checks">Проверить источники</button><details id="save-export" hidden><summary>Текст сохранения</summary><a id="save-link">Скачать файл</a><textarea id="save-data" readonly aria-label="Текст сохранения мира"></textarea></details><pre id="report" aria-live="polite"></pre></aside></main>`;
+  <button id="interface-checks">Проверить интерфейс</button><button id="audit">Измерить и проверить цикл</button><button id="checkpoint-checks">Проверить сохранение</button><button id="checks">Проверить физику GPU</button><button id="advection-checks">Проверить сильное течение</button><button id="multigrid-checks">Проверить многоуровневое давление</button><button id="pressure-checks">Сравнить решатели</button><button id="light-checks">Проверить свет</button><button id="vent-checks">Проверить толчки</button><button id="flight-checks">Проверить полёт</button><button id="world-checks">Проверить полный мир</button><button id="funnel-checks">Проверить воронки</button><button id="terrain-checks">Проверить местность</button><button id="mineral-checks">Проверить залежи</button><button id="source-checks">Проверить источники</button><details id="save-export" hidden><summary>Текст сохранения</summary><a id="save-link">Скачать файл</a><textarea id="save-data" readonly aria-label="Текст сохранения мира"></textarea></details><pre id="report" aria-live="polite"></pre></aside></main>`;
 
 const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
 const ui=installUi(canvas);
@@ -73,7 +75,7 @@ async function metrics(): Promise<void> {
     }
     if(gpu.funnels)values.push(['Воронки',`${gpu.funnels.active.length} · родилось ${gpu.funnels.births}`]);
     if (gpu.grid.vents) values.push(['Расчёт толчка', `${gpu.ventMilliseconds.toFixed(1)} мс`]);
-    if (gpu.pressureResult) values.push(['Подготовка давления SOR', `${gpu.pressureResult.milliseconds.toFixed(1)} мс`]);
+    if (gpu.pressureResult) values.push([`Подготовка давления ${gpu.pressureResult.method.toUpperCase()}`, `${gpu.pressureResult.milliseconds.toFixed(1)} мс`]);
     const point={step:m.step,shares:observation.shares,medium:(m.dissolved+m.flying)*quantum,deposits:m.deposits*quantum,emitted:observation.emitted,captured:observation.captured};
     if(!history.length||history.at(-1)!.step!==m.step)history.push(point);
     while(history.length>2&&history[1].step<=m.step-600)history.shift();const before=history[0];
@@ -107,6 +109,8 @@ element('save').onclick=async()=>{if(!gpu||busy)return;paused=true;lock(true);tr
 element<HTMLInputElement>('load').onchange=async e=>{const file=(e.target as HTMLInputElement).files?.[0];if(!file||!gpu)return;paused=true;lock(true);try{await advancing;await checkpointing;const saved=decodeCheckpoint(await file.text());await gpu.restore(saved);history=[];checkpoint=saved;worldParams=saved.grid.params??makeParams();ui.setParams(worldParams);scene.value=saved.grid.scene;grid.value=String(saved.grid.cols);element('play').textContent='Пуск';status.textContent=`Загружен шаг ${gpu.step}`;status.className='';lock(false);draw();await metrics();}catch(e){failure(e);}finally{(e.target as HTMLInputElement).value='';}};
 element('recover').onclick=async()=>{if(!checkpoint)return;lock(true);try{gpu=await GpuWorld.create(canvas);await gpu.restore(checkpoint);history=[];status.textContent=`Восстановлен шаг ${gpu.step} из контрольной точки`;element('recover').hidden=true;lock(false);draw();await metrics();}catch(e){failure(e);}};
 element('audit').onclick=async()=>{if(!gpu||busy)return;paused=true;lock(true);status.textContent='Длительный аудит GPU…';try{await advancing;await checkpointing;report.textContent=await audit(gpu,text=>{report.textContent=text;});await reset();}catch(e){report.textContent+=`\n✗ ${e instanceof Error?e.message:String(e)}`;failure(e);}};
+element('advection-checks').onclick=async()=>{if(!gpu||busy)return;paused=true;lock(true);try{await advancing;await checkpointing;report.textContent=await checkAdvection(gpu,text=>{report.textContent=text;});await reset();}catch(e){report.textContent+=`\n✗ ${e instanceof Error?e.message:String(e)}`;failure(e);}};
+element('multigrid-checks').onclick=async()=>{if(!gpu||busy)return;paused=true;lock(true);try{await advancing;await checkpointing;report.textContent=await checkMultigrid(gpu,text=>{report.textContent=text;});await reset();}catch(e){report.textContent+=`\n✗ ${e instanceof Error?e.message:String(e)}`;failure(e);}};
 element('checkpoint-checks').onclick=async()=>{if(!gpu||busy)return;paused=true;lock(true);try{await advancing;await checkpointing;const result=await checkCheckpoint(gpu,text=>{report.textContent=text;});gpu=result.gpu;report.textContent=result.report;await reset();}catch(e){failure(e);}};
 const setPaused=(value:boolean)=>{paused=value;debt=0;element('play').textContent=paused?'Пуск':'Пауза';};
 element('play').onclick=()=>setPaused(!paused);

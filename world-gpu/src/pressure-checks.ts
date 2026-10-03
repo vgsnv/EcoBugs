@@ -11,9 +11,9 @@ export async function comparePressure(gpu: GpuWorld, publish: (text: string) => 
     const grid = createGrid(scene, cols);
     await gpu.reset(grid);
     for (const method of ['jacobi', 'sor'] as PressureMethod[]) await gpu.solvePressure({ method });
-    const times: Record<PressureMethod, number[]> = { sor: [], jacobi: [] };
-    const residuals: Record<PressureMethod, number> = { sor: 0, jacobi: 0 };
-    const passes: Record<PressureMethod, number> = { sor: 0, jacobi: 0 };
+    const times: Record<PressureMethod, number[]> = { sor: [], jacobi: [], multigrid: [] };
+    const residuals: Record<PressureMethod, number> = { sor: 0, jacobi: 0, multigrid: 0 };
+    const passes: Record<PressureMethod, number> = { sor: 0, jacobi: 0, multigrid: 0 };
     let flowDifference = 0;
     for (let repeat = 0; repeat < 3; repeat++) {
       const flows: Partial<Record<PressureMethod, Float32Array>> = {};

@@ -56,7 +56,7 @@ fn outward(k: u32, d: u32) -> f32 {
   for (var d = 0u; d < 4u; d++) {
     wanted[d] = f32(mass) * max(0., outward(k, d)) * cfg.dt;
   }
-  let budget = f32(mass) * geo[k].x;
+  let budget = f32(mass) * select(geo[k].x,.9,cfg.physical.y>.5);
   let sum = dot(wanted, vec4f(1.));
   if (sum > budget && sum > 0.) { wanted *= budget / sum; }
   var available = mass;
@@ -86,11 +86,18 @@ fn outward(k: u32, d: u32) -> f32 {
   if (cfg.burst == 2u && k == cfg.source) {
     let emitted = min(state.z, cfg.emission.x); state.z -= emitted; state.x += emitted;
   }
-  if (geo[k].w > 0.5) {
+  if (geo[k].w > 0.5 && cfg.physical.y<.5) {
     let threshold = select(u32(cfg.cell * cfg.cell / cfg.physical.x * 0.005),cfg.emission.w,cfg.emission.w>0u);
     let excess = state.x - min(state.x, threshold);
     let captured = select(excess/8u,u32(f32(excess)*max(0.,geo[k].w-2.)*.001),geo[k].w>=2.);
     state.x -= captured; state.y += captured;
   }
   after[k] = state;
+}
+
+@compute @workgroup_size(64) fn captureHoles(@builtin(global_invocation_id) id:vec3u){
+ let k=id.x;if(k>=cfg.cols*cfg.rows){return;}let residue=k+cfg.cols*cfg.rows;
+ if(geo[k].w<1.5){carry[residue]=vec4f(0.);return;}
+ let excess=after[k].x-min(after[k].x,cfg.emission.w);let wanted=f32(excess)*max(0.,geo[k].w-2.)*.001+carry[residue].x;
+ let captured=min(excess,u32(floor(wanted)));after[k].x-=captured;after[k].y+=captured;carry[residue]=vec4f(wanted-f32(captured),0.,0.,0.);
 }

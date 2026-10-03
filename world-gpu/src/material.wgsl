@@ -20,7 +20,7 @@ fn sample(k:u32,x:i32,y:i32)->vec4f {
  let west=select(k,k-1u,x>0u);let north=select(k,k-cfg.cols,y>0u);
  let v=.5*vec2f(flow[k].x+select(0.,flow[west].x,x>0u),flow[k].y+select(0.,flow[north].y,y>0u));
  // Display-only Courant bound prevents texture tunnelling across a thin wall.
- let delta=v*cfg.dt;let pos=own-delta/max(1.,length(delta)/.45);
+ let delta=v*.1;let pos=own-delta/max(1.,length(delta)/.45);
  let corner=vec2i(floor(pos-.5));let f=fract(pos-.5);
  var value=mix(mix(sample(k,corner.x,corner.y),sample(k,corner.x+1,corner.y),f.x),mix(sample(k,corner.x,corner.y+1),sample(k,corner.x+1,corner.y+1),f.x),f.y);
  // Two staggered coordinate maps renew only while their image weight is zero.

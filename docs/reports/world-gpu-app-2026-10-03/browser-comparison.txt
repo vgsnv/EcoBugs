@@ -1,0 +1,7 @@
+{"trial":1,"engine":"CPU","stepsPerSecond":9481.668773525553,"cells":30000,"creationMs":245,"drawCpuP50":4.600000001490116,"drawCpuP95":5.399999998509884,"frameP95":17.700000002980232,"typedBytes":2490000,"canvasRgbaEstimate":26111392}
+{"trial":1,"engine":"GPU","stepsPerSecond":600.4082776295038,"cells":30000,"creationMs":1126.8999999985099,"drawCpuP50":0.20000000298023224,"drawCpuP95":0.5,"frameP95":18.899999998509884,"gpuFieldsBytes":11417204,"residual":0.001248459618720529}
+{"trial":2,"engine":"GPU","stepsPerSecond":599.3287517969158,"cells":30000,"creationMs":1037.6000000014901,"drawCpuP50":0.20000000298023224,"drawCpuP95":0.30000000447034836,"frameP95":19.600000001490116,"gpuFieldsBytes":11417204,"residual":0.001248459618720529}
+{"trial":2,"engine":"CPU","stepsPerSecond":10645.848119346087,"cells":30000,"creationMs":292.5,"drawCpuP50":4.699999995529652,"drawCpuP95":5.100000001490116,"frameP95":17.69999999552965,"typedBytes":2490000,"canvasRgbaEstimate":37686432}
+{"trial":3,"engine":"CPU","stepsPerSecond":10853.835021473611,"cells":30000,"creationMs":339.1000000014901,"drawCpuP50":4.699999995529652,"drawCpuP95":5,"frameP95":17.600000001490116,"typedBytes":2490000,"canvasRgbaEstimate":49261472}
+{"trial":3,"engine":"GPU","stepsPerSecond":590.7139762933724,"cells":30000,"creationMs":1074.8999999985099,"drawCpuP50":0.19999999552965164,"drawCpuP95":0.30000000447034836,"frameP95":20,"gpuFieldsBytes":11417204,"residual":0.001248459618720529}
+Готово. Разная частота обменов: CPU раз в 100 шагов, GPU каждый шаг. Равенство численного качества не заявлено.

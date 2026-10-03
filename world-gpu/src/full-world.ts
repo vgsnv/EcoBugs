@@ -29,7 +29,7 @@ export function createWorldGrid(params:WorldParams=makeParams(),requestedCols=12
  const components=connectedAreas(cols,rows,geometry),sites=Array.from(components,(_,k)=>k).filter(k=>components[k]>=0);
  const lightMap=createLightMap(own);
  return {scene:'world',initialShares:measured.shares,shape:own.shape,cols,rows,cell,width:dish.width,height:dish.height,geometry,state,terrain,components,total,sourceCell:sites[0],quantum,referenceDensity:own.mineralStock,params:own,lightMap,
-  underground:stock,sources:{seed:own.seed,stock,quantum,sites},vents:Array.from({length:6},()=>({cell:0,rate:0,start:0,end:0})),ballistics:{range:150,speed:240,capacity:1024,seed:own.seed},pushLength:200,
+  underground:stock,sources:{seed:own.seed,stock,quantum,displacementDensity:20,sites},vents:Array.from({length:6},()=>({cell:0,rate:0,start:0,end:0})),ballistics:{range:150,speed:240,capacity:1024,seed:own.seed},pushLength:200,
   light:{drift:own.lightDrift,sun:own.sun,background:own.backgroundLevel,rhythm:own.sunRhythm,contrast:.035,entrainment:1,interval:100},
   mineral:{diffusion:100,settling:.0001,dissolution:.00003,runoff:100,erosion:.0003,weathering:.00001,speed:own.terrainSpeed,evolving:true,full:true},geology:{seed:own.seed,levelScale:20,quakeGap:own.quakeInterval},funnels:{stock}};
 }

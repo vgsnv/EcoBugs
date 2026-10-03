@@ -35,3 +35,9 @@ const dying=new Sources({seed:1,stock:10000,sites:[1]});
 dying.volcanoes.push({id:1,cell:1,power:1,stage:'sleeping',begin:0,until:100,bursts:[],effusion:null,eruptions:1});
 dying.update(100,0,0);assert.equal(dying.volcanoes[0].stage,'fading');dying.update(20100,0,0);assert.equal(dying.volcanoes.length,0);
 console.log('20 seeds: pressure gate, preparation, 1–4 diminishing bursts, declining effusion, exact mass/displacement integrals and extinction.');
+
+const full=new Sources({seed:6,stock:18000000,quantum:1,displacementDensity:20,sites:[1]});
+full.update(0,18000000,0);const reservation=full.update(100,18000000,0);assert.ok(reservation);
+const area=full.events({cell:0,rate:0,start:0,end:0}).reduce((sum,v)=>sum+v.rate*(v.end-v.start),0);
+assert.ok(Math.abs(area-(reservation.burst+reservation.effusion)/20)<1e-7);
+console.log('Full-world eruption: displaced area equals emitted mineral mass / 20 mg per mm².');

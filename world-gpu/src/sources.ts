@@ -1,7 +1,7 @@
 import { emittedQuanta, type Vent } from './vents.ts';
 export type VolcanoStage = 'preparing' | 'erupting' | 'sleeping' | 'fading';
 export interface Volcano { id:number; cell:number; power:number; stage:VolcanoStage; until:number; begin:number; bursts:Vent[]; effusion:Vent|null; eruptions:number }
-export interface SourceConfig { seed:number; stock:number; quantum?:number; threshold?:number; preparation?:number; duration?:number; startup?:boolean; sites:number[] }
+export interface SourceConfig { seed:number; stock:number; quantum?:number; displacementDensity?:number; threshold?:number; preparation?:number; duration?:number; startup?:boolean; sites:number[] }
 export interface Reservation { cell:number; burst:number; effusion:number }
 /** Small deterministic event controller. Mineral ownership and all transfers remain on GPU. */
 export class Sources {
@@ -63,9 +63,9 @@ export class Sources {
       const mass=i===count-1?burstTotal-allocated:Math.floor(burstTotal*2**-i/sum);allocated+=mass;
       const seconds=width*.1;
       const strength=2**-i;
-      return {cell:active!.cell,start:at*.1,end:at*.1+seconds,mass,rate:mass*(this.config.quantum??.001)*10/seconds,range:(50+100*active!.power)*Math.sqrt(strength),speed:(80+160*active!.power)*Math.sqrt(strength)};
+      return {cell:active!.cell,start:at*.1,end:at*.1+seconds,mass,rate:mass*(this.config.quantum??.001)/(this.config.displacementDensity??.1)/seconds,range:(50+100*active!.power)*Math.sqrt(strength),speed:(80+160*active!.power)*Math.sqrt(strength)};
     });
-    active.effusion={cell:active.cell,start:step*.1,end:(step+duration)*.1,mass:effusion,rate:effusion*(this.config.quantum??.001)*10/(duration*.1),shape:'declining'};
+    active.effusion={cell:active.cell,start:step*.1,end:(step+duration)*.1,mass:effusion,rate:effusion*(this.config.quantum??.001)/(this.config.displacementDensity??.1)/(duration*.1),shape:'declining'};
     active.stage='erupting';active.begin=step;active.until=Math.max(step+duration,Math.ceil(active.bursts.at(-1)!.end*10));active.eruptions++;this.eruptions++;
     this.threshold=this.config.threshold??this.nextThreshold();
     return {cell:active.cell,burst:burstTotal,effusion};

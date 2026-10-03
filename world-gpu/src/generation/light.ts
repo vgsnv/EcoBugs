@@ -254,16 +254,23 @@ export function createLightMap(params: WorldParams): LightMap {
   const spots: Spot[] = [];
   const meanArea = Math.PI * params.spotSize * params.spotSize;
   const batch = Math.max(1, Math.round((mapW * mapH * params.illumination) / meanArea / 4));
+  const maxBlobs=65536;
+  // Bound CPU objects and the matching 160-byte GPU records before allocation.
+  if(batch>maxBlobs)throw new Error('Карта света требует слишком много пятен. Увеличьте размер пятен или уменьшите освещённость.');
+  let blobCount=0;
   const grid = new CoverageGrid(mapW, mapH, 0);
   for (let guard = 0; guard < 200; guard++) {
     for (let k = 0; k < batch; k++) {
       const spot = makeSpot(rng, mapW, mapH, params.spotSize, params.lightDrift);
+      blobCount+=spot.blobs.length;
+      if(blobCount>maxBlobs)throw new Error('Карта света превышает предел 65 536 составляющих. Увеличьте размер пятен или уменьшите освещённость.');
       spots.push(spot);
       grid.add(spot);
     }
     if (grid.share >= params.illumination) break;
   }
 
+  if(grid.share<params.illumination)throw new Error('Не удалось получить заданную освещённость карты. Измените размер пятен.');
   const drift: DriftHarmonic[] = [];
   const w1 = TAU / LIGHT_TURN_PERIOD;
   drift.push({ speed: LIGHT_DRIFT_SPEED * params.lightDrift * 0.8, w: w1 * rng.range(0.8, 1.2), phase: rng.range(0, TAU) });

@@ -1,0 +1,38 @@
+import { createWorld, stepWorld } from '../../world/src/core/world.ts';
+import { makeParams as cpuParams } from '../../world/src/core/params.ts';
+import { WorldRenderer } from '../../world/src/app/render.ts';
+import { GpuWorld } from './gpu.ts';
+import { createWorldGrid } from './full-world.ts';
+const report=document.getElementById('report')!,button=document.getElementById('run') as HTMLButtonElement;
+const gpu=await GpuWorld.create(document.getElementById('gpu') as HTMLCanvasElement);
+const lines:string[]=[];
+const canvases:HTMLCanvasElement[]=[];const original=document.createElement.bind(document);
+// Diagnostic-only accounting of renderer canvas backing stores, not driver residency.
+const documentWithFactory=document as unknown as {createElement:(...args:unknown[])=>HTMLElement};
+const originalFactory=documentWithFactory.createElement;
+documentWithFactory.createElement=(...args:unknown[])=>{const el=original(...args as [string]);if(el instanceof HTMLCanvasElement)canvases.push(el);return el;};
+const renderer=new WorldRenderer(document.getElementById('cpu') as HTMLCanvasElement);
+const cpu=async()=>{
+ const init=performance.now(),world=createWorld(cpuParams());const creation=performance.now()-init;
+ for(let i=0;i<200;i++)stepWorld(world);
+ const start=performance.now();for(let i=0;i<1500;i++)stepWorld(world);const ms=performance.now()-start;
+ renderer.setWorld(world);renderer.draw(0,world.step);
+ const samples:number[]=[],frames:number[]=[];let previous=performance.now();
+ for(let i=0;i<120;i++){await new Promise<void>(r=>requestAnimationFrame(()=>r()));const t=performance.now();renderer.draw(i/60,world.step);samples.push(performance.now()-t);const end=performance.now();frames.push(end-previous);previous=end;}
+ samples.sort((a,b)=>a-b);frames.sort((a,b)=>a-b);
+ const seen=new Set<unknown>(),buffers=new Set<ArrayBufferLike>();
+ const visit=(v:unknown)=>{if(!v||typeof v!=='object'||seen.has(v))return;seen.add(v);if(ArrayBuffer.isView(v)){buffers.add(v.buffer);return;}if(v instanceof ArrayBuffer){buffers.add(v);return;}for(const child of Object.values(v))visit(child);};visit(world);
+ const typed=[...buffers].reduce((n,b)=>n+b.byteLength,0),pixels=canvases.reduce((n,c)=>n+c.width*c.height*4,0)+(document.getElementById('cpu') as HTMLCanvasElement).width*(document.getElementById('cpu') as HTMLCanvasElement).height*4;
+ return {engine:'CPU',stepsPerSecond:1500/ms*1000,cells:world.mineral.cols*world.mineral.rows,creationMs:creation,drawCpuP50:samples[60],drawCpuP95:samples[114],frameP95:frames[114],typedBytes:typed,canvasRgbaEstimate:pixels};
+};
+const graphics=async()=>{
+ const init=performance.now();await gpu.reset(createWorldGrid(undefined,200));const creation=performance.now()-init;
+ for(let i=0;i<200;i++)await gpu.advanceDynamic();await gpu.device.queue.onSubmittedWorkDone();
+ const begin=performance.now();for(let i=0;i<1500;i++){await gpu.advanceDynamic();if(i%16===15)await gpu.device.queue.onSubmittedWorkDone();}await gpu.device.queue.onSubmittedWorkDone();const ms=performance.now()-begin;
+ const samples:number[]=[],frames:number[]=[];let previous=performance.now();
+ for(let i=0;i<120;i++){await new Promise<void>(r=>requestAnimationFrame(()=>r()));const t=performance.now();gpu.draw(false);samples.push(performance.now()-t);await gpu.device.queue.onSubmittedWorkDone();const end=performance.now();frames.push(end-previous);previous=end;}
+ const m=await gpu.summary();if(m.massError||m.flightOverflow||m.reservoirError)throw new Error('GPU нарушил физику');
+ samples.sort((a,b)=>a-b);frames.sort((a,b)=>a-b);
+ return {engine:'GPU',stepsPerSecond:1500/ms*1000,cells:gpu.grid.cols*gpu.grid.rows,creationMs:creation,drawCpuP50:samples[60],drawCpuP95:samples[114],frameP95:frames[114],gpuFieldsBytes:gpu.allocatedBytes,residual:m.relativeResidual};
+};
+button.onclick=async()=>{button.disabled=true;try{for(let trial=0;trial<3;trial++){for(const run of trial%2?[graphics,cpu]:[cpu,graphics]){const result=await run();lines.push(JSON.stringify({trial:trial+1,...result}));report.textContent=lines.join('\n');}}report.textContent+='\nГотово. Разная частота обменов: CPU раз в 100 шагов, GPU каждый шаг. Равенство численного качества не заявлено.';}catch(e){report.textContent+=`\nОшибка: ${String(e)}`;}finally{button.disabled=false;documentWithFactory.createElement=originalFactory;}};

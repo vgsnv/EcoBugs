@@ -7,3 +7,6 @@ for(const params of [makeParams(),makeParams({seed:2,shape:'circle'}),makeParams
  assert.ok(a.lightMap.spots.length>0&&a.quantum>0);if(params.mineralStock===99)assert.ok(a.quantum>=.1);
 }
 console.log('Full-world rectangular/circular generators, three seeds, initial shares ±0.5 pp, clean creation, adaptive fixed quantum, high stock and repeated initial fields passed.');
+
+assert.throws(()=>createWorldGrid(makeParams({spotSize:1})),/слишком много пятен/);
+console.log("Tiny light spots reject excessive allocations before generating objects.");
