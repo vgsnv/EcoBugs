@@ -10,9 +10,9 @@ struct Summary { mass: vec4u, accuracy: vec4u }
 @group(0) @binding(6) var<storage, read> vents: array<vec4f>;
 @compute @workgroup_size(1) fn summarize(@builtin(global_invocation_id) id: vec3u) {
   let start = id.x * 64u;
-  var masses = vec3u(0u); var maxSpeed = 0.; var residual = 0.; var scale = 0.; var leak = 0u;
+  var masses = vec4u(0u); var maxSpeed = 0.; var residual = 0.; var scale = 0.; var leak = 0u;
   for (var k = start; k < min(start + 64u, cfg.cols * cfg.rows); k++) {
-    masses += state[k].xyz;
+    masses += state[k];
     if (geo[k].z > .5) { leak += state[k].x; }
     maxSpeed = max(maxSpeed, max(abs(flow[k].x), abs(flow[k].y)));
     let x = k % cfg.cols; let y = k / cfg.cols;
@@ -24,6 +24,6 @@ struct Summary { mass: vec4u, accuracy: vec4u }
     scale += source * source;
   }
   if (cfg.burst == 1u && cfg.step >= 20u) { maxSpeed = 0.; }
-  summary[id.x].mass = vec4u(masses, bitcast<u32>(maxSpeed));
-  summary[id.x].accuracy = vec4u(bitcast<u32>(residual), bitcast<u32>(scale), leak, 0u);
+  summary[id.x].mass = vec4u(masses.xyz, bitcast<u32>(maxSpeed));
+  summary[id.x].accuracy = vec4u(bitcast<u32>(residual), bitcast<u32>(scale), leak, masses.w);
 }

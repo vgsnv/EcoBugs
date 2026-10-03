@@ -69,6 +69,6 @@ export async function checkLight(gpu: GpuWorld, publish: (text: string) => void)
     rows.push(`✓ свет ${cols}×${grid.rows}: Δмассы 0, r=${m.relativeResidual.toExponential(2)}`);
   }
   assert(gpu.errors.length === 0,gpu.errors.join('\n'));
-  rows.push('Проверки динамического света прошли. Генератор по сиду и затухающие источники впереди.');
+  rows.push('Проверки динамического света прошли. Генератор света по сиду впереди.');
   return rows.join('\n');
 }

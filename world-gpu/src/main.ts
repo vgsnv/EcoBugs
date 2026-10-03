@@ -3,6 +3,7 @@ import { GpuWorld } from './gpu.ts';
 import { createGrid, QUANTUM_MG, SCENES, type Scene } from './model.ts';
 import { runChecks } from './checks.ts';
 import { comparePressure } from './pressure-checks.ts';
+import { checkFlight } from './flight-checks.ts';
 import { checkVents } from './vent-checks.ts';
 import { checkLight } from './light-checks.ts';
 
@@ -17,8 +18,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <div class="transport"><button id="play">Пуск</button><button id="step">Один шаг</button><button id="reset">Сначала</button><label>Скорость<select id="speed"><option value="1">×1</option><option value="10" selected>×10</option><option value="100">×100</option></select></label><span id="clock">Шаг 0 · 0,0 с</span></div>
   <p class="caption">Сиреневый цвет — минерал. Оранжевые точки — источник, голубые — возвратный поток. Тёмные границы непроницаемы.</p></section>
   <aside><h2>Баланс среды</h2><div id="status" role="status">Создание устройства…</div><dl id="metrics"></dl>
-  <p class="note">Это стенд вычислительного метода. Генерация мира, жизненные циклы источников, местность и баллистика выброса будут добавлены следующими этапами.</p>
-  <button id="checks">Проверить физику GPU</button><button id="pressure-checks">Сравнить решатели</button><button id="light-checks">Проверить свет</button><button id="vent-checks">Проверить толчки</button><pre id="report" aria-live="polite"></pre></aside></main>`;
+  <p class="note">Это стенд вычислительного метода. Генерация мира, жизненные циклы источников и процессы местности будут добавлены следующими этапами.</p>
+  <button id="checks">Проверить физику GPU</button><button id="pressure-checks">Сравнить решатели</button><button id="light-checks">Проверить свет</button><button id="vent-checks">Проверить толчки</button><button id="flight-checks">Проверить полёт</button><pre id="report" aria-live="polite"></pre></aside></main>`;
 
 const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -40,6 +41,7 @@ async function metrics(): Promise<void> {
     completedStep = m.step;
     const values = [['В среде', `${(m.dissolved * QUANTUM_MG).toFixed(2)} мг`], ['В недрах', `${((m.captured + m.reserved) * QUANTUM_MG).toFixed(2)} мг`],
       ['Ошибка массы', `${m.massError} квантов`], ['Макс. скорость грани', `${m.maxSpeed.toFixed(2)} мм/с`], ['Невязка давления', m.relativeResidual.toExponential(2)]];
+    if (gpu.grid.ballistics) values.push(['В полёте', `${(m.flying * QUANTUM_MG).toFixed(2)} мг`]);
     if (gpu.grid.vents) values.push(['Расчёт толчка', `${gpu.ventMilliseconds.toFixed(1)} мс`]);
     if (gpu.pressureResult) values.push(['Подготовка давления SOR', `${gpu.pressureResult.milliseconds.toFixed(1)} мс`]);
     element('metrics').innerHTML = values.map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`).join('');
@@ -108,6 +110,15 @@ element('vent-checks').onclick = async () => {
   try {
     await advancing;
     report.textContent = await checkVents(gpu, text => { report.textContent = text; });
+    await reset();
+  } catch (e) { report.textContent += `\n✗ ${e instanceof Error ? e.message : String(e)}`; failure(e); }
+};
+element('flight-checks').onclick = async () => {
+  if (!gpu || busy) return;
+  paused = true; lock(true); status.textContent = 'Проверка баллистического полёта…';
+  try {
+    await advancing;
+    report.textContent = await checkFlight(gpu, text => { report.textContent = text; });
     await reset();
   } catch (e) { report.textContent += `\n✗ ${e instanceof Error ? e.message : String(e)}`; failure(e); }
 };

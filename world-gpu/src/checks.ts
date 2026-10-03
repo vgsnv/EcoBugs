@@ -2,10 +2,10 @@ import { GpuWorld, type Snapshot } from './gpu.ts';
 import { createGrid, massByComponent, type Grid, type Scene } from './model.ts';
 
 export function diagnose(grid: Grid, shot: Snapshot) {
-  let total = 0, dissolved = 0, captured = 0, reserved = 0, leak = 0, maxSpeed = 0;
+  let total = 0, dissolved = 0, captured = 0, reserved = 0, flying = 0, leak = 0, maxSpeed = 0;
   let residual = 0, sourceNorm = 0;
   for (let k = 0; k < grid.cols * grid.rows; k++) {
-    dissolved += shot.state[k * 4]; captured += shot.state[k * 4 + 1]; reserved += shot.state[k * 4 + 2];
+    dissolved += shot.state[k * 4]; captured += shot.state[k * 4 + 1]; reserved += shot.state[k * 4 + 2]; flying += shot.state[k * 4 + 3];
     if (grid.geometry[k * 4 + 2]) leak += shot.state[k * 4];
     maxSpeed = Math.max(maxSpeed, Math.abs(shot.flow[k * 2]), Math.abs(shot.flow[k * 2 + 1]));
     const x = k % grid.cols, y = Math.floor(k / grid.cols);
@@ -18,8 +18,8 @@ export function diagnose(grid: Grid, shot: Snapshot) {
     residual += (balance - source) ** 2;
     sourceNorm += source ** 2;
   }
-  total = dissolved + captured + reserved;
-  return { step: shot.step, total, dissolved, captured, reserved, massError: total - grid.total, leak,
+  total = dissolved + captured + reserved + flying;
+  return { step: shot.step, total, dissolved, captured, reserved, flying, massError: total - grid.total, leak,
     maxSpeed: maxSpeed * grid.cell, relativeResidual: sourceNorm ? Math.sqrt(residual / sourceNorm) : Math.sqrt(residual) };
 }
 
