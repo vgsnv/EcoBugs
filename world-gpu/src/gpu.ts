@@ -1,9 +1,13 @@
 import physics from './physics.wgsl?raw';
 import drawing from './render.wgsl?raw';
 import summaryShader from './summary.wgsl?raw';
+import sorShader from './pressure-sor.wgsl?raw';
 import { type Grid } from './model.ts';
 
 export interface Snapshot { state: Uint32Array; pressure: Float32Array; flow: Float32Array; step: number }
+export type PressureMethod = 'sor' | 'jacobi';
+export interface PressureOptions { method?: PressureMethod; iterations?: number }
+export interface PressureResult { method: PressureMethod; iterations: number; passes: number; milliseconds: number }
 export class GpuWorld {
   readonly device: GPUDevice;
   readonly adapter: GPUAdapter;
@@ -25,12 +29,15 @@ export class GpuWorld {
   private summaries!: GPUBuffer;
   private summaryPipeline!: GPUComputePipeline;
   private summaryGroups!: GPUBindGroup[];
+  private sor!: [GPUComputePipeline, GPUComputePipeline];
+  private sorGroup!: GPUBindGroup;
   private current = 0;
   private pressureIndex = 0;
   grid!: Grid;
   step = 0;
   lost = false;
   errors: string[] = [];
+  pressureResult: PressureResult | null = null;
 
   private constructor(canvas: HTMLCanvasElement, adapter: GPUAdapter, device: GPUDevice) {
     this.canvas = canvas; this.adapter = adapter; this.device = device;
@@ -57,7 +64,7 @@ export class GpuWorld {
     return b;
   }
 
-  async reset(grid: Grid, iterations = 4096): Promise<void> {
+  async reset(grid: Grid, options: PressureOptions = {}): Promise<void> {
     if (this.lost) throw new Error('Устройство GPU потеряно. Перезагрузите прототип.');
     await this.device.queue.onSubmittedWorkDone();
     for (const b of this.buffers) b.destroy(); this.buffers = [];
@@ -101,20 +108,54 @@ export class GpuWorld {
       module: d.createShaderModule({ label: 'diagnostic reduction', code: summaryShader }), entryPoint: 'summarize' } });
     this.summaryGroups = this.states.map(state => d.createBindGroup({ layout: this.summaryPipeline.getBindGroupLayout(0), entries:
       [this.uniform, this.geometry, state, this.flow, this.summaries].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+    const sorModule = d.createShaderModule({ label: 'red-black SOR pressure', code: sorShader });
+    const sorLayout = d.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+    ] });
+    const sorPipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [sorLayout] });
+    this.sor = await Promise.all(['red', 'black'].map(entryPoint => d.createComputePipelineAsync({
+      layout: sorPipelineLayout, compute: { module: sorModule, entryPoint } }))) as [GPUComputePipeline, GPUComputePipeline];
+    const sorData = new ArrayBuffer(16); new Uint32Array(sorData).set([grid.cols, grid.rows]); new Float32Array(sorData)[2] = 1.95;
+    const sorParams = this.buffer('SOR dimensions', new Uint8Array(sorData), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    this.sorGroup = d.createBindGroup({ layout: sorLayout, entries: [sorParams, this.geometry, this.pressures[0]]
+      .map((buffer, binding) => ({ binding, resource: { buffer } })) });
     const error = await d.popErrorScope(); if (error) throw new Error(error.message);
     this.writeParams();
-    // Static scenes solve once. Dynamic fields will require a measured update cadence later.
-    for (let start = 0; start < iterations; start += 256) {
+    await this.solvePressure(options);
+    if (this.errors.length) throw new Error(this.errors.join('\n'));
+  }
+
+  /** Solve the same equation from zero; preserves mineral/step and allows an honest solver comparison. */
+  async solvePressure(options: PressureOptions = {}): Promise<PressureResult> {
+    const d = this.device, method = options.method ?? 'sor';
+    const iterations = options.iterations ?? (method === 'jacobi'
+      ? this.grid.cols ** 2 * (this.grid.scene === 'passage' ? 32 : 4)
+      : Math.max(256, this.grid.cols ** 2 * (this.grid.scene === 'passage' ? 1 : 1 / 8)));
+    this.pressureIndex = 0;
+    const started = performance.now(), clear = d.createCommandEncoder();
+    for (const buffer of this.pressures) clear.clearBuffer(buffer);
+    d.queue.submit([clear.finish()]);
+    const chunk = method === 'sor' ? 128 : 256;
+    for (let start = 0; start < iterations; start += chunk) {
       const encoder = d.createCommandEncoder();
-      for (let i = start; i < Math.min(start + 256, iterations); i++) {
-        this.dispatch(encoder, 'solve'); this.pressureIndex = 1 - this.pressureIndex;
+      for (let i = start; i < Math.min(start + chunk, iterations); i++) {
+        if (method === 'jacobi') { this.dispatch(encoder, 'solve'); this.pressureIndex = 1 - this.pressureIndex; }
+        else {
+          for (const pipeline of this.sor) {
+            const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, this.sorGroup);
+            pass.dispatchWorkgroups(Math.ceil(this.grid.cols * this.grid.rows / 64)); pass.end();
+          }
+        }
       }
       d.queue.submit([encoder.finish()]);
       await d.queue.onSubmittedWorkDone(); // Bound queue length and yield during initialization.
     }
     const encoder = d.createCommandEncoder(); this.dispatch(encoder, 'velocity'); d.queue.submit([encoder.finish()]);
     await d.queue.onSubmittedWorkDone();
-    if (this.errors.length) throw new Error(this.errors.join('\n'));
+    this.pressureResult = { method, iterations, passes: iterations * (method === 'sor' ? 2 : 1), milliseconds: performance.now() - started };
+    return this.pressureResult;
   }
 
   private writeParams(): void {

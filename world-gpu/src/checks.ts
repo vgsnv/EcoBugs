@@ -55,11 +55,22 @@ export async function runChecks(gpu: GpuWorld, publish: (text: string) => void):
   for (const scene of ['quiet', 'contrast', 'wall', 'passage', 'circle', 'layers', 'funnel', 'burst'] as Scene[]) {
     publish(`${rows.join('\n')}\nПроверяю: ${scene}…`);
     const grid = createGrid(scene, 32), iterations = scene === 'passage' ? 32768 : 4096;
-    await gpu.reset(grid, iterations);
+    await gpu.reset(grid);
     const initial = await gpu.snapshot();
     const reference = referencePressure(grid, iterations);
+    // Neumann pressure has an arbitrary additive constant in each isolated region.
+    const means: number[] = [], referenceMeans: number[] = [], counts: number[] = [];
+    for (let k = 0; k < reference.length; k++) {
+      const area = grid.components[k]; if (area < 0) continue;
+      means[area] = (means[area] ?? 0) + initial.pressure[k]; referenceMeans[area] = (referenceMeans[area] ?? 0) + reference[k];
+      counts[area] = (counts[area] ?? 0) + 1;
+    }
     let difference = 0;
-    for (let k = 0; k < reference.length; k++) difference = Math.max(difference, Math.abs(initial.pressure[k] - reference[k]));
+    for (let k = 0; k < reference.length; k++) {
+      const area = grid.components[k]; if (area < 0) continue;
+      const offset = (means[area] - referenceMeans[area]) / counts[area];
+      difference = Math.max(difference, Math.abs(initial.pressure[k] - reference[k] - offset));
+    }
     assert(difference < .002, `${scene}: GPU/CPU давление расходится на ${difference}`);
     const pressure = diagnose(grid, initial);
     assert(pressure.relativeResidual < .003, `${scene}: невязка ${pressure.relativeResidual}`);
@@ -91,10 +102,10 @@ export async function runChecks(gpu: GpuWorld, publish: (text: string) => void):
       assert(Math.abs(narrow.flux - wide.flux) / narrow.flux < .01, 'Расход через проход не сохраняется');
     }
     if (scene === 'contrast') {
-      await gpu.reset(grid, iterations); await run(400);
+      await gpu.reset(grid); await run(400);
       const repeated = await gpu.snapshot();
       assert(repeated.state.every((m, k) => m === shot.state[k]), 'Повтор запуска отличается');
-      await gpu.reset(grid, iterations);
+      await gpu.reset(grid);
       // Different submission batching must not alter model steps or fractional residues.
       for (let k = 0; k < 400; k++) { gpu.advance(); if (k % 5 === 0) await gpu.device.queue.onSubmittedWorkDone(); }
       const differentlyScheduled = await gpu.snapshot();
@@ -110,7 +121,7 @@ export async function runChecks(gpu: GpuWorld, publish: (text: string) => void):
     reversed.state[k * 4] = reversed.geometry[k * 4 + 3] ? 100000 : 0;
   }
   reversed.total = reversed.state.reduce((a, b) => a + b, 0);
-  await gpu.reset(reversed, 4096); await run(400);
+  await gpu.reset(reversed); await run(400);
   const closedHole = await gpu.snapshot();
   assert(diagnose(reversed, closedHole).massError === 0, 'Обратная воронка нарушила массу');
   for (let k = 0; k < reversed.components.length; k++) {
@@ -124,7 +135,7 @@ export async function runChecks(gpu: GpuWorld, publish: (text: string) => void):
   const donors = [6, 12, 26].map(x => 12 * layers.cols + x);
   for (const k of donors) layers.state[k * 4] = 100000;
   layers.total = 300000;
-  await gpu.reset(layers, 4096); gpu.advance();
+  await gpu.reset(layers); gpu.advance();
   const thinLayer = await gpu.snapshot();
   for (const k of donors) {
     const moved = 100000 - thinLayer.state[k * 4];
@@ -136,14 +147,14 @@ export async function runChecks(gpu: GpuWorld, publish: (text: string) => void):
   for (const cols of [64, 128]) {
     publish(`${rows.join('\n')}\nПроверяю сетку ${cols}…`);
     const larger = createGrid('contrast', cols);
-    await gpu.reset(larger, cols * cols * 4); await run(400);
+    await gpu.reset(larger); await run(400);
     const metrics = diagnose(larger, await gpu.snapshot());
     assert(metrics.massError === 0 && metrics.relativeResidual < .003, `Сетка ${cols}: баланс или сходимость`);
     rows.push(`✓ ${cols}×${larger.rows}: Δмассы 0, невязка ${metrics.relativeResidual.toExponential(2)}`);
   }
   publish(`${rows.join('\n')}\nДлительный прогон: 100 000 шагов…`);
   const long = createGrid('contrast', 32);
-  await gpu.reset(long, 4096); await run(100000);
+  await gpu.reset(long); await run(100000);
   const final = diagnose(long, await gpu.snapshot());
   assert(final.massError === 0 && final.leak === 0, 'Длительный прогон нарушил баланс');
   rows.push('✓ 100 000 шагов: Δмассы 0, утечки 0');
