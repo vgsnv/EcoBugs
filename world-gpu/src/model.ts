@@ -2,9 +2,9 @@ import { type SourceConfig } from './sources.ts';
 import { type Vent } from './vents.ts';
 
 /** Controlled physical scenes, not the complete world generator. */
-export type Scene = 'volcanoes' | 'volcano-wall' | 'flight-impact' | 'flight-slide' | 'flight' | 'flight-wall' | 'flight-island' | 'flight-hole' | 'sun-flight' | 'vents' | 'vent-wall' | 'vent-passage' | 'vent-layers' | 'sun-vents' | 'light' | 'light-wall' | 'quiet' | 'contrast' | 'wall' | 'passage' | 'circle' | 'layers' | 'funnel' | 'burst';
+export type Scene = 'mineral' | 'volcanoes' | 'volcano-wall' | 'flight-impact' | 'flight-slide' | 'flight' | 'flight-wall' | 'flight-island' | 'flight-hole' | 'sun-flight' | 'vents' | 'vent-wall' | 'vent-passage' | 'vent-layers' | 'sun-vents' | 'light' | 'light-wall' | 'quiet' | 'contrast' | 'wall' | 'passage' | 'circle' | 'layers' | 'funnel' | 'burst';
 export const SCENES: Record<Scene, string> = {
-  volcanoes:'Жизнь вулканов', 'volcano-wall':'Общие недра в отсеках',
+  mineral:'Растекание и залежи', volcanoes:'Жизнь вулканов', 'volcano-wall':'Общие недра в отсеках',
   'flight-impact': 'Прямой удар о стену', 'flight-slide': 'Скольжение вдоль стены', flight: 'Залп: полёт', 'flight-wall': 'Полёт и стенка', 'flight-island': 'Полёт через сушу', 'flight-hole': 'Полёт и отверстие', 'sun-flight': 'Свет + полёт + воронка',
   vents: 'Залп и тяга', 'vent-wall': 'Толчки в закрытых отсеках', 'vent-passage': 'Толчок через проход', 'vent-layers': 'Толчок и сопротивление', 'sun-vents': 'Свет + залп + воронка',
   light: 'Дрейф света', 'light-wall': 'Свет в закрытых отсеках',
@@ -26,6 +26,9 @@ export interface Grid {
   pushLength?: number;
   sources?: SourceConfig;
   underground?: number;
+  /** Ground and deposits in integer quanta; remaining channels reserved. */
+  terrain?: Uint32Array;
+  mineral?: { diffusion:number; settling:number; dissolution:number; runoff:number };
   ballistics?: { range: number; speed: number; capacity: number; seed: number; count?: number; direction?: [number,number] };
   light?: { drift: number; sun: number; background: number; rhythm: number; contrast: number; entrainment: number };
 }
@@ -82,7 +85,7 @@ export function createGrid(scene: Scene, cols = 64): Grid {
     if (scene === 'flight-island' && u * width > 540 && u * width < 575 && v > .25 && v < .75) geometry[k * 4] = 1 / 9;
     if (scene === 'contrast' || scene === 'wall' || scene === 'layers') {
       geometry[k * 4 + 1] = .018 * Math.cos(u * Math.PI * 2);
-    } else if (scene !== 'quiet' && scene !== 'light' && scene !== 'light-wall' && !hasSource) {
+    } else if (scene !== 'quiet' && scene !== 'mineral' && scene !== 'light' && scene !== 'light-wall' && !hasSource) {
       // A prescribed balanced source/return pair; full sunlight and damped vent solves come later.
       const left = Math.exp(-((u - .24) ** 2 + (v - .5) ** 2) / .009);
       const right = Math.exp(-((u - .76) ** 2 + (v - .5) ** 2) / .009);
@@ -115,9 +118,10 @@ export function createGrid(scene: Scene, cols = 64): Grid {
     state.fill(0);const stock=5_000_000;
     const sources:SourceConfig={seed:9307,stock,sites:Array.from(components,(_,k)=>k).filter(k=>components[k]>=0&&!geometry[k*4+3])};
     const events:Vent[]=Array.from({length:5},()=>({cell:0,rate:0,start:0,end:0}));events.push({cell:sy*cols+Math.floor(cols*.76),rate:-8000,start:0,end:1e9});
-    return {scene,cols,rows,width,height,cell,geometry,state,components,total:stock,sourceCell,vents:events,sources,underground:stock,ballistics:{range:150,speed:240,capacity:1024,seed:6107},pushLength:200};
+    return {scene,cols,rows,width,height,cell,geometry,state,components,total:stock,sourceCell,vents:events,sources,underground:stock,mineral:{diffusion:100,settling:.0001,dissolution:.00005,runoff:100},ballistics:{range:150,speed:240,capacity:1024,seed:6107},pushLength:200};
   }
-  return { scene, cols, rows, width, height, cell, geometry, state, components, total, sourceCell, light, vents, ballistics, pushLength: 200 };
+  const mineral=scene==='mineral'?{diffusion:100,settling:.0001,dissolution:.00005,runoff:100}:undefined;
+  return { mineral, scene, cols, rows, width, height, cell, geometry, state, components, total, sourceCell, light, vents, ballistics, pushLength: 200 };
 }
 
 export function massByComponent(grid: Grid, state: Uint32Array): number[] {

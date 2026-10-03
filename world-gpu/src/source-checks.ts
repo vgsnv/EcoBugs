@@ -44,7 +44,7 @@ export async function checkSources(gpu:GpuWorld,publish:(text:string)=>void):Pro
   rows.push(`✓ отверстие вернуло ${(drained.shot.reservoir[0]*.001).toFixed(2)} мг в общий запас; обычный слой остался`);publish(rows.join('\n'));
   const replay=createGrid('volcanoes',32);await gpu.reset(replay);await run(1200,16);const first=await validate(replay),events=JSON.stringify(gpu.sources);
   await gpu.reset(createGrid('volcanoes',32));await run(1200,5);const second=await validate(gpu.grid);
-  assert(same(first.shot.state,second.shot.state)&&same(first.shot.particles,second.shot.particles)&&same(first.shot.reservoir,second.shot.reservoir)&&same(first.shot.flow,second.shot.flow)&&events===JSON.stringify(gpu.sources),'Источники зависят от разбивки кадров');
+  assert(same(first.shot.state,second.shot.state)&&same(first.shot.particles,second.shot.particles)&&same(first.shot.reservoir,second.shot.reservoir)&&same(first.shot.flow,second.shot.flow)&&same(first.shot.terrain,second.shot.terrain)&&events===JSON.stringify(gpu.sources),'Источники зависят от разбивки кадров');
   rows.push(`✓ 1200 шагов: GPU-состояние, общий запас и автомат побитово повторились; ${gpu.sources!.eruptions} извержений`);publish(rows.join('\n'));
   await run(1800);await validate(gpu.grid);rows.push('✓ 3000 шагов: общий баланс точен, нет ошибок очереди или полёта');publish(rows.join('\n'));
   for(const cols of [64,128]){const grid=createGrid('volcanoes',cols);await gpu.reset(grid);await run(220);await validate(grid);assert(gpu.sources!.eruptions>0,'Сетка не запустила вулкан');rows.push(`✓ ${cols}×${grid.rows}: резерв, залпы, истечение и общий баланс проверены`);publish(rows.join('\n'));}

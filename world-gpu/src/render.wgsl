@@ -6,6 +6,7 @@ struct View { cols: u32, rows: u32, cell: f32, time: f32, arrows: u32, burst: u3
 @group(0) @binding(4) var<storage, read> field: array<vec4f>;
 @group(0) @binding(5) var<storage, read> vents: array<vec4f>;
 @group(0) @binding(6) var<storage,read> markers:array<vec4f>;
+@group(0) @binding(7) var<storage,read> terrain:array<vec4u>;
 struct Varying { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertex(@builtin(vertex_index) i: u32) -> Varying {
   let p = array<vec2f, 3>(vec2f(-1., -1.), vec2f(3., -1.), vec2f(-1., 3.))[i];
@@ -34,6 +35,8 @@ fn concentration(k:u32,px:i32,py:i32)->f32 {
   let density=mix(mix(concentration(k,corner.x,corner.y),concentration(k,corner.x+1,corner.y),blend.x),
     mix(concentration(k,corner.x,corner.y+1),concentration(k,corner.x+1,corner.y+1),blend.x),blend.y);
   let mineral = clamp(log(1. + density * 75.) / 2.7, 0., .88);
+  let deposit=clamp(log(1.+f32(terrain[k].y)*.001/(view.cell*view.cell)*100.),0.,.8);
+  base=mix(base,vec3f(.3,.17,.43),deposit);
   var color = mix(base, vec3f(.69, .46, .83), mineral);
   let west = select(k, k - 1u, x > 0u);
   let north = select(k, k - view.cols, y > 0u);
