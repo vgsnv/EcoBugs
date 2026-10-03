@@ -97,9 +97,10 @@ export class GpuWorld {
       throw new Error('Стенд поддерживает одно активное жерло с резервом.');
     }
     if (grid.ballistics) {
-      const { capacity, speed, range, direction } = grid.ballistics;
+      const { capacity, speed, range, direction, count } = grid.ballistics;
       if (emitters.length !== 1 || !Number.isInteger(capacity) || capacity < 1 || capacity > 4096
         || !Number.isFinite(speed) || speed <= 0 || !Number.isFinite(range) || range <= 0
+        || (count !== undefined && (!Number.isInteger(count) || count < 1 || count > 256))
         || (direction && (!direction.every(Number.isFinite) || Math.hypot(...direction) === 0))) {
         throw new Error('Недопустимые параметры полёта.');
       }
@@ -113,7 +114,7 @@ export class GpuWorld {
     this.view = this.buffer('render params', 32, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.geometry = this.buffer('geometry', grid.geometry, storage);
     this.field = this.buffer('physical light field', n * 16, storage);
-    this.packets = this.buffer('ballistic packets', (grid.ballistics?.capacity ?? 1) * 48, storage);
+    this.packets = this.buffer('ballistic packets', (grid.ballistics?.capacity ?? 1) * 64, storage);
     this.landing = this.buffer('atomic landings', n * 4, storage);
     this.flightLedger = this.buffer('flight ledger', 16, storage);
     this.ventField = this.buffer('screened push field', n * 16, storage);
@@ -203,6 +204,9 @@ export class GpuWorld {
       this.flightParams = this.buffer('ballistic parameters',64,GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
       const layout=d.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},...[1,2,3,4,5,6].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:[1,5].includes(binding)?'read-only-storage' as const:'storage' as const}}))]});
       const module=d.createShaderModule({code:ballisticShader}),pipelineLayout=d.createPipelineLayout({bindGroupLayouts:[layout]});
+      const compilation = await module.getCompilationInfo();
+      const errors = compilation.messages.filter(message => message.type === 'error');
+      if (errors.length) throw new Error(errors.map(message => `Баллистика ${message.lineNum}:${message.linePos}: ${message.message}`).join('\n'));
       this.flightPipelines=[];
       for(const entryPoint of ['spawn','fly','gather']) this.flightPipelines.push(await d.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}}));
       this.flightGroups=this.states.map(state=>d.createBindGroup({layout,entries:[this.flightParams,this.geometry,state,this.packets,this.landing,this.flow,this.flightLedger].map((buffer,binding)=>({binding,resource:{buffer}}))}));
@@ -257,7 +261,7 @@ export class GpuWorld {
       const config=this.grid.ballistics, packetData=new ArrayBuffer(64), packetU=new Uint32Array(packetData), packetF=new Float32Array(packetData);
       packetU.set([this.grid.cols,this.grid.rows]);packetF[2]=this.grid.cell;packetF[3]=.1;
       packetU.set([this.step,this.grid.sourceCell,u[8],config.capacity],4);
-      packetF[8]=config.range;packetF[9]=config.speed;packetU[10]=64;packetU[11]=config.seed;
+      packetF[8]=config.range;packetF[9]=config.speed;packetU[10]=config.count ?? 64;packetU[11]=config.seed;
       if (config.direction) packetF.set([...config.direction,1,0],12);
       this.device.queue.writeBuffer(this.flightParams,0,packetData);
     }
@@ -357,7 +361,7 @@ export class GpuWorld {
 
   /** Full readback is for checks only; drawing never reads physics back to CPU. */
   async snapshot(): Promise<Snapshot> {
-    const n = this.grid.cols * this.grid.rows, size = n * 60 + (this.grid.ballistics?.capacity ?? 1) * 48;
+    const n = this.grid.cols * this.grid.rows, size = n * 60 + (this.grid.ballistics?.capacity ?? 1) * 64;
     const buffer = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder();
     encoder.copyBufferToBuffer(this.states[this.current], 0, buffer, 0, n * 16);
@@ -365,25 +369,26 @@ export class GpuWorld {
     encoder.copyBufferToBuffer(this.flow, 0, buffer, n * 20, n * 8);
     encoder.copyBufferToBuffer(this.field, 0, buffer, n * 28, n * 16);
     encoder.copyBufferToBuffer(this.ventField, 0, buffer, n * 44, n * 16);
-    encoder.copyBufferToBuffer(this.packets,0,buffer,n*60,(this.grid.ballistics?.capacity ?? 1)*48);
+    encoder.copyBufferToBuffer(this.packets,0,buffer,n*60,(this.grid.ballistics?.capacity ?? 1)*64);
     const step = this.step;
     this.device.queue.submit([encoder.finish()]);
     try {
       await buffer.mapAsync(GPUMapMode.READ);
       const copy = buffer.getMappedRange().slice(0);
       return { state: new Uint32Array(copy, 0, n * 4), pressure: new Float32Array(copy, n * 16, n),
-        flow: new Float32Array(copy, n * 20, n * 2), field: new Float32Array(copy, n * 28, n * 4), vents: new Float32Array(copy,n*44,n*4), particles:new Float32Array(copy,n*60,(this.grid.ballistics?.capacity ?? 1)*12), step };
+        flow: new Float32Array(copy, n * 20, n * 2), field: new Float32Array(copy, n * 28, n * 4), vents: new Float32Array(copy,n*44,n*4), particles:new Float32Array(copy,n*60,(this.grid.ballistics?.capacity ?? 1)*16), step };
     } finally { buffer.unmap(); buffer.destroy(); }
   }
 
   async summary() {
     this.writeParams();
     const grid = this.grid;
-    const groups = Math.ceil(grid.cols * grid.rows / 64), size = groups * 32;
+    const groups = Math.ceil(grid.cols * grid.rows / 64), size = groups * 32 + 16;
     const buffer = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder(), pass = encoder.beginComputePass();
     pass.setPipeline(this.summaryPipeline); pass.setBindGroup(0, this.summaryGroups[this.current]);
-    pass.dispatchWorkgroups(groups); pass.end(); encoder.copyBufferToBuffer(this.summaries, 0, buffer, 0, size);
+    pass.dispatchWorkgroups(groups); pass.end(); encoder.copyBufferToBuffer(this.summaries, 0, buffer, 0, groups * 32);
+    encoder.copyBufferToBuffer(this.flightLedger, 0, buffer, groups * 32, 16);
     const step = this.step; this.device.queue.submit([encoder.finish()]);
     try {
       await buffer.mapAsync(GPUMapMode.READ);
@@ -393,7 +398,7 @@ export class GpuWorld {
         dissolved += u[k]; captured += u[k + 1]; reserved += u[k + 2]; maxSpeed = Math.max(maxSpeed, f[k + 3]);
         residual += f[k + 4]; scale += f[k + 5]; leak += u[k + 6]; flying += u[k + 7];
       }
-      return { step, dissolved, captured, reserved, flying, maxSpeed: maxSpeed * grid.cell, leak,
+      return { step, dissolved, captured, reserved, flying, flightOverflow: u[groups * 8 + 3], maxSpeed: maxSpeed * grid.cell, leak,
         massError: dissolved + captured + reserved + flying - grid.total,
         relativeResidual: scale ? Math.sqrt(residual / scale) : Math.sqrt(residual) };
     } finally { buffer.unmap(); buffer.destroy(); }

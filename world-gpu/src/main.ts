@@ -38,10 +38,11 @@ async function metrics(): Promise<void> {
     const observedGrid = gpu.grid;
     const m = await gpu.summary();
     if (busy || gpu.grid !== observedGrid) return;
+    if (m.flightOverflow) throw new Error('Слишком много столкновений за шаг: движение вещества не удалось рассчитать полностью. Расчёт остановлен.');
     completedStep = m.step;
-    const values = [['В среде', `${(m.dissolved * QUANTUM_MG).toFixed(2)} мг`], ['В недрах', `${((m.captured + m.reserved) * QUANTUM_MG).toFixed(2)} мг`],
+    const values = [['В среде', `${((m.dissolved + m.flying) * QUANTUM_MG).toFixed(2)} мг`], ['В недрах', `${((m.captured + m.reserved) * QUANTUM_MG).toFixed(2)} мг`],
       ['Ошибка массы', `${m.massError} квантов`], ['Макс. скорость грани', `${m.maxSpeed.toFixed(2)} мм/с`], ['Невязка давления', m.relativeResidual.toExponential(2)]];
-    if (gpu.grid.ballistics) values.push(['В полёте', `${(m.flying * QUANTUM_MG).toFixed(2)} мг`]);
+    if (gpu.grid.ballistics) values.push(['Из них растворено', `${(m.dissolved * QUANTUM_MG).toFixed(2)} мг`], ['Из них в полёте', `${(m.flying * QUANTUM_MG).toFixed(2)} мг`]);
     if (gpu.grid.vents) values.push(['Расчёт толчка', `${gpu.ventMilliseconds.toFixed(1)} мс`]);
     if (gpu.pressureResult) values.push(['Подготовка давления SOR', `${gpu.pressureResult.milliseconds.toFixed(1)} мс`]);
     element('metrics').innerHTML = values.map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`).join('');

@@ -20,7 +20,7 @@ for (const cols of [32, 64, 128]) for (const scene of Object.keys(SCENES)) {
   assert.ok(sums.every((sum, id) => Math.abs(sum) <= Math.max(1e-7, scales[id] * 1e-6)), `${scene}: unbalanced closed region`);
   assert.equal(massByComponent(grid, grid.state).reduce((a, b) => a + b, 0), grid.total);
   assert.ok(grid.total < 0xffffffff);
-  assert.equal(new Set([...grid.components].filter(id => id >= 0)).size, scene === 'wall' || scene === 'light-wall' || scene === 'vent-wall' || scene === 'flight-wall' ? 2 : 1);
+  assert.equal(new Set([...grid.components].filter(id => id >= 0)).size, scene === 'wall' || scene === 'light-wall' || scene === 'vent-wall' || scene === 'flight-wall' || scene === 'flight-impact' || scene === 'flight-slide' ? 2 : 1);
 }
 console.log(`${Object.keys(SCENES).length * 3} scenes: source balance per connected region, bounded integer mass, deterministic setup, impermeable geometry.`);
 

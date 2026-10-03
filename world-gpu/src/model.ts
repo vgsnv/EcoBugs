@@ -1,9 +1,9 @@
 import { type Vent } from './vents.ts';
 
 /** Controlled physical scenes, not the complete world generator. */
-export type Scene = 'flight' | 'flight-wall' | 'flight-island' | 'flight-hole' | 'sun-flight' | 'vents' | 'vent-wall' | 'vent-passage' | 'vent-layers' | 'sun-vents' | 'light' | 'light-wall' | 'quiet' | 'contrast' | 'wall' | 'passage' | 'circle' | 'layers' | 'funnel' | 'burst';
+export type Scene = 'flight-impact' | 'flight-slide' | 'flight' | 'flight-wall' | 'flight-island' | 'flight-hole' | 'sun-flight' | 'vents' | 'vent-wall' | 'vent-passage' | 'vent-layers' | 'sun-vents' | 'light' | 'light-wall' | 'quiet' | 'contrast' | 'wall' | 'passage' | 'circle' | 'layers' | 'funnel' | 'burst';
 export const SCENES: Record<Scene, string> = {
-  flight: 'Залп: полёт', 'flight-wall': 'Полёт и стенка', 'flight-island': 'Полёт через сушу', 'flight-hole': 'Полёт и отверстие', 'sun-flight': 'Свет + полёт + воронка',
+  'flight-impact': 'Прямой удар о стену', 'flight-slide': 'Скольжение вдоль стены', flight: 'Залп: полёт', 'flight-wall': 'Полёт и стенка', 'flight-island': 'Полёт через сушу', 'flight-hole': 'Полёт и отверстие', 'sun-flight': 'Свет + полёт + воронка',
   vents: 'Залп и тяга', 'vent-wall': 'Толчки в закрытых отсеках', 'vent-passage': 'Толчок через проход', 'vent-layers': 'Толчок и сопротивление', 'sun-vents': 'Свет + залп + воронка',
   light: 'Дрейф света', 'light-wall': 'Свет в закрытых отсеках',
   contrast: 'Свет → тень', passage: 'Узкий проход', wall: 'Закрытые отсеки',
@@ -22,7 +22,7 @@ export interface Grid {
   sourceCell: number;
   vents?: Vent[];
   pushLength?: number;
-  ballistics?: { range: number; speed: number; capacity: number; seed: number; direction?: [number,number] };
+  ballistics?: { range: number; speed: number; capacity: number; seed: number; count?: number; direction?: [number,number] };
   light?: { drift: number; sun: number; background: number; rhythm: number; contrast: number; entrainment: number };
 }
 
@@ -65,12 +65,12 @@ export function createGrid(scene: Scene, cols = 64): Grid {
   const height = scene === 'circle' ? width : 1200;
   const n = cols * rows, geometry = new Float32Array(n * 4), state = new Uint32Array(n * 4);
   const cell = width / cols;
-  const sx = Math.floor(cols * .24), sy = Math.floor(rows * .5), sourceCell = sy * cols + sx;
+  const sx = Math.floor(cols * (scene === 'flight-impact' || scene === 'flight-slide' ? .43 : .24)), sy = Math.floor(rows * .5), sourceCell = sy * cols + sx;
   for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
     const k = y * cols + x, u = (x + .5) / cols, v = (y + .5) / rows;
     const circleOutside = scene === 'circle' && Math.hypot(u - .5, v - .5) >= .5;
-    const wall = (scene === 'wall' || scene === 'light-wall' || scene === 'flight-wall' || scene === 'vent-wall' || scene === 'vent-passage' || scene === 'passage') && x === Math.floor(cols / 2)
-      && (scene === 'wall' || scene === 'light-wall' || scene === 'flight-wall' || scene === 'vent-wall' || Math.abs(v - .5) > .08);
+    const wall = (scene === 'wall' || scene === 'light-wall' || scene === 'flight-wall' || scene === 'flight-impact' || scene === 'flight-slide' || scene === 'vent-wall' || scene === 'vent-passage' || scene === 'passage') && x === Math.floor(cols / 2)
+      && (scene === 'wall' || scene === 'light-wall' || scene === 'flight-wall' || scene === 'flight-impact' || scene === 'flight-slide' || scene === 'vent-wall' || Math.abs(v - .5) > .08);
     geometry[k * 4 + 2] = Number(circleOutside || wall);
     if (circleOutside || wall) continue;
     geometry[k * 4] = (scene === 'layers' || scene === 'vent-layers') ? (u < 1 / 3 ? 1 : u < 2 / 3 ? 1 / 3 : 1 / 9) : 1;
@@ -102,7 +102,10 @@ export function createGrid(scene: Scene, cols = 64): Grid {
     {cell: sy * cols + Math.floor(cols * holeU), rate: -8000, start: 0, end: 1e9},
   ] : undefined;
   if (scene.includes('flight') && scene !== 'sun-flight' && scene !== 'flight-hole') vents!.pop();
-  const ballistics = scene.includes('flight') ? {range: 480, speed: 250, capacity: 1024, seed: 6107} : undefined;
+  const ballistics: Grid['ballistics'] = scene.includes('flight') ? {range: 480, speed: 250, capacity: 1024, seed: 6107} : undefined;
+  if (scene === 'flight-impact' || scene === 'flight-slide') {
+    ballistics!.range=800;ballistics!.speed=400;ballistics!.direction=scene==='flight-impact'?[1,0]:[1,.65];
+  }
   return { scene, cols, rows, width, height, cell, geometry, state, components, total, sourceCell, light, vents, ballistics, pushLength: 200 };
 }
 

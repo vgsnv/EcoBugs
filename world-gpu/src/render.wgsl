@@ -10,6 +10,16 @@ struct Varying { @builtin(position) position: vec4f, @location(0) uv: vec2f }
   let p = array<vec2f, 3>(vec2f(-1., -1.), vec2f(3., -1.), vec2f(-1., 3.))[i];
   return Varying(vec4f(p, 0., 1.), vec2f(p.x * .5 + .5, .5 - p.y * .5));
 }
+// Interpolate the physical field without colouring through walls, corners or hole lips.
+fn concentration(k:u32,px:i32,py:i32)->f32 {
+  let own=f32(state[k].x)*.001/(view.cell*view.cell);
+  if(px<0||py<0||px>=i32(view.cols)||py>=i32(view.rows)){return own;}
+  let j=u32(py)*view.cols+u32(px);let x=i32(k%view.cols);let y=i32(k/view.cols);
+  if(geo[j].z>.5||(geo[j].w>.5)!=(geo[k].w>.5)){return own;}
+  if(px!=x&&py!=y&&(geo[u32(y)*view.cols+u32(px)].z>.5||geo[u32(py)*view.cols+u32(x)].z>.5
+    ||(geo[u32(y)*view.cols+u32(px)].w>.5)!=(geo[k].w>.5)||(geo[u32(py)*view.cols+u32(x)].w>.5)!=(geo[k].w>.5))){return own;}
+  return f32(state[j].x)*.001/(view.cell*view.cell);
+}
 @fragment fn fragment(in: Varying) -> @location(0) vec4f {
   let pos = in.uv * vec2f(f32(view.cols), f32(view.rows));
   let x = min(view.cols - 1u, u32(pos.x)); let y = min(view.rows - 1u, u32(pos.y));
@@ -19,7 +29,9 @@ struct Varying { @builtin(position) position: vec4f, @location(0) uv: vec2f }
   var base = mix(vec3f(.35, .49, .46), vec3f(.035, .18, .25), mobility);
   if (mobility < .15) { base = vec3f(.35, .33, .30); }
   if (view.pad0 == 1u) { base *= .5 + .65 * field[k].x; }
-  let density = f32(state[k].x) * .001 / (view.cell * view.cell);
+  let corner=vec2i(floor(pos-.5));let blend=fract(pos-.5);
+  let density=mix(mix(concentration(k,corner.x,corner.y),concentration(k,corner.x+1,corner.y),blend.x),
+    mix(concentration(k,corner.x,corner.y+1),concentration(k,corner.x+1,corner.y+1),blend.x),blend.y);
   let mineral = clamp(log(1. + density * 75.) / 2.7, 0., .88);
   var color = mix(base, vec3f(.69, .46, .83), mineral);
   let west = select(k, k - 1u, x > 0u);
