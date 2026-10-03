@@ -5,6 +5,7 @@ struct Settings { cols: u32, rows: u32, count: u32, pad: u32,
 @group(0) @binding(2) var<storage, read> vents: array<vec4f>;
 // pressure, signed displacement rate / cell area, friction, unused.
 @group(0) @binding(3) var<storage, read_write> field: array<vec4f>;
+@group(0) @binding(4) var<storage,read> funnels:array<vec4f>;
 fn neighbor(k: u32, d: u32) -> u32 {
   if (d == 0u && k % cfg.cols + 1u < cfg.cols) { return k + 1u; }
   if (d == 1u && k / cfg.cols + 1u < cfg.rows) { return k + cfg.cols; }
@@ -16,7 +17,7 @@ fn neighbor(k: u32, d: u32) -> u32 {
   let k = id.x; if (k >= cfg.cols * cfg.rows) { return; }
   field[k] = vec4f(0.);
   if (geo[k].z > .5) { return; }
-  var source = 0.;
+  var source = funnels[k].y;
   for (var v = 0u; v < cfg.count; v++) {
     if (u32(vents[v].x) == k) { source += vents[v].y; }
   }

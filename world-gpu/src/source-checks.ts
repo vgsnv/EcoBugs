@@ -48,5 +48,5 @@ export async function checkSources(gpu:GpuWorld,publish:(text:string)=>void):Pro
   rows.push(`✓ 1200 шагов: GPU-состояние, общий запас и автомат побитово повторились; ${gpu.sources!.eruptions} извержений`);publish(rows.join('\n'));
   await run(1800);await validate(gpu.grid);rows.push('✓ 3000 шагов: общий баланс точен, нет ошибок очереди или полёта');publish(rows.join('\n'));
   for(const cols of [64,128]){const grid=createGrid('volcanoes',cols);await gpu.reset(grid);await run(220);await validate(grid);assert(gpu.sources!.eruptions>0,'Сетка не запустила вулкан');rows.push(`✓ ${cols}×${grid.rows}: резерв, залпы, истечение и общий баланс проверены`);publish(rows.join('\n'));}
-  assert(gpu.errors.length===0,gpu.errors.join('\n'));rows.push('Проверки общих недр и вулканов прошли. Полный цикл воронок требует залежей.');return rows.join('\n');
+  assert(gpu.errors.length===0,gpu.errors.join('\n'));rows.push('Проверки общих недр и вулканов прошли.');return rows.join('\n');
 }

@@ -87,9 +87,9 @@ fn outward(k: u32, d: u32) -> f32 {
     let emitted = min(state.z, cfg.emission.x); state.z -= emitted; state.x += emitted;
   }
   if (geo[k].w > 0.5) {
-    let threshold = u32(cfg.cell * cfg.cell / 0.001 * 0.005);
+    let threshold = select(u32(cfg.cell * cfg.cell / 0.001 * 0.005),cfg.emission.w,cfg.emission.w>0u);
     let excess = state.x - min(state.x, threshold);
-    let captured = excess / 8u;
+    let captured = select(excess/8u,u32(f32(excess)*max(0.,geo[k].w-2.)*.001),geo[k].w>=2.);
     state.x -= captured; state.y += captured;
   }
   after[k] = state;

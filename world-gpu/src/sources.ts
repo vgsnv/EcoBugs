@@ -5,6 +5,7 @@ export interface SourceConfig { seed:number; stock:number; threshold?:number; pr
 export interface Reservation { cell:number; burst:number; effusion:number }
 /** Small deterministic event controller. Mineral ownership and all transfers remain on GPU. */
 export class Sources {
+  siteWeights:Float32Array|null=null;
   readonly volcanoes:Volcano[]=[];
   threshold:number; startup:boolean; eruptions=0; births=0; private counter=0;
   readonly config:SourceConfig;
@@ -38,9 +39,10 @@ export class Sources {
         chosen=sleeping.find(v=>(choice-=v.power)<0)??sleeping[sleeping.length-1];
       }
       if(!chosen){
-        const occupied=new Set(this.volcanoes.map(v=>v.cell));const sites=this.config.sites.filter(k=>!occupied.has(k));
+        const occupied=new Set(this.volcanoes.map(v=>v.cell));const sites=this.config.sites.filter(k=>!occupied.has(k)&&(!this.siteWeights||this.siteWeights[k]>0));
         if(!sites.length)return null;
-        chosen={id:++this.births,cell:sites[Math.floor(this.random()*sites.length)],power:.01+.99*this.random(),stage:'preparing',begin:step,until:step,bursts:[],effusion:null,eruptions:0};
+        let choice=this.random()*sites.reduce((sum,k)=>sum+(this.siteWeights?.[k]??1),0);const cell=sites.find(k=>(choice-=this.siteWeights?.[k]??1)<0)??sites.at(-1)!;
+        chosen={id:++this.births,cell,power:.01+.99*this.random(),stage:'preparing',begin:step,until:step,bursts:[],effusion:null,eruptions:0};
         this.volcanoes.push(chosen);
       }
       chosen.stage='preparing';chosen.begin=step;

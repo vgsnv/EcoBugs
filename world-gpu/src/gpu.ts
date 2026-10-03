@@ -1,3 +1,5 @@
+import funnelShader from './funnels.wgsl?raw';
+import { Funnels } from './funnels.ts';
 import geologyShader from './geology.wgsl?raw';
 import { Geology } from './geology.ts';
 import mineralShader from './mineral.wgsl?raw';
@@ -51,6 +53,10 @@ export class GpuWorld {
   private ventEvents!: GPUBuffer;
   private ventPipelines!: GPUComputePipeline[];
   private ventGroup!: GPUBindGroup;
+  funnels:Funnels|null=null;
+  private funnelMask!:GPUBuffer;
+  private funnelPipelines!:GPUComputePipeline[];
+  private funnelGroups!:GPUBindGroup[];
   geology:Geology|null=null;
   private geologyParams!:GPUBuffer;
   private geologyEvents!:GPUBuffer;
@@ -137,7 +143,7 @@ export class GpuWorld {
     }
     await this.device.queue.onSubmittedWorkDone();
     for (const b of this.buffers) b.destroy(); this.buffers = [];
-    this.grid = grid;this.geology=grid.geology?new Geology(grid.geology,grid.width,grid.height):null; this.sources=grid.sources?new Sources(grid.sources):null;this.sourceUpdateStep=-1;this.markerCells=[]; this.step = 0; this.current = 0; this.pressureIndex = 0;
+    this.grid = grid;this.funnels=grid.funnels?new Funnels(grid.funnels,grid.cols,grid.rows,grid.cell,grid.geometry):null;this.geology=grid.geology?new Geology(grid.geology,grid.width,grid.height):null; this.sources=grid.sources?new Sources(grid.sources):null;this.sourceUpdateStep=-1;this.markerCells=[]; this.step = 0; this.current = 0; this.pressureIndex = 0;
     const d = this.device, n = grid.cols * grid.rows;
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     this.uniform = this.buffer('physics params', 48, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
@@ -146,6 +152,7 @@ export class GpuWorld {
     this.terrain=this.buffer('ground and deposits',grid.terrain??new Uint32Array(n*4),storage);
     this.field = this.buffer('physical light field', n * 16, storage);
     this.common=this.buffer('shared underground',new Uint32Array([grid.underground??0,0,0,0]),storage);
+    this.funnelMask=this.buffer('funnel influence',n*16,storage);
     this.markers=this.buffer('volcano markers',n*16,storage);
     this.packets = this.buffer('ballistic packets', (grid.ballistics?.capacity ?? 1) * 64, storage);
     this.landing = this.buffer('atomic landings', n * 8, storage);
@@ -224,13 +231,13 @@ export class GpuWorld {
       this.ventEvents = this.buffer('integrated push events', grid.vents.length * 16, storage);
       const layout = d.createBindGroupLayout({entries: [
         {binding:0, visibility:GPUShaderStage.COMPUTE, buffer:{type:'uniform'}},
-        ...[1,2,3].map(binding => ({binding, visibility:GPUShaderStage.COMPUTE, buffer:{type:binding === 3 ? 'storage' as const : 'read-only-storage' as const}}))]});
+        ...[1,2,3,4].map(binding => ({binding, visibility:GPUShaderStage.COMPUTE, buffer:{type:binding === 3 ? 'storage' as const : 'read-only-storage' as const}}))]});
       const module = d.createShaderModule({code:ventsShader}), pipelineLayout = d.createPipelineLayout({bindGroupLayouts:[layout]});
       this.ventPipelines = [];
       for (const entryPoint of ['prepare','red','black']) this.ventPipelines.push(await d.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}}));
-      this.ventGroup = d.createBindGroup({layout, entries:[uniform,this.geometry,this.ventEvents,this.ventField].map((buffer,binding)=>({binding,resource:{buffer}}))});
+      this.ventGroup = d.createBindGroup({layout, entries:[uniform,this.geometry,this.ventEvents,this.ventField,this.funnelMask].map((buffer,binding)=>({binding,resource:{buffer}}))});
     }
-    if(grid.sources){
+    if(grid.sources||grid.funnels){
       this.sourceParams=this.buffer('underground exchange parameters',32,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
       const layout=d.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},...[1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage' as const}}))]});
       const module=d.createShaderModule({code:reservoirShader}),pipelineLayout=d.createPipelineLayout({bindGroupLayouts:[layout]});
@@ -257,6 +264,13 @@ export class GpuWorld {
       const module=d.createShaderModule({code:geologyShader}),pipelineLayout=d.createPipelineLayout({bindGroupLayouts:[layout]});const compilation=await module.getCompilationInfo();const failures=compilation.messages.filter(m=>m.type==='error');if(failures.length)throw new Error(failures.map(m=>`Подвижки ${m.lineNum}: ${m.message}`).join('\n'));
       this.geologyPipelines=[];for(const entryPoint of ['request','lower','raise'])this.geologyPipelines.push(await d.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}}));
       this.geologyGroup=d.createBindGroup({layout,entries:[this.geologyParams,this.geometry,this.geologyEvents,this.terrain,this.common,orders,residues].map((buffer,binding)=>({binding,resource:{buffer}}))});
+    }
+    if(grid.funnels){
+      const data=new ArrayBuffer(32);new Uint32Array(data).set([grid.cols,grid.rows,this.funnels!.shape,0]);new Float32Array(data)[4]=grid.mineral?.speed??1;
+      const params=this.buffer('funnel parameters',new Uint8Array(data),GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
+      const layout=d.createBindGroupLayout({entries:Array.from({length:5},(_,binding)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0?'uniform':binding===4?'read-only-storage':'storage'}}))});
+      const module=d.createShaderModule({code:funnelShader}),pipelineLayout=d.createPipelineLayout({bindGroupLayouts:[layout]});const compilation=await module.getCompilationInfo();const failures=compilation.messages.filter(m=>m.type==='error');if(failures.length)throw new Error(failures.map(m=>`Воронки ${m.lineNum}: ${m.message}`).join('\n'));
+      this.funnelPipelines=[];for(const entryPoint of ['mark','lift'])this.funnelPipelines.push(await d.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}}));this.funnelGroups=this.states.map(state=>d.createBindGroup({layout,entries:[params,this.geometry,this.terrain,state,this.funnelMask].map((buffer,binding)=>({binding,resource:{buffer}}))}));
     }
     const flightModule = d.createShaderModule({code:flightDrawing});
     this.flightRender = await d.createRenderPipelineAsync({layout:'auto', vertex:{module:flightModule,entryPoint:'vertex'}, fragment:{module:flightModule,entryPoint:'fragment',targets:[{format:navigator.gpu.getPreferredCanvasFormat(),blend:{color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha',operation:'add'},alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha',operation:'add'}}}]}});
@@ -318,8 +332,9 @@ export class GpuWorld {
     u[4] = this.step; u[5] = this.grid.sourceCell; u[6] = this.grid.ballistics ? 3 : this.grid.vents ? 2 : Number(this.grid.scene === 'burst'); u[7] = Number(!!this.grid.light);
     const emitter = this.grid.vents?.find(vent => !!vent.mass);
     const emission=this.sources?.emission(this.step);
+    u[11]=this.funnels?.shape??0;
     u[8] = emission?.burst ?? (emitter ? emittedQuanta(emitter, this.step) : 0);
-    if(this.sources){const params=new Uint32Array([this.grid.cols,this.grid.rows,this.grid.sourceCell,0,0,emission!.effusion,0,0]);this.device.queue.writeBuffer(this.sourceParams,0,params);}
+    if(this.sources||this.funnels){const params=new Uint32Array([this.grid.cols,this.grid.rows,this.grid.sourceCell,0,0,emission?.effusion??0,0,0]);this.device.queue.writeBuffer(this.sourceParams,0,params);}
     this.device.queue.writeBuffer(this.uniform, 0, data);
     if (this.grid.ballistics) {
       const config=this.grid.ballistics, packetData=new ArrayBuffer(64), packetU=new Uint32Array(packetData), packetF=new Float32Array(packetData);
@@ -396,12 +411,20 @@ export class GpuWorld {
     this.sourceUpdateStep=this.step;
   }
 
+  private async updateFunnels():Promise<void>{
+    if(!this.funnels)return;const n=this.grid.cols*this.grid.rows,buffer=this.device.createBuffer({size:n*16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}),encoder=this.device.createCommandEncoder();encoder.copyBufferToBuffer(this.terrain,0,buffer,0,n*16);this.device.queue.submit([encoder.finish()]);
+    try{await buffer.mapAsync(GPUMapMode.READ);const terrain=new Uint32Array(buffer.getMappedRange().slice(0));this.funnels.update(this.step,terrain,this.grid.mineral?.speed??1);if(this.sources)this.sources.siteWeights=this.funnels.siteWeights(terrain);this.device.queue.writeBuffer(this.funnelMask,0,this.funnels.mask());}
+    finally{buffer.unmap();buffer.destroy();}
+    const commands=this.device.createCommandEncoder(),pass=commands.beginComputePass();pass.setPipeline(this.funnelPipelines[0]);pass.setBindGroup(0,this.funnelGroups[this.current]);pass.dispatchWorkgroups(Math.ceil(n/64));pass.end();this.device.queue.submit([commands.finish()]);this.previousVentRates=null;
+  }
+
   private refreshTerrain():void{
     const encoder=this.device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(this.mineralPipelines[2]);pass.setBindGroup(0,this.mineralGroups[this.current]);pass.dispatchWorkgroups(Math.ceil(this.grid.cols*this.grid.rows/64));pass.end();this.device.queue.submit([encoder.finish()]);this.previousVentRates=null;
   }
 
   /** Fixed model intervals include every short impulse through its exact interval integral. */
   async advanceDynamic(): Promise<void> {
+    if(this.funnels&&this.step%(this.grid.funnels!.interval??1000)===0)await this.updateFunnels();
     if(this.grid.mineral?.evolving&&this.step%100===0)this.refreshTerrain();
     if(this.sources&&this.step%100===0)await this.updateSources();
     if (this.step > 0 && this.step % 10 === 0) {
@@ -428,12 +451,13 @@ export class GpuWorld {
         pass.dispatchWorkgroups(i===0?1:Math.ceil((i===1?this.grid.ballistics.capacity:this.grid.cols*this.grid.rows)/64));pass.end();
       }
     }
-    if(this.sources){
-      for(const i of [1,2]){const pass=encoder.beginComputePass();pass.setPipeline(this.sourcePipelines[i]);pass.setBindGroup(0,this.sourceGroups[1-this.current]);pass.dispatchWorkgroups(i===1?1:Math.ceil(this.grid.cols*this.grid.rows/64));pass.end();}
+    if(this.sources||this.funnels){
+      for(const i of (this.sources?[1,2]:[2])){const pass=encoder.beginComputePass();pass.setPipeline(this.sourcePipelines[i]);pass.setBindGroup(0,this.sourceGroups[1-this.current]);pass.dispatchWorkgroups(i===1?1:Math.ceil(this.grid.cols*this.grid.rows/64));pass.end();}
     }
     if(this.grid.mineral){
       for(const pipeline of this.mineralPipelines.slice(0,2)){const pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,this.mineralGroups[1-this.current]);pass.dispatchWorkgroups(Math.ceil(this.grid.cols*this.grid.rows/64));pass.end();}
     }
+    if(this.funnels){const pass=encoder.beginComputePass();pass.setPipeline(this.funnelPipelines[1]);pass.setBindGroup(0,this.funnelGroups[this.grid.mineral?this.current:1-this.current]);pass.dispatchWorkgroups(Math.ceil(this.grid.cols*this.grid.rows/64));pass.end();}
     if(this.geology&&(this.grid.mineral?.speed??1)>0){
       for(let i=0;i<3;i++){const pass=encoder.beginComputePass();pass.setPipeline(this.geologyPipelines[i]);pass.setBindGroup(0,this.geologyGroup);pass.dispatchWorkgroups(i===2?1:Math.ceil(this.grid.cols*this.grid.rows/64));pass.end();}
     }
