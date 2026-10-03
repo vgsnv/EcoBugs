@@ -1,4 +1,4 @@
-struct View { cols: u32, rows: u32, cell: f32, time: f32, arrows: u32, burst: u32, pad0: u32, pad1: u32 }
+struct View { cols: u32, rows: u32, cell: f32, time: f32, arrows: u32, burst: u32, pad0: u32, pad1: u32, appearance:vec4f }
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<storage, read> geo: array<vec4f>;
 @group(0) @binding(2) var<storage, read> state: array<vec4u>;
@@ -14,13 +14,13 @@ struct Varying { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 }
 // Interpolate the physical field without colouring through walls, corners or hole lips.
 fn concentration(k:u32,px:i32,py:i32)->f32 {
-  let own=f32(state[k].x)*.001/(view.cell*view.cell);
+  let own=f32(state[k].x)*view.appearance.x/(view.cell*view.cell);
   if(px<0||py<0||px>=i32(view.cols)||py>=i32(view.rows)){return own;}
   let j=u32(py)*view.cols+u32(px);let x=i32(k%view.cols);let y=i32(k/view.cols);
   if(geo[j].z>.5||(geo[j].w>.5)!=(geo[k].w>.5)){return own;}
   if(px!=x&&py!=y&&(geo[u32(y)*view.cols+u32(px)].z>.5||geo[u32(py)*view.cols+u32(x)].z>.5
     ||(geo[u32(y)*view.cols+u32(px)].w>.5)!=(geo[k].w>.5)||(geo[u32(py)*view.cols+u32(x)].w>.5)!=(geo[k].w>.5))){return own;}
-  return f32(state[j].x)*.001/(view.cell*view.cell);
+  return f32(state[j].x)*view.appearance.x/(view.cell*view.cell);
 }
 @fragment fn fragment(in: Varying) -> @location(0) vec4f {
   let pos = in.uv * vec2f(f32(view.cols), f32(view.rows));
@@ -34,8 +34,9 @@ fn concentration(k:u32,px:i32,py:i32)->f32 {
   let corner=vec2i(floor(pos-.5));let blend=fract(pos-.5);
   let density=mix(mix(concentration(k,corner.x,corner.y),concentration(k,corner.x+1,corner.y),blend.x),
     mix(concentration(k,corner.x,corner.y+1),concentration(k,corner.x+1,corner.y+1),blend.x),blend.y);
-  let mineral = clamp(log(1. + density * 75.) / 2.7, 0., .88);
-  let deposit=clamp(log(1.+f32(terrain[k].y)*.001/(view.cell*view.cell)*100.),0.,.8);
+  base*=1./(1.+.11*density/view.appearance.y);
+  let mineral = clamp(log(1. + density * 5./view.appearance.y) / 2.7, 0., .88);
+  let deposit=clamp(log(1.+f32(terrain[k].y)*view.appearance.x/(view.cell*view.cell)*5./view.appearance.y),0.,.8);
   base=mix(base,vec3f(.3,.17,.43),deposit);
   var color = mix(base, vec3f(.69, .46, .83), mineral);
   let west = select(k, k - 1u, x > 0u);

@@ -1,0 +1,19 @@
+import { type GpuWorld } from './gpu.ts';
+import { createWorldGrid } from './full-world.ts';
+import { makeParams } from './generation/params.ts';
+import { spotIntensityAt } from './generation/light.ts';
+import { diagnose } from './checks.ts';
+export async function checkWorld(gpu:GpuWorld,publish:(s:string)=>void):Promise<string>{
+ const rows:string[]=[];const assert=(ok:boolean,m:string)=>{if(!ok)throw new Error(m);};
+ const run=async(n:number,batch=16)=>{for(let i=0;i<n;i++){await gpu.advanceDynamic();if(i%batch===0)await gpu.device.queue.onSubmittedWorkDone();if(gpu.step%100===0){const m=await gpu.summary();if(m.flightOverflow){const shot=await gpu.snapshot();throw new Error(`Контакт на ${gpu.step}: ${JSON.stringify(Array.from({length:shot.particles.length/16},(_,i)=>Array.from(shot.particles.slice(i*16,i*16+16))).filter(v=>v[6]!==0).slice(0,32))}`);}}}};
+ const validate=async()=>{const s=await gpu.snapshot(),m=diagnose(gpu.grid,s),sum=await gpu.summary();assert(m.massError===0&&sum.massError===0&&m.leak===0,'Полный мир нарушил баланс');assert(!sum.reservoirError&&!sum.flightOverflow,`Полный мир не завершил обмен на ${gpu.step}; ${JSON.stringify(Array.from({length:s.particles.length/16},(_,i)=>Array.from(s.particles.slice(i*16,i*16+16))).filter(v=>v[6]!==0).slice(0,12))}`);assert([...s.flow,...s.pressure,...s.climate].every(Number.isFinite),'NaN полного мира');return s;};
+ const initial=createWorldGrid();await gpu.reset(initial);const clean=await validate();assert(clean.state.every(v=>v===0)&&clean.terrain.every((v,i)=>i%4!==1||v===0),'В мире уже есть подвижный минерал или залежи');
+ let maxDifference=0;for(let k=0;k<initial.components.length;k+=97){if(initial.components[k]<0)continue;const intensity=spotIntensityAt(initial.lightMap!,(k%initial.cols+.5)*initial.cell,(Math.floor(k/initial.cols)+.5)*initial.cell,0);maxDifference=Math.max(maxDifference,Math.abs(intensity-clean.climate[k*4]));}
+ assert(maxDifference<.001,`GPU/CPU пятна расходятся: ${maxDifference}`);rows.push(`✓ полный мир: грунт и чистая среда, квант ${initial.quantum} мг; GPU/CPU пятна ${maxDifference.toExponential(2)}`);publish(rows.join('\n'));
+ const bright=createWorldGrid(makeParams({sun:3,sunRhythm:.9}));await gpu.reset(bright);const climate=await validate();assert(clean.climate.every((v,i)=>i%4!==2||v===climate.climate[i]),'Солнце или ритм меняет температуру');rows.push('✓ температура от карты пятен, не от солнца и ритма');
+ const dirty=createWorldGrid();const cell=dirty.sourceCell;dirty.state[cell*4]=100000;dirty.underground!-=100000;await gpu.reset(dirty);const murky=await validate();assert(clean.climate.every((v,i)=>v===murky.climate[i])&&clean.flow.every((v,i)=>v===murky.flow[i]),'Мутность меняет физику света или температуру');rows.push('✓ растворённый минерал не меняет температуру и течение');
+ await gpu.reset(createWorldGrid());await run(1500);const first=await validate(),events=JSON.stringify([gpu.sources,gpu.funnels,gpu.geology]);assert(gpu.sources!.eruptions>0,'Полные недра не начали стартовую серию');
+ await gpu.reset(createWorldGrid());await run(1500,5);const second=await validate();assert(first.state.every((v,i)=>v===second.state[i])&&first.terrain.every((v,i)=>v===second.terrain[i])&&first.reservoir.every((v,i)=>v===second.reservoir[i])&&events===JSON.stringify([gpu.sources,gpu.funnels,gpu.geology]),'Полный мир зависит от пакетов');rows.push('✓ стартовая серия, обмены и масса полного мира; повтор 16 / 5 совпал');publish(rows.join('\n'));
+ for(const params of [makeParams({seed:2,shape:'circle'}),makeParams({seed:3,aspectRatio:16/9})]){const g=createWorldGrid(params);await gpu.reset(g);await run(120);await validate();rows.push(`✓ сид ${params.seed}, ${params.shape}, ${g.cols}×${g.rows}: свет, геометрия, источники и точный баланс`);publish(rows.join('\n'));}
+ assert(gpu.errors.length===0,gpu.errors.join('\n'));return rows.join('\n')+'\nПроверки генератора полного мира прошли.';
+}

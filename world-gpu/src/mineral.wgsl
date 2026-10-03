@@ -1,4 +1,4 @@
-struct Params { cols:u32, rows:u32, cell:f32, dt:f32, diffusion:f32, settling:f32, dissolution:f32, runoff:f32, cap:u32, pad0:u32, pad1:u32, pad2:u32, erosion:f32, weathering:f32, speed:f32, evolving:u32 }
+struct Params { cols:u32, rows:u32, cell:f32, dt:f32, diffusion:f32, settling:f32, dissolution:f32, runoff:f32, cap:u32, pad0:u32, pad1:u32, pad2:u32, erosion:f32, weathering:f32, speed:f32, evolving:u32, quantum:f32, levelScale:f32, full:u32, spare:u32 }
 @group(0) @binding(0) var<uniform> cfg:Params;
 @group(0) @binding(1) var<storage,read_write> geo:array<vec4f>;
 @group(0) @binding(2) var<storage,read> before:array<vec4u>;
@@ -17,16 +17,16 @@ fn neighbor(k:u32,d:u32)->u32 {
  let k=id.x;if(k>=cfg.cols*cfg.rows){return;}
  outgoing[k]=vec4u(0u);
  var steepness=0.;for(var d=0u;d<4u;d++){let j=neighbor(k,d);if(j!=k&&geo[j].z<.5){steepness=max(steepness,f32(terrain[k].x+terrain[k].y)-f32(terrain[j].x+terrain[j].y));}}
- terrain[k].z=bitcast<u32>(steepness*.001/(cfg.cell*cfg.cell));
+ terrain[k].z=bitcast<u32>(steepness*cfg.quantum/(cfg.cell*cfg.cell));
  if(geo[k].z>.5||geo[k].w>.5){carry[k]=vec4f(0.);return;}
  let mass=before[k].x;var wanted=vec4f(0.);
- let area=cfg.cell*cfg.cell;let surface=f32(terrain[k].x+terrain[k].y+mass)*.001/area;
+ let area=cfg.cell*cfg.cell;let surface=f32(terrain[k].x+terrain[k].y+mass)*cfg.quantum/area;
  for(var d=0u;d<4u;d++){
   let j=neighbor(k,d);if(j==k||geo[j].z>.5){carry[k][d]=0.;continue;}
   let mobility=2.*geo[k].x*geo[j].x/(geo[k].x+geo[j].x);
   let gradient=max(0.,f32(mass)-f32(before[j].x));
-  let slope=max(0.,surface-f32(terrain[j].x+terrain[j].y+before[j].x)*.001/area);
-  wanted[d]=(cfg.diffusion*gradient+cfg.runoff*cfg.speed*f32(mass)*slope/.02)*mobility*cfg.dt/area;
+  let slope=max(0.,surface-f32(terrain[j].x+terrain[j].y+before[j].x)*cfg.quantum/area);
+  wanted[d]=(cfg.diffusion*gradient+cfg.runoff*cfg.speed*f32(mass)*slope/cfg.levelScale)*mobility*cfg.dt/area;
  }
  let sum=dot(wanted,vec4f(1.));if(sum>f32(mass)*.5){wanted*=f32(mass)*.5/sum;}
  var remaining=mass;
@@ -59,14 +59,15 @@ fn neighbor(k:u32,d:u32)->u32 {
  phaseCarry[k].z=fract(erosion);let depositStrip=min(terrain[k].y,stripped);
  terrain[k].y-=depositStrip;terrain[k].x-=stripped-depositStrip;state.x+=stripped;
  let above=terrain[k].x-min(terrain[k].x,cfg.cap/2u);
- let weather=f32(above)*cfg.weathering*cfg.speed*cfg.dt*bitcast<f32>(terrain[k].z)/.02+phaseCarry[k].w;
+ let weather=f32(above)*cfg.weathering*cfg.speed*cfg.dt*bitcast<f32>(terrain[k].z)/cfg.levelScale+phaseCarry[k].w;
  let weathered=min(above,u32(floor(weather)));phaseCarry[k].w=fract(weather);
  terrain[k].x-=weathered;state.x+=weathered;after[k]=state;
 }
 
 @compute @workgroup_size(64) fn refresh(@builtin(global_invocation_id) id:vec3u){
  let k=id.x;if(k>=cfg.cols*cfg.rows||geo[k].z>.5||cfg.evolving==0u){return;}
- let level=f32(terrain[k].x+terrain[k].y)*.001/(cfg.cell*cfg.cell);
- let resistance=1.+2.*smoothstep(.004,.012,level)+6.*smoothstep(.012,.024,level);
+ let level=f32(terrain[k].x+terrain[k].y)*cfg.quantum/(cfg.cell*cfg.cell);
+ var resistance=1.+2.*smoothstep(.004,.012,level)+6.*smoothstep(.012,.024,level);
+ if(cfg.full==1u){let grade=clamp(level/cfg.levelScale,0.,2.);resistance=select(1.+2.*grade,3.+6.*(grade-1.),grade>1.);}
  geo[k].x=1./resistance;
 }

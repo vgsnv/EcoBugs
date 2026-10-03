@@ -106,21 +106,30 @@ fn deposit(packet: Packet, k: u32) -> Packet {
 fn currentAt(k:u32,position:vec2f)->vec2f {
   let x=i32(k%cfg.cols);let y=i32(k/cfg.cols);
   let west=select(k,k-1u,x>0);let north=select(k,k-cfg.cols,y>0);
-  var current=.5*vec2f(flow[k].x+flow[west].x,flow[k].y+flow[north].y);
-  // At contact, the closed face cancels the inward fluid component.
-  let local=position-vec2f(f32(x),f32(y));
-  if((local.x<.0002&&current.x<0.&&blocked(x-1,y))||(local.x>.9998&&current.x>0.&&blocked(x+1,y))){current.x=0.;}
-  if((local.y<.0002&&current.y<0.&&blocked(x,y-1))||(local.y>.9998&&current.y>0.&&blocked(x,y+1))){current.y=0.;}
+  // Face velocities interpolate continuously to zero on impermeable boundaries.
+  // A cell-centred velocity would repeatedly push a rebounding parcel into its wall.
+  let local=clamp(position-vec2f(f32(x),f32(y)),vec2f(0.),vec2f(1.));
+  let current=vec2f(mix(select(0.,flow[west].x,x>0),flow[k].x,local.x),mix(select(0.,flow[north].y,y>0),flow[k].y,local.y));
   return current;
 }
-// Solve d = v*t - a*t²/2 with stable roots; acceleration may oppose a fluid component.
-fn crossingTime(d:f32,v:f32,a:f32)->f32 {
-  if(abs(a)<.00000001){if(abs(v)<.00000001){return 1e9;}let t=d/v;return select(1e9,t,t>=0.);}
-  let discriminant=v*v-2.*a*d;if(discriminant<0.){return 1e9;}
-  let q=v+select(-sqrt(discriminant),sqrt(discriminant),v>=0.);
-  var result=1e9;
-  if(abs(q)>.00000001){let t=2.*d/q;if(t>=0.){result=t;}}
-  let other=q/a;if(other>=0.){result=min(result,other);}return result;
+// Integrate linear face interpolation analytically within a cell. This is stable even
+// when a strong source advects into a stagnation layer beside an impermeable wall.
+fn displacement(t:f32,v:f32,a:f32,b:f32)->f32 {
+  let z=b*t;
+  if(abs(z)<.01){return v*t*(1.+z*.5+z*z/6.+z*z*z/24.)-a*t*t*(.5+z/6.+z*z/24.+z*z*z/120.);}
+  let e=exp(min(50.,z))-1.;return v*e/b-a*(e-z)/(b*b);
+}
+fn turning(v:f32,a:f32,b:f32)->f32 {
+  if(abs(b)<.000001){if(abs(a)>.000001&&v/a>.000001){return v/a;}return 1e9;}
+  let ratio=(-a/b)/(v-a/b);if(ratio<=0.){return 1e9;}
+  let t=log(ratio)/b;return select(1e9,t,t>.000001);
+}
+fn crossingTime(d:f32,v:f32,a:f32,b:f32,chunk:f32)->f32 {
+  let end=displacement(chunk,v,a,b);
+  if(d*end<0.||abs(end)<abs(d)){return 1e9;}
+  var lo=0.;var hi=chunk;
+  for(var i=0u;i<24u;i++){let mid=(lo+hi)*.5;if(abs(displacement(mid,v,a,b))<abs(d)){lo=mid;}else{hi=mid;}}
+  return hi;
 }
 @compute @workgroup_size(64) fn fly(@builtin(global_invocation_id) id: vec3u) {
   if(id.x>=cfg.capacity){return;}
@@ -133,13 +142,16 @@ fn crossingTime(d:f32,v:f32,a:f32)->f32 {
     if(time<=.000001){packets[id.x]=packet;return;}
     let mobility=geo[k].x;
     let acceleration=packet.speed*packet.speed/(2.*packet.remaining*mobility);
-    let chunk=min(min(time,.01),packet.speed/acceleration);
+    var chunk=min(min(time,.01),packet.speed/acceleration);
     let velocity=packet.direction*packet.speed/cfg.cell+currentAt(k,packet.pos);
     let deceleration=packet.direction*acceleration/cfg.cell;
-    let westTime=crossingTime(f32(x)-packet.pos.x,velocity.x,deceleration.x);
-    let eastTime=crossingTime(f32(x+1)-packet.pos.x,velocity.x,deceleration.x);
-    let northTime=crossingTime(f32(y)-packet.pos.y,velocity.y,deceleration.y);
-    let southTime=crossingTime(f32(y+1)-packet.pos.y,velocity.y,deceleration.y);
+    let west=select(k,k-1u,x>0);let north=select(k,k-cfg.cols,y>0);
+    let gradient=vec2f(flow[k].x-select(0.,flow[west].x,x>0),flow[k].y-select(0.,flow[north].y,y>0));
+    chunk=min(chunk,min(turning(velocity.x,deceleration.x,gradient.x),turning(velocity.y,deceleration.y,gradient.y)));
+    let westTime=crossingTime(f32(x)-packet.pos.x,velocity.x,deceleration.x,gradient.x,chunk);
+    let eastTime=crossingTime(f32(x+1)-packet.pos.x,velocity.x,deceleration.x,gradient.x,chunk);
+    let northTime=crossingTime(f32(y)-packet.pos.y,velocity.y,deceleration.y,gradient.y,chunk);
+    let southTime=crossingTime(f32(y+1)-packet.pos.y,velocity.y,deceleration.y,gradient.y,chunk);
     let tx=min(westTime,eastTime);let ty=min(northTime,southTime);
     let dx=select(-1,1,eastTime<=westTime);let dy=select(-1,1,southTime<=northTime);
     let duration=min(chunk,min(tx,ty));
@@ -147,7 +159,7 @@ fn crossingTime(d:f32,v:f32,a:f32)->f32 {
     let distance=max(0.,packet.speed*duration-.5*acceleration*duration*duration);
     packet.remaining=max(0.,before-distance/mobility);
     packet.speed*=sqrt(packet.remaining/before);
-    packet.pos+=velocity*duration-.5*deceleration*duration*duration;time-=duration;
+    packet.pos+=vec2f(displacement(duration,velocity.x,deceleration.x,gradient.x),displacement(duration,velocity.y,deceleration.y,gradient.y));time-=duration;
     let crossX=tx<=chunk&&tx<=ty;let crossY=ty<=chunk&&ty<=tx;
     if(!crossX&&!crossY){continue;}
     var nx=x;var ny=y;if(crossX){nx+=dx;}if(crossY){ny+=dy;}

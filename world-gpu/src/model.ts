@@ -1,12 +1,15 @@
+import { createWorldGrid } from './full-world.ts';
+import { type WorldParams } from './generation/params.ts';
+import { type LightMap } from './generation/light.ts';
 import { type FunnelConfig } from './funnels.ts';
 import { type GeologyConfig } from './geology.ts';
 import { type SourceConfig } from './sources.ts';
 import { type Vent } from './vents.ts';
 
 /** Controlled physical scenes, not the complete world generator. */
-export type Scene = 'cycle' | 'funnel-life' | 'geology' | 'terrain' | 'mineral' | 'volcanoes' | 'volcano-wall' | 'flight-impact' | 'flight-slide' | 'flight' | 'flight-wall' | 'flight-island' | 'flight-hole' | 'sun-flight' | 'vents' | 'vent-wall' | 'vent-passage' | 'vent-layers' | 'sun-vents' | 'light' | 'light-wall' | 'quiet' | 'contrast' | 'wall' | 'passage' | 'circle' | 'layers' | 'funnel' | 'burst';
+export type Scene = 'world' | 'cycle' | 'funnel-life' | 'geology' | 'terrain' | 'mineral' | 'volcanoes' | 'volcano-wall' | 'flight-impact' | 'flight-slide' | 'flight' | 'flight-wall' | 'flight-island' | 'flight-hole' | 'sun-flight' | 'vents' | 'vent-wall' | 'vent-passage' | 'vent-layers' | 'sun-vents' | 'light' | 'light-wall' | 'quiet' | 'contrast' | 'wall' | 'passage' | 'circle' | 'layers' | 'funnel' | 'burst';
 export const SCENES: Record<Scene, string> = {
-  cycle:'Цикл минерала', 'funnel-life':'Жизнь воронок', geology:'Подвижки и толчки', terrain:'Изменение местности', mineral:'Растекание и залежи', volcanoes:'Жизнь вулканов', 'volcano-wall':'Общие недра в отсеках',
+  world:'Полный мир', cycle:'Цикл минерала', 'funnel-life':'Жизнь воронок', geology:'Подвижки и толчки', terrain:'Изменение местности', mineral:'Растекание и залежи', volcanoes:'Жизнь вулканов', 'volcano-wall':'Общие недра в отсеках',
   'flight-impact': 'Прямой удар о стену', 'flight-slide': 'Скольжение вдоль стены', flight: 'Залп: полёт', 'flight-wall': 'Полёт и стенка', 'flight-island': 'Полёт через сушу', 'flight-hole': 'Полёт и отверстие', 'sun-flight': 'Свет + полёт + воронка',
   vents: 'Залп и тяга', 'vent-wall': 'Толчки в закрытых отсеках', 'vent-passage': 'Толчок через проход', 'vent-layers': 'Толчок и сопротивление', 'sun-vents': 'Свет + залп + воронка',
   light: 'Дрейф света', 'light-wall': 'Свет в закрытых отсеках',
@@ -16,6 +19,12 @@ export const SCENES: Record<Scene, string> = {
 };
 export const QUANTUM_MG = 0.001;
 export interface Grid {
+  initialShares?:{water:number;shallows:number;land:number};
+  params?:WorldParams;
+  lightMap?:LightMap;
+  shape?:'circle'|'rectangle';
+  quantum?:number;
+  referenceDensity?:number;
   scene: Scene; cols: number; rows: number; cell: number; width: number; height: number;
   /** mobility, source rate, blocked, one-way hole */
   geometry: Float32Array;
@@ -32,9 +41,9 @@ export interface Grid {
   funnels?: FunnelConfig;
   /** Ground and deposits in integer quanta; remaining channels reserved. */
   terrain?: Uint32Array;
-  mineral?: { diffusion:number; settling:number; dissolution:number; runoff:number; erosion?:number; weathering?:number; speed?:number; evolving?:boolean };
+  mineral?: { diffusion:number; settling:number; dissolution:number; runoff:number; erosion?:number; weathering?:number; speed?:number; evolving?:boolean; full?:boolean };
   ballistics?: { range: number; speed: number; capacity: number; seed: number; count?: number; direction?: [number,number] };
-  light?: { drift: number; sun: number; background: number; rhythm: number; contrast: number; entrainment: number };
+  light?: { drift: number; sun: number; background: number; rhythm: number; contrast: number; entrainment: number; interval?:number };
 }
 
 export function connectedAreas(cols: number, rows: number, geometry: Float32Array): Int32Array {
@@ -69,6 +78,7 @@ export function balanceSources(geometry: Float32Array, components: Int32Array): 
 }
 
 export function createGrid(scene: Scene, cols = 64): Grid {
+  if(scene==='world')return createWorldGrid(undefined,cols);
   const lifecycle=scene==='volcanoes'||scene==='volcano-wall'||scene==='cycle';
   const hasSource = lifecycle || scene.includes('vent') || scene.includes('flight');
   const holeU = scene === 'flight-hole' ? .4 : .76;

@@ -1,4 +1,4 @@
-struct Params{cols:u32,rows:u32,cell:f32,step:f32,count:u32,stride:f32,pad1:u32,pad2:u32}
+struct Params{cols:u32,rows:u32,cell:f32,step:f32,count:u32,stride:f32,pad1:u32,pad2:u32,quantum:f32,pad3:f32,pad4:f32,pad5:f32}
 struct Movement{shape:vec4f,time:vec4f,pair:vec4f}
 @group(0) @binding(0) var<uniform> cfg:Params;
 @group(0) @binding(1) var<storage,read> geo:array<vec4f>;
@@ -20,7 +20,7 @@ fn weight(pos:vec2f,center:vec2f,radius:f32,angle:f32,band:f32)->f32{
   let progress=(b*b*(3.-2.*b)-a*a*(3.-2.*a));
   let own=weight(pos,e.shape.xy,e.shape.z,e.time.z,e.time.w);
   let paired=select(weight(pos,e.pair.xy,e.shape.z,e.time.z,e.time.w),0.,e.pair.z>.5);
-  delta+=(own-paired)*progress*e.shape.w*cfg.cell*cfg.cell/.001;
+  delta+=(own-paired)*progress*e.shape.w*cfg.cell*cfg.cell/cfg.quantum;
  }
  let wanted=vec2f(max(0.,delta),max(0.,-delta));
  for(var d=0u;d<2u;d++){if(wanted[d]==0.){carry[k][d]=0.;continue;}let amount=wanted[d]+carry[k][d];orders[k][d]=u32(floor(amount));carry[k][d]=fract(amount);}

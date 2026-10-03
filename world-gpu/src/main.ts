@@ -1,3 +1,6 @@
+import { createWorldGrid } from './full-world.ts';
+import { makeParams } from './generation/params.ts';
+import { checkWorld } from './world-checks.ts';
 import './style.css';
 import { checkFunnels } from './funnel-checks.ts';
 import { checkTerrain } from './terrain-checks.ts';
@@ -15,15 +18,15 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <header><div><p class="eyebrow">ECOBUGS / WEBGPU</p><h1>Течение в чашке</h1><p class="subtitle">Первый физический стенд · шаг 0,1 с · консервативный перенос минерала</p></div><span id="device" class="badge">Проверяю WebGPU…</span></header>
   <main><section class="surface"><div class="toolbar">
     <label>Сцена<select id="scene">${Object.entries(SCENES).map(([id, name]) => `<option value="${id}">${name}</option>`).join('')}</select></label>
-    <label>Сетка<select id="grid"><option value="32">32 × 24</option><option value="64" selected>64 × 48</option><option value="128">128 × 96</option></select></label>
+    <label>Сетка<select id="grid"><option value="32">32 × 24</option><option value="64" selected>64 × 48</option><option value="128">128 × 96</option><option value="256">256 × 192</option></select></label>
     <label class="toggle"><input id="arrows" type="checkbox"> Поле скорости</label>
     <label>Дрейф света<select id="drift"><option value="0.012">Движется</option><option value="0">Стоит</option></select></label>
   </div><div class="dish"><canvas id="world" aria-label="Чашка: физическое поле среды и минерала"></canvas></div>
   <div class="transport"><button id="play">Пуск</button><button id="step">Один шаг</button><button id="reset">Сначала</button><label>Скорость<select id="speed"><option value="1">×1</option><option value="10" selected>×10</option><option value="100">×100</option></select></label><span id="clock">Шаг 0 · 0,0 с</span></div>
   <p class="caption">Сиреневый цвет — минерал. Оранжевые точки — источник, голубые — возвратный поток. Тёмные границы непроницаемы.</p></section>
   <aside><h2>Баланс среды</h2><div id="status" role="status">Создание устройства…</div><dl id="metrics"></dl>
-  <p class="note">Это стенд вычислительного метода. Генерация полного мира, окончательное изображение и сохранения будут добавлены следующими этапами.</p>
-  <button id="checks">Проверить физику GPU</button><button id="pressure-checks">Сравнить решатели</button><button id="light-checks">Проверить свет</button><button id="vent-checks">Проверить толчки</button><button id="flight-checks">Проверить полёт</button><button id="funnel-checks">Проверить воронки</button><button id="terrain-checks">Проверить местность</button><button id="mineral-checks">Проверить залежи</button><button id="source-checks">Проверить источники</button><pre id="report" aria-live="polite"></pre></aside></main>`;
+  <p class="note">Это стенд вычислительного метода. Окончательное изображение и сохранения будут добавлены следующими этапами.</p>
+  <button id="checks">Проверить физику GPU</button><button id="pressure-checks">Сравнить решатели</button><button id="light-checks">Проверить свет</button><button id="vent-checks">Проверить толчки</button><button id="flight-checks">Проверить полёт</button><button id="world-checks">Проверить полный мир</button><button id="funnel-checks">Проверить воронки</button><button id="terrain-checks">Проверить местность</button><button id="mineral-checks">Проверить залежи</button><button id="source-checks">Проверить источники</button><pre id="report" aria-live="polite"></pre></aside></main>`;
 
 const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -45,10 +48,11 @@ async function metrics(): Promise<void> {
     if (m.reservoirError) throw new Error('Недостаточно общего запаса для зарезервированного извержения. Расчёт остановлен.');
     if (m.flightOverflow) throw new Error('Слишком много столкновений за шаг: движение вещества не удалось рассчитать полностью. Расчёт остановлен.');
     completedStep = m.step;
-    const values = [['В среде', `${((m.dissolved + m.flying) * QUANTUM_MG).toFixed(2)} мг`], ['В недрах', `${((m.captured + m.reserved + m.available) * QUANTUM_MG).toFixed(2)} мг`],
+    const quantum=gpu.grid.quantum??QUANTUM_MG;
+    const values = [['В среде', `${((m.dissolved + m.flying) * quantum).toFixed(2)} мг`], ['В недрах', `${((m.captured + m.reserved + m.available) * quantum).toFixed(2)} мг`],
       ['Ошибка массы', `${m.massError} квантов`], ['Макс. скорость грани', `${m.maxSpeed.toFixed(2)} мм/с`], ['Невязка давления', m.relativeResidual.toExponential(2)]];
-    if(gpu.grid.mineral)values.push(['В залежях',`${(m.deposits*QUANTUM_MG).toFixed(2)} мг`],['Грунт',`${(m.ground*QUANTUM_MG).toFixed(2)} мг`]);
-    if (gpu.grid.ballistics) values.push(['Из них растворено', `${(m.dissolved * QUANTUM_MG).toFixed(2)} мг`], ['Из них в полёте', `${(m.flying * QUANTUM_MG).toFixed(2)} мг`]);
+    if(gpu.grid.mineral)values.push(['В залежях',`${(m.deposits*quantum).toFixed(2)} мг`],['Грунт',`${(m.ground*quantum).toFixed(2)} мг`]);
+    if (gpu.grid.ballistics) values.push(['Из них растворено', `${(m.dissolved * quantum).toFixed(2)} мг`], ['Из них в полёте', `${(m.flying * quantum).toFixed(2)} мг`]);
     if(gpu.sources){
       const active=gpu.sources.active;
       values.push(['Давление недр',`${((m.available+m.reserved)/gpu.sources.threshold*100).toFixed(1)}% порога`],['Извержений',String(gpu.sources.eruptions)],['Вулканы',`${gpu.sources.volcanoes.length} · ${active?.stage==='preparing'?'подготовка':active?.stage==='erupting'?'извержение':'покой'}`]);
@@ -69,8 +73,8 @@ async function reset(): Promise<void> {
       const size = Number(option.value);
       option.textContent = `${size} × ${scene.value === 'circle' ? size : size * 3 / 4}`;
     }
-    const initial = createGrid(scene.value as Scene, cols);
-    if (initial.light) initial.light.drift = Number(element<HTMLSelectElement>('drift').value);
+    const initial = scene.value==='world'?createWorldGrid(makeParams({lightDrift:Number(element<HTMLSelectElement>('drift').value)===0?0:1}),cols):createGrid(scene.value as Scene, cols);grid.value=String(initial.cols);
+    if (initial.light&&!initial.lightMap) initial.light.drift = Number(element<HTMLSelectElement>('drift').value);
     await gpu.reset(initial);
     completedStep = 0; status.textContent = 'WebGPU · физика готова'; status.className = '';
     lock(false); gpu.draw(element<HTMLInputElement>('arrows').checked); await metrics();
@@ -139,6 +143,11 @@ element('source-checks').onclick = async () => {
   paused=true;lock(true);status.textContent='Проверка общих недр и источников…';
   try {await advancing;report.textContent=await checkSources(gpu,text=>{report.textContent=text;});await reset();}
   catch(e){report.textContent+=`\n✗ ${e instanceof Error?e.message:String(e)}`;failure(e);}
+};
+element('world-checks').onclick=async()=>{
+ if(!gpu||busy)return;paused=true;lock(true);status.textContent='Проверка полного мира…';
+ try{await advancing;report.textContent=await checkWorld(gpu,text=>{report.textContent=text;});await reset();}
+ catch(e){report.textContent+=`\n✗ ${e instanceof Error?e.message:String(e)}`;failure(e);}
 };
 element('funnel-checks').onclick=async()=>{
  if(!gpu||busy)return;paused=true;lock(true);status.textContent='Проверка воронок…';
