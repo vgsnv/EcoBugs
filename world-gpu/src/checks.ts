@@ -18,8 +18,10 @@ export function diagnose(grid: Grid, shot: Snapshot) {
     residual += (balance - source) ** 2;
     sourceNorm += source ** 2;
   }
-  total = dissolved + captured + reserved + flying;
-  return { step: shot.step, total, dissolved, captured, reserved, flying, massError: total - grid.total, leak,
+  reserved += shot.reservoir[1];
+  const available=shot.reservoir[0];
+  total = dissolved + captured + reserved + flying + available;
+  return { step: shot.step, total, available, dissolved, captured, reserved, flying, massError: total - grid.total, leak,
     maxSpeed: maxSpeed * grid.cell, relativeResidual: sourceNorm ? Math.sqrt(residual / sourceNorm) : Math.sqrt(residual) };
 }
 

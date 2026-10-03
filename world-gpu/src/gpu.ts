@@ -1,3 +1,5 @@
+import reservoirShader from './reservoir.wgsl?raw';
+import { Sources } from './sources.ts';
 import ballisticShader from './ballistics.wgsl?raw';
 import flightDrawing from './flight-render.wgsl?raw';
 import ventsShader from './vents.wgsl?raw';
@@ -10,7 +12,7 @@ import velocityShader from './velocity.wgsl?raw';
 import sorShader from './pressure-sor.wgsl?raw';
 import { type Grid } from './model.ts';
 
-export interface Snapshot { state: Uint32Array; pressure: Float32Array; flow: Float32Array; field: Float32Array; vents: Float32Array; particles: Float32Array; step: number }
+export interface Snapshot { state: Uint32Array; pressure: Float32Array; flow: Float32Array; field: Float32Array; vents: Float32Array; particles: Float32Array; reservoir: Uint32Array; step: number }
 export type PressureMethod = 'sor' | 'jacobi';
 export interface PressureOptions { method?: PressureMethod; iterations?: number }
 export interface PressureResult { method: PressureMethod; iterations: number; passes: number; milliseconds: number }
@@ -46,6 +48,14 @@ export class GpuWorld {
   private ventEvents!: GPUBuffer;
   private ventPipelines!: GPUComputePipeline[];
   private ventGroup!: GPUBindGroup;
+  private common!: GPUBuffer;
+  private sourceParams!: GPUBuffer;
+  private sourcePipelines!: GPUComputePipeline[];
+  private sourceGroups!: GPUBindGroup[];
+  private markers!: GPUBuffer;
+  private markerCells:number[]=[];
+  private sourceUpdateStep=-1;
+  sources:Sources|null=null;
   private packets!: GPUBuffer;
   private landing!: GPUBuffer;
   private flightLedger!: GPUBuffer;
@@ -93,29 +103,38 @@ export class GpuWorld {
   async reset(grid: Grid, options: PressureOptions = {}): Promise<void> {
     if (this.lost) throw new Error('Устройство GPU потеряно. Перезагрузите прототип.');
     const emitters = grid.vents?.filter(vent => !!vent.mass) ?? [];
-    if (emitters.length > 1 || emitters.some(vent => vent.cell !== grid.sourceCell)) {
+    if (!grid.sources && (emitters.length > 1 || emitters.some(vent => vent.cell !== grid.sourceCell))) {
       throw new Error('Стенд поддерживает одно активное жерло с резервом.');
     }
     if (grid.ballistics) {
       const { capacity, speed, range, direction, count } = grid.ballistics;
-      if (emitters.length !== 1 || !Number.isInteger(capacity) || capacity < 1 || capacity > 4096
+      if ((!grid.sources && emitters.length !== 1) || !Number.isInteger(capacity) || capacity < 1 || capacity > 4096
         || !Number.isFinite(speed) || speed <= 0 || !Number.isFinite(range) || range <= 0
         || (count !== undefined && (!Number.isInteger(count) || count < 1 || count > 256))
         || (direction && (!direction.every(Number.isFinite) || Math.hypot(...direction) === 0))) {
         throw new Error('Недопустимые параметры полёта.');
       }
     }
+    if(grid.sources){
+      if(!Number.isSafeInteger(grid.underground)||grid.underground!<0||grid.total>=0xffffffff
+        || grid.sources.sites.some(k=>!Number.isInteger(k)||k<0||k>=grid.cols*grid.rows||grid.geometry[k*4+2]||grid.geometry[k*4+3])
+        || !grid.ballistics || grid.ballistics.capacity<(grid.ballistics.count??64)*16){
+        throw new Error('Недопустимые места, запас или ёмкость пула для вулканов.');
+      }
+    }
     await this.device.queue.onSubmittedWorkDone();
     for (const b of this.buffers) b.destroy(); this.buffers = [];
-    this.grid = grid; this.step = 0; this.current = 0; this.pressureIndex = 0;
+    this.grid = grid; this.sources=grid.sources?new Sources(grid.sources):null;this.sourceUpdateStep=-1;this.markerCells=[]; this.step = 0; this.current = 0; this.pressureIndex = 0;
     const d = this.device, n = grid.cols * grid.rows;
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     this.uniform = this.buffer('physics params', 48, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.view = this.buffer('render params', 32, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.geometry = this.buffer('geometry', grid.geometry, storage);
     this.field = this.buffer('physical light field', n * 16, storage);
+    this.common=this.buffer('shared underground',new Uint32Array([grid.underground??0,0,0,0]),storage);
+    this.markers=this.buffer('volcano markers',n*16,storage);
     this.packets = this.buffer('ballistic packets', (grid.ballistics?.capacity ?? 1) * 64, storage);
-    this.landing = this.buffer('atomic landings', n * 4, storage);
+    this.landing = this.buffer('atomic landings', n * 8, storage);
     this.flightLedger = this.buffer('flight ledger', 16, storage);
     this.ventField = this.buffer('screened push field', n * 16, storage);
     this.ventMilliseconds = 0;
@@ -148,7 +167,7 @@ export class GpuWorld {
       fragment: { module: renderModule, entryPoint: 'fragment', targets: [{ format: navigator.gpu.getPreferredCanvasFormat() }] },
     });
     this.renderGroups = this.states.map(state => d.createBindGroup({ layout: this.render.getBindGroupLayout(0), entries:
-      [this.view, this.geometry, state, this.flow, this.field, this.ventField].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+      [this.view, this.geometry, state, this.flow, this.field, this.ventField, this.markers].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
     this.summaries = this.buffer('partial summary', Math.ceil(n / 64) * 32, storage);
     this.summaryPipeline = await d.createComputePipelineAsync({ layout: 'auto', compute: {
       module: d.createShaderModule({ label: 'diagnostic reduction', code: summaryShader }), entryPoint: 'summarize' } });
@@ -196,6 +215,14 @@ export class GpuWorld {
       this.ventPipelines = [];
       for (const entryPoint of ['prepare','red','black']) this.ventPipelines.push(await d.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}}));
       this.ventGroup = d.createBindGroup({layout, entries:[uniform,this.geometry,this.ventEvents,this.ventField].map((buffer,binding)=>({binding,resource:{buffer}}))});
+    }
+    if(grid.sources){
+      this.sourceParams=this.buffer('underground exchange parameters',32,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
+      const layout=d.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},...[1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage' as const}}))]});
+      const module=d.createShaderModule({code:reservoirShader}),pipelineLayout=d.createPipelineLayout({bindGroupLayouts:[layout]});
+      const compilation=await module.getCompilationInfo();const failures=compilation.messages.filter(m=>m.type==='error');if(failures.length)throw new Error(failures.map(m=>`Недра ${m.lineNum}: ${m.message}`).join('\n'));
+      this.sourcePipelines=[];for(const entryPoint of ['reserve','effuse','collect'])this.sourcePipelines.push(await d.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}}));
+      this.sourceGroups=this.states.map(state=>d.createBindGroup({layout,entries:[this.sourceParams,this.common,state].map((buffer,binding)=>({binding,resource:{buffer}}))}));
     }
     const flightModule = d.createShaderModule({code:flightDrawing});
     this.flightRender = await d.createRenderPipelineAsync({layout:'auto', vertex:{module:flightModule,entryPoint:'vertex'}, fragment:{module:flightModule,entryPoint:'fragment',targets:[{format:navigator.gpu.getPreferredCanvasFormat(),blend:{color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha',operation:'add'},alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha',operation:'add'}}}]}});
@@ -255,13 +282,15 @@ export class GpuWorld {
     u[0] = this.grid.cols; u[1] = this.grid.rows; f[2] = this.grid.cell; f[3] = .1;
     u[4] = this.step; u[5] = this.grid.sourceCell; u[6] = this.grid.ballistics ? 3 : this.grid.vents ? 2 : Number(this.grid.scene === 'burst'); u[7] = Number(!!this.grid.light);
     const emitter = this.grid.vents?.find(vent => !!vent.mass);
-    u[8] = emitter ? emittedQuanta(emitter, this.step) : 0;
+    const emission=this.sources?.emission(this.step);
+    u[8] = emission?.burst ?? (emitter ? emittedQuanta(emitter, this.step) : 0);
+    if(this.sources){const params=new Uint32Array([this.grid.cols,this.grid.rows,this.grid.sourceCell,0,0,emission!.effusion,0,0]);this.device.queue.writeBuffer(this.sourceParams,0,params);}
     this.device.queue.writeBuffer(this.uniform, 0, data);
     if (this.grid.ballistics) {
       const config=this.grid.ballistics, packetData=new ArrayBuffer(64), packetU=new Uint32Array(packetData), packetF=new Float32Array(packetData);
       packetU.set([this.grid.cols,this.grid.rows]);packetF[2]=this.grid.cell;packetF[3]=.1;
       packetU.set([this.step,this.grid.sourceCell,u[8],config.capacity],4);
-      packetF[8]=config.range;packetF[9]=config.speed;packetU[10]=config.count ?? 64;packetU[11]=config.seed;
+      packetF[8]=emission?.range ?? config.range;packetF[9]=emission?.speed ?? config.speed;packetU[10]=config.count ?? 64;packetU[11]=config.seed;
       if (config.direction) packetF.set([...config.direction,1,0],12);
       this.device.queue.writeBuffer(this.flightParams,0,packetData);
     }
@@ -294,7 +323,7 @@ export class GpuWorld {
 
   private async solveVents(): Promise<void> {
     const started = performance.now(), queue = this.device.queue;
-    const rates = averagedVents(this.grid.vents!, Math.floor(this.step / 10));
+    const rates = averagedVents(this.grid.vents!, this.sources?Math.floor(this.step/100)*10:Math.floor(this.step/10),this.sources?10:1);
     // Geometry is fixed until reset in this stand. Reuse only an exactly identical forcing.
     if (this.previousVentRates?.length === rates.length && rates.every((value,k) => value === this.previousVentRates![k])) return;
     queue.writeBuffer(this.ventEvents, 0, rates);
@@ -316,8 +345,25 @@ export class GpuWorld {
     this.previousVentRates = rates;
   }
 
-  /** One-second model intervals include every short impulse through its exact interval integral. */
+  private async updateSources():Promise<void>{
+    if(!this.sources||this.sourceUpdateStep===this.step)return;
+    const m=await this.summary(),reservation=this.sources.update(this.step,m.available,m.reserved);
+    const active=this.sources.active;if(active)this.grid.sourceCell=active.cell;
+    if(reservation){
+      this.device.queue.writeBuffer(this.sourceParams,0,new Uint32Array([this.grid.cols,this.grid.rows,reservation.cell,reservation.burst,reservation.effusion,0,0,0]));
+      const encoder=this.device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(this.sourcePipelines[0]);pass.setBindGroup(0,this.sourceGroups[this.current]);pass.dispatchWorkgroups(1);pass.end();this.device.queue.submit([encoder.finish()]);
+    }
+    const sink=this.grid.vents!.at(-1)!;this.grid.vents=this.sources.events(sink);
+    for(const cell of this.markerCells)this.device.queue.writeBuffer(this.markers,cell*16,new Float32Array(4));
+    this.markerCells=this.sources.volcanoes.map(v=>v.cell);
+    const codes={preparing:1,erupting:2,sleeping:3,fading:4};
+    for(const v of this.sources.volcanoes)this.device.queue.writeBuffer(this.markers,v.cell*16,new Float32Array([codes[v.stage],v.power,v.begin,v.until]));
+    this.sourceUpdateStep=this.step;
+  }
+
+  /** Fixed model intervals include every short impulse through its exact interval integral. */
   async advanceDynamic(): Promise<void> {
+    if(this.sources&&this.step%100===0)await this.updateSources();
     if (this.step > 0 && this.step % 10 === 0) {
       this.writeParams();
       if (this.grid.light) { this.prepareLight(); await this.solvePressure(); }
@@ -337,6 +383,9 @@ export class GpuWorld {
         const pass=encoder.beginComputePass();pass.setPipeline(this.flightPipelines[i]);pass.setBindGroup(0,this.flightGroups[1-this.current]);
         pass.dispatchWorkgroups(i===0?1:Math.ceil((i===1?this.grid.ballistics.capacity:this.grid.cols*this.grid.rows)/64));pass.end();
       }
+    }
+    if(this.sources){
+      for(const i of [1,2]){const pass=encoder.beginComputePass();pass.setPipeline(this.sourcePipelines[i]);pass.setBindGroup(0,this.sourceGroups[1-this.current]);pass.dispatchWorkgroups(i===1?1:Math.ceil(this.grid.cols*this.grid.rows/64));pass.end();}
     }
     this.device.queue.submit([encoder.finish()]); this.current = 1 - this.current; this.step++;
   }
@@ -361,7 +410,7 @@ export class GpuWorld {
 
   /** Full readback is for checks only; drawing never reads physics back to CPU. */
   async snapshot(): Promise<Snapshot> {
-    const n = this.grid.cols * this.grid.rows, size = n * 60 + (this.grid.ballistics?.capacity ?? 1) * 64;
+    const n = this.grid.cols * this.grid.rows, size = n * 60 + (this.grid.ballistics?.capacity ?? 1) * 64 + 16;
     const buffer = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder();
     encoder.copyBufferToBuffer(this.states[this.current], 0, buffer, 0, n * 16);
@@ -370,25 +419,27 @@ export class GpuWorld {
     encoder.copyBufferToBuffer(this.field, 0, buffer, n * 28, n * 16);
     encoder.copyBufferToBuffer(this.ventField, 0, buffer, n * 44, n * 16);
     encoder.copyBufferToBuffer(this.packets,0,buffer,n*60,(this.grid.ballistics?.capacity ?? 1)*64);
+    encoder.copyBufferToBuffer(this.common,0,buffer,size-16,16);
     const step = this.step;
     this.device.queue.submit([encoder.finish()]);
     try {
       await buffer.mapAsync(GPUMapMode.READ);
       const copy = buffer.getMappedRange().slice(0);
       return { state: new Uint32Array(copy, 0, n * 4), pressure: new Float32Array(copy, n * 16, n),
-        flow: new Float32Array(copy, n * 20, n * 2), field: new Float32Array(copy, n * 28, n * 4), vents: new Float32Array(copy,n*44,n*4), particles:new Float32Array(copy,n*60,(this.grid.ballistics?.capacity ?? 1)*16), step };
+        flow: new Float32Array(copy, n * 20, n * 2), field: new Float32Array(copy, n * 28, n * 4), vents: new Float32Array(copy,n*44,n*4), particles:new Float32Array(copy,n*60,(this.grid.ballistics?.capacity ?? 1)*16), reservoir:new Uint32Array(copy,size-16,4), step };
     } finally { buffer.unmap(); buffer.destroy(); }
   }
 
   async summary() {
     this.writeParams();
     const grid = this.grid;
-    const groups = Math.ceil(grid.cols * grid.rows / 64), size = groups * 32 + 16;
+    const groups = Math.ceil(grid.cols * grid.rows / 64), size = groups * 32 + 32;
     const buffer = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder(), pass = encoder.beginComputePass();
     pass.setPipeline(this.summaryPipeline); pass.setBindGroup(0, this.summaryGroups[this.current]);
     pass.dispatchWorkgroups(groups); pass.end(); encoder.copyBufferToBuffer(this.summaries, 0, buffer, 0, groups * 32);
     encoder.copyBufferToBuffer(this.flightLedger, 0, buffer, groups * 32, 16);
+    encoder.copyBufferToBuffer(this.common,0,buffer,groups*32+16,16);
     const step = this.step; this.device.queue.submit([encoder.finish()]);
     try {
       await buffer.mapAsync(GPUMapMode.READ);
@@ -398,8 +449,9 @@ export class GpuWorld {
         dissolved += u[k]; captured += u[k + 1]; reserved += u[k + 2]; maxSpeed = Math.max(maxSpeed, f[k + 3]);
         residual += f[k + 4]; scale += f[k + 5]; leak += u[k + 6]; flying += u[k + 7];
       }
-      return { step, dissolved, captured, reserved, flying, flightOverflow: u[groups * 8 + 3], maxSpeed: maxSpeed * grid.cell, leak,
-        massError: dissolved + captured + reserved + flying - grid.total,
+      const available=u[groups*8+4],effusion=u[groups*8+5];
+      return { step, dissolved, captured, reserved:reserved+effusion, available, reservoirError:u[groups*8+7], flying, flightOverflow: u[groups * 8 + 3], maxSpeed: maxSpeed * grid.cell, leak,
+        massError: dissolved + captured + reserved + effusion + available + flying - grid.total,
         relativeResidual: scale ? Math.sqrt(residual / scale) : Math.sqrt(residual) };
     } finally { buffer.unmap(); buffer.destroy(); }
   }

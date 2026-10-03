@@ -5,6 +5,7 @@ struct View { cols: u32, rows: u32, cell: f32, time: f32, arrows: u32, burst: u3
 @group(0) @binding(3) var<storage, read> flow: array<vec2f>;
 @group(0) @binding(4) var<storage, read> field: array<vec4f>;
 @group(0) @binding(5) var<storage, read> vents: array<vec4f>;
+@group(0) @binding(6) var<storage,read> markers:array<vec4f>;
 struct Varying { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertex(@builtin(vertex_index) i: u32) -> Varying {
   let p = array<vec2f, 3>(vec2f(-1., -1.), vec2f(3., -1.), vec2f(-1., 3.))[i];
@@ -59,6 +60,11 @@ fn concentration(k:u32,px:i32,py:i32)->f32 {
   if (abs(vents[k].y) > .001 || state[k].z > 0u) {
     let disk = 1. - smoothstep(.18,.45,length(fract(pos)-.5));
     color = mix(color, select(vec3f(.18,.68,.8),vec3f(.95,.67,.81),vents[k].y > 0. || state[k].z > 0u),disk);
+  }
+  if(markers[k].x>0.){
+    let stage=markers[k].x;let disk=1.-smoothstep(.16,.42,length(fract(pos)-.5));
+    let tint=select(vec3f(.65,.41,.3),vec3f(1.,.65,.23),stage<2.5);
+    color=mix(color,tint,disk*select(.4,.9,stage<2.5));
   }
   if (geo[k].w > .5) { color *= .4 + .4 * smoothstep(0., .55, length(fract(pos) - .5)); }
   return vec4f(color, 1.);

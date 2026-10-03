@@ -99,6 +99,8 @@ fn deposit(packet: Packet, k: u32) -> Packet {
     }}
   }
   atomicAdd(&landing[k],packet.mass-assigned);atomicAdd(&ledger[2],packet.mass);
+  let origin=u32(floor(packet.origin.y))*cfg.cols+u32(floor(packet.origin.x));
+  atomicAdd(&landing[cfg.cols*cfg.rows+origin],packet.mass);
   var done=packet;done.mass=0u;return done;
 }
 fn currentAt(k:u32,position:vec2f)->vec2f {
@@ -172,5 +174,5 @@ fn crossingTime(d:f32,v:f32,a:f32)->f32 {
 @compute @workgroup_size(64) fn gather(@builtin(global_invocation_id) id: vec3u) {
   let k = id.x; if (k >= cfg.cols * cfg.rows) { return; }
   state[k].x += atomicLoad(&landing[k]);
-  if (k == cfg.source) { state[k].w -= atomicLoad(&ledger[2]); }
+  state[k].w -= atomicLoad(&landing[cfg.cols*cfg.rows+k]);
 }

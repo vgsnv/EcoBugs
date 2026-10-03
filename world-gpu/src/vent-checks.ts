@@ -114,5 +114,5 @@ export async function checkVents(gpu: GpuWorld, publish: (text: string) => void)
     await validate(grid,await gpu.snapshot());rows.push(`✓ ${cols}×${grid.rows}: начальная r=${initial.relativeResidual.toExponential(2)}, Δмассы 0`);publish(rows.join('\n'));
   }
   assert(gpu.errors.length===0,gpu.errors.join('\n'));
-  rows.push('Проверки толчков прошли. Жизненные циклы источников впереди.');return rows.join('\n');
+  rows.push('Проверки толчков прошли. Полный цикл воронок требует залежей.');return rows.join('\n');
 }

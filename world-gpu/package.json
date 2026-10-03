@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5174 --strictPort",
     "build": "tsc --noEmit && vite build",
-    "check": "node --experimental-strip-types scripts/check-model.mjs"
+    "check": "node --experimental-strip-types scripts/check-model.mjs && node --experimental-strip-types scripts/check-sources.mjs"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.69",
