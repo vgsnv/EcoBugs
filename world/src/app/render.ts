@@ -7,7 +7,7 @@ import { finishCalculation, type Calculation } from '../core/task.ts';
  * её пятнами: вне пятен тень, нагрев теплит освещённые места. Вокруг —
  * стеклянная стена чашки, перегородки тем же стеклом.
  */
-import { advanceFlowMarker, type FlowMarker } from './flow-markers.ts';
+import { WaterFlowShader } from './water-flow-shader.ts';
 import { CoordinateRulers } from './rulers.ts';
 import { insideDish, cellInsideDish, type Dish, ERUPTION_RADIUS, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, DRIFT_REFERENCE, multiplierForLevel, eruptionRate, eruptionBursts, ventPush, BURST_WIDTH, flowAt, hash3, isBlocked, periodicFbm, smoothLevelAt, spotOutlines, SPOT_EDGE, sunAt, transparencyForDensity, VOLCANO_BIRTH, VOLCANO_POWER, type MineralProcesses, type Volcano, type World } from '../core/index.ts';
 
@@ -134,11 +134,6 @@ const GLINT_LAYERS = [
   { size: 130, vx: 5, vy: 2.5 },
   { size: 210, vx: -3.5, vy: 4 },
 ] as const;
-/** Водные трассеры: плотность по экрану и масштабу, не более 600. */
-const FLOW_MARKER_LIMIT = 600;
-const FLOW_MARKER_SPACING = { overview: 38, detail: 26 };
-type WaterMarker = FlowMarker & { born: number; streak: { x: number; y: number }[] };
-
 /** Бесшовная текстура ряби: тонкая светлая сетка там, где шум близок к нулю. */
 let rippleTexture: HTMLCanvasElement | null = null;
 function ripple(): HTMLCanvasElement {
@@ -482,13 +477,7 @@ export class WorldRenderer {
   private waterMask = document.createElement('canvas');
   /** Перегородки одним путём (в единицах мира). */
   private parts = new Path2D();
-  /** Линии течений и ключ вида, для которого они проведены. */
-  private markerAnchors: { x: number; y: number }[] = [];
-  private flowMarkers: WaterMarker[] = [];
-  private markerStep = -1;
-  private markerView = '';
-  private streakBatch = 0;
-  private streakCursor = 0;
+  private readonly waterFlow = new WaterFlowShader(ripple());
   /** Дымка минерала (клетка поля — пиксель) и версия поля, по которой она построена. */
   private readonly mineralCanvas = document.createElement('canvas');
   /** Затемнение от мутности (серый для умножения), той же сетки. */
@@ -580,8 +569,7 @@ export class WorldRenderer {
     this.mineralVersion = -1;
     this.hazeDrawnAt = -Infinity;
     this.funnelDrawn = -1;
-    this.markerView = '';
-    this.flowMarkers = []; this.markerStep = -1;
+    this.waterFlow.reset();
     this.wall = world.partitions.thickness;
     this.sample = terrainSampler(world);
     this.base = renderTerrain(this.sample, 0, 0, this.width * TILE_SCALE_MIN, this.height * TILE_SCALE_MIN, TILE_SCALE_MIN, world.dish);
@@ -864,8 +852,7 @@ export class WorldRenderer {
   /** Кадр; `animTime` — секунды анимации бликов (стоит на паузе). */
   draw(animTime = 0, flowStep = this.world.step): void {
     const key = `${animTime}:${flowStep}:${this.world.step}:${this.world.mineral.version}:${this.world.viscosity.version}:${this.zoom}:${this.cx}:${this.cy}:${this.canvas.width}:${this.canvas.height}:${this.showProcesses}`;
-    const pendingCurves = !this.showProcesses && this.flowMarkers.some((marker) => !marker.streak.length);
-    if (key === this.frameKey && !this.terrainPending && !this.redrawQueue.size && !pendingCurves) return;
+    if (key === this.frameKey && !this.terrainPending && !this.redrawQueue.size) return;
     this.frameKey = key;
     this.detailVisibility = smoothstep(1, 4, this.zoom / this.fitZoom());
     this.terrainDeadline = performance.now() + TERRAIN_WORK_BUDGET_MS;
@@ -957,14 +944,13 @@ export class WorldRenderer {
       ctx.drawImage(this.spots, 0, 0, this.canvas.width, this.canvas.height);
     }
     ctx.filter = 'none';
-    this.drawGlints(animTime, lit);
+    this.drawGlints(animTime, lit, flowStep);
     this.drawSparkles(animTime, lit);
     this.drawFoam(animTime);
     ctx.restore();
 
     ctx.setTransform(...view);
     this.drawMineral(animTime);
-    if (!this.showProcesses) this.drawFlowMarkers(flowStep);
     // Жерла — отверстия в недра: поверх течений, ничто не проходит сквозь них.
     this.drawVents(animTime);
     if (this.showProcesses) this.drawProcesses();
@@ -1818,7 +1804,7 @@ export class WorldRenderer {
   }
 
   /** Блики: две сдвигающиеся ряби, оставленные только на воде и в пятнах света. */
-  private drawGlints(time: number, lit: number): void {
+  private drawGlints(time: number, lit: number, flowStep: number): void {
     const g = this.gctx;
     const [x0, y0] = this.screenToWorld(0, 0);
     const [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
@@ -1826,138 +1812,42 @@ export class WorldRenderer {
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'source-over';
     g.clearRect(0, 0, this.glint.width, this.glint.height);
+    const velocity: [number, number] = [0, 0];
+    const w = this.world;
+    const shader = !this.showProcesses && this.waterFlow.draw(this.glint.width, this.glint.height, [x0, y0, x1, y1], flowStep, w.step, w.mineral.cell,
+      (x, y, out, k) => {
+        const allowed = insideDish(w.dish, x, y) && !isBlocked(w.partitions, x, y);
+        flowAt(w, x, y, velocity);
+        out[k] = allowed ? velocity[0] * 10 : 0; out[k + 1] = allowed ? velocity[1] * 10 : 0;
+      });
+    const renderer = shader ? 'webgl' : 'canvas2d';
+    if (this.canvas.dataset.flowRenderer !== renderer) this.canvas.dataset.flowRenderer = renderer;
+    if (shader) {
+      g.drawImage(this.waterFlow.canvas, 0, 0, this.glint.width, this.glint.height);
+    } else {
+      g.setTransform(...this.effectView());
+      GLINT_LAYERS.forEach((layer, n) => {
+        const k = layer.size / 256;
+        const t = this.showProcesses ? time : 0;
+        this.ripplePattern.setTransform(new DOMMatrix([k, 0, 0, k, layer.vx * t, layer.vy * t]));
+        g.fillStyle = this.ripplePattern;
+        g.globalCompositeOperation = n === 0 ? 'source-over' : 'lighter';
+        g.fillRect(x0, y0, x1 - x0, y1 - y0);
+      });
+    }
     g.setTransform(...this.effectView());
-    GLINT_LAYERS.forEach((layer, n) => {
-      const k = layer.size / 256;
-      this.ripplePattern.setTransform(new DOMMatrix([k, 0, 0, k, layer.vx * time, layer.vy * time]));
-      g.fillStyle = this.ripplePattern;
-      g.globalCompositeOperation = n === 0 ? 'source-over' : 'lighter';
-      g.fillRect(x0, y0, x1 - x0, y1 - y0);
-    });
     g.globalCompositeOperation = 'destination-in';
     g.imageSmoothingEnabled = true;
     g.drawImage(this.waterMask, 0, 0, this.width, this.height);
     g.setTransform(1, 0, 0, 1, 0, 0);
-    g.drawImage(this.spots, 0, 0);
+    if (!shader) g.drawImage(this.spots, 0, 0);
     g.globalCompositeOperation = 'source-over';
     const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'screen';
-    ctx.globalAlpha = GLINT_ALPHA * Math.min(1, lit);
+    ctx.globalAlpha = (shader ? 0.5 : GLINT_ALPHA) * Math.min(1, lit);
     ctx.drawImage(this.glint, 0, 0, this.canvas.width, this.canvas.height);
   }
-
-  /** Небольшие голубые штрихи со следами реального перемещения воды. */
-  private drawFlowMarkers(step: number): void {
-    const elapsed = this.markerStep < 0 ? 0 : Math.max(0, step - this.markerStep);
-    this.markerStep = step;
-    const w = this.world;
-    const [x0, y0] = this.screenToWorld(0, 0), [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
-    const allowed = (x: number, y: number) => x >= x0 && x <= x1 && y >= y0 && y <= y1 && insideDish(w.dish, x, y) && !isBlocked(w.partitions, x, y);
-    const velocity = (x: number, y: number, out: [number, number]) => flowAt(w, x, y, out);
-    const detail = smoothstep(1, 3, this.zoom / this.fitZoom());
-    const view = `${this.zoom}:${this.cx}:${this.cy}:${this.canvas.width}:${this.canvas.height}`;
-    if (view !== this.markerView) {
-      this.markerView = view;
-      this.markerAnchors = [];
-      const left = Math.max(0, x0), top = Math.max(0, y0);
-      const width = Math.max(0, Math.min(this.width, x1) - left), height = Math.max(0, Math.min(this.height, y1) - top);
-      const spacing = this.px(FLOW_MARKER_SPACING.overview + (FLOW_MARKER_SPACING.detail - FLOW_MARKER_SPACING.overview) * detail);
-      const count = Math.min(FLOW_MARKER_LIMIT, Math.max(1, Math.floor(width * height / (spacing * spacing))));
-      const cols = Math.max(1, Math.min(count, Math.round(Math.sqrt(count * width / Math.max(1, height)))));
-      const rows = Math.max(1, Math.floor(count / cols));
-      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
-        const x = left + (i + 0.15 + hash3(0x71ac, i, j) / 4294967296 * 0.7) * width / cols;
-        const y = top + (j + 0.15 + hash3(0x82bd, i, j) / 4294967296 * 0.7) * height / rows;
-        if (!allowed(x, y)) continue;
-        this.markerAnchors.push({ x, y });
-      }
-      this.flowMarkers = this.markerAnchors.map((p, i) => {
-        const v = velocity(p.x, p.y, [0, 0]);
-        return { ...p, vx: v[0], vy: v[1], born: step - hash3(0xa4df, i, 0) % 600, streak: [] };
-      });
-    }
-    const ctx = this.ctx;
-    ctx.save(); ctx.beginPath(); this.traceDish(ctx); ctx.clip();
-    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
-    ctx.setLineDash([]); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    // Три среды × три силы потока; рисуем пачками, без стиля на каждую метку.
-    const paths = Array.from({ length: 9 }, () => ({ tails: [new Path2D(), new Path2D(), new Path2D()], heads: new Path2D() }));
-    const curveDeadline = performance.now() + 1.5;
-    let rebuilt = 0;
-    for (let offset = 0; offset < this.flowMarkers.length; offset++) {
-      const i = (this.streakCursor + offset) % this.flowMarkers.length;
-      const marker = this.flowMarkers[i];
-      if (elapsed > 0 && (step - marker.born >= 600 || !advanceFlowMarker(marker, elapsed, velocity, allowed))) {
-        const anchor = this.markerAnchors[i];
-        Object.assign(marker, anchor, { vx: 0, vy: 0, born: step });
-        marker.streak = [];
-      }
-      // Длина штриха — условный знак направления, а не пройденное расстояние.
-      // Перестраиваем четверть штрихов за кадр, остальные переносим вместе с водой.
-      const current = velocity(marker.x, marker.y, [0, 0]);
-      marker.vx = current[0]; marker.vy = current[1];
-      const speed = Math.hypot(marker.vx, marker.vy);
-      const strength = speed / (speed + DRIFT_REFERENCE);
-      const level = smoothLevelAt(w.viscosity, marker.x, marker.y);
-      const habitat = level < 0.8 ? 0 : level < 1.65 ? 1 : 2;
-      const weight = strength < 0.22 ? 0 : strength < 0.5 ? 1 : 2;
-      const { tails, heads } = paths[habitat * 3 + weight];
-      if ((!marker.streak.length || (elapsed > 0 && i % 4 === this.streakBatch)) && rebuilt < 150 && performance.now() < curveDeadline) {
-        rebuilt++;
-        const length = Math.min(64, this.px(10 + 24 * strength + 6 * detail));
-        // При приближении изгибы возле берегов читаются точнее.
-        const segments = Math.max(6, Math.ceil(length / (4 - 2 * detail)));
-        const pts = [{ x: 0, y: 0 }];
-        let x = marker.x, y = marker.y;
-        const v: [number, number] = [0, 0];
-        for (let k = 0; k < segments; k++) {
-          velocity(x, y, v);
-          const magnitude = Math.hypot(...v);
-          if (magnitude < 1e-6) break;
-          const distance = length / segments;
-          const nx = x - v[0] / magnitude * distance, ny = y - v[1] / magnitude * distance;
-          if (!allowed((x + nx) / 2, (y + ny) / 2) || !allowed(nx, ny)) break;
-          x = nx; y = ny;
-          pts.push({ x: x - marker.x, y: y - marker.y });
-        }
-        marker.streak = pts;
-      }
-      for (let k = 0; k < marker.streak.length - 1; k++) {
-        const a = marker.streak[k], b = marker.streak[k + 1];
-        const path = tails[Math.min(2, Math.floor(k / Math.max(1, marker.streak.length - 1) * 3))];
-        path.moveTo(marker.x + a.x, marker.y + a.y);
-        path.lineTo(marker.x + b.x, marker.y + b.y);
-      }
-      if (speed > 1e-6) {
-        heads.moveTo(marker.x - marker.vx / speed * this.px(1.8), marker.y - marker.vy / speed * this.px(1.8));
-        heads.lineTo(marker.x, marker.y);
-      }
-    }
-    this.streakCursor = (this.streakCursor + Math.max(1, rebuilt)) % Math.max(1, this.flowMarkers.length);
-    this.streakBatch = (this.streakBatch + 1) % 4;
-    for (let habitat = 0; habitat < 3; habitat++) for (let weight = 0; weight < 3; weight++) {
-      const { tails, heads } = paths[habitat * 3 + weight];
-      const opacity = [0.24, 0.55, 0.85][weight] * (habitat === 2 ? 0.4 : 1);
-      for (let i = 2; i >= 0; i--) {
-        const fade = [0.65, 0.32, 0.1][i];
-        if (habitat === 1) {
-          ctx.lineWidth = this.px(1.9);
-          ctx.strokeStyle = `rgba(21,65,85,${opacity * fade * 0.6})`;
-          ctx.stroke(tails[i]);
-        }
-        ctx.lineWidth = this.px(0.9);
-        ctx.strokeStyle = `rgba(145,213,232,${opacity * fade})`;
-        ctx.stroke(tails[i]);
-      }
-      if (habitat === 1) {
-        ctx.lineWidth = this.px(2.1); ctx.strokeStyle = `rgba(21,65,85,${opacity * 0.45})`; ctx.stroke(heads);
-      }
-      ctx.lineWidth = this.px(1.15); ctx.strokeStyle = `rgba(181,231,244,${opacity})`; ctx.stroke(heads);
-    }
-    ctx.restore();
-  }
-
 
   /** Мини-карта в отдельной панели: вся чашка, пятна света, перегородки и рамка вида. */
   drawMinimap(mini: HTMLCanvasElement): void {
@@ -2140,7 +2030,7 @@ export class WorldRenderer {
       for (let i = 0; i < n; i++) {
         const x = x0 + (i + 0.5) * step, y = y0 + (j + 0.5) * step;
         const inside = x < this.width && y < this.height;
-        const water = !inside || isBlocked(this.world.partitions, x, y) ? 0 : 1 - smoothstep(0.35, 0.95, smoothLevelAt(this.world.viscosity, x, y));
+        const water = !inside || isBlocked(this.world.partitions, x, y) ? 0 : 1 - smoothstep(1.1, 1.65, smoothLevelAt(this.world.viscosity, x, y));
         const k = (j * n + i) * 4;
         img.data[k] = img.data[k + 1] = img.data[k + 2] = 255;
         img.data[k + 3] = water * 255;
