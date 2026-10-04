@@ -9,6 +9,7 @@ import {
 import { WorldSummary } from './world-summary.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
 import { WorldRenderer } from './render.ts';
+import { installRenderCheck } from './render-check.ts';
 import { formatDuration, formatLength, formatMass, formatNumber, formatPercent } from './units.ts';
 import { gramsPerSquareMetre, millimetresPerSecond } from '../core/units.ts';
 import type { SimulationCommand, SimulationReply } from './simulation.ts';
@@ -369,5 +370,9 @@ function frame(now: number): void {
 }
 
 setWorld(world);
-create(world.params);
-requestAnimationFrame(frame);
+// ?check — проверка отрисовки (см. render-check.ts): без расчёта и анимации.
+if (new URLSearchParams(location.search).has('check')) installRenderCheck(renderer, canvas);
+else {
+  create(world.params);
+  requestAnimationFrame(frame);
+}

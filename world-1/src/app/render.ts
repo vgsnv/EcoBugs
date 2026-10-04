@@ -726,6 +726,16 @@ export class WorldRenderer {
     this.onZoomChange(this.zoom / min);
   }
 
+  /** Показать точку мира в центре при масштабе `relative` от вида «вся чашка». */
+  lookAt(x: number, y: number, relative: number): void {
+    this.setView(this.fitZoom() * relative, x, y);
+  }
+
+  /** Остались недостроенные плитки или блоки местности — следующий кадр продолжит. */
+  pendingWork(): boolean {
+    return this.terrainPending || this.redrawQueue.size > 0;
+  }
+
   /** Показать чашку целиком по центру области карты. */
   fit(): void {
     this.setView(0, this.width / 2, this.height / 2);
