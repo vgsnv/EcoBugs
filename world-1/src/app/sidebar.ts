@@ -57,6 +57,7 @@ export class Sidebar {
     }
   }
   show(): void { this.setCollapsed(false); }
+  hide(): void { this.setCollapsed(true); }
   private setCollapsed(collapsed: boolean): void {
     this.app.classList.toggle('sidebar-collapsed', collapsed);
     this.toggle.setAttribute('aria-expanded', String(!collapsed));

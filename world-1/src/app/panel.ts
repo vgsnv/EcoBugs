@@ -227,9 +227,9 @@ export class Panel {
       el('h3', { textContent: 'Свет' }), document.querySelector<HTMLElement>('.light-drift')!));
     this.summaryToggle.setAttribute('aria-controls', 'world-summary');
     this.summaryToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3v14h14 M6 13V9 M10 13V5 M14 13V7"/></svg>';
-    this.summaryToggle.addEventListener('click', () => this.toggleSummary());
+    this.summaryToggle.addEventListener('click', () => { if (!this.revealPanel(!this.roots.summary.hidden)) this.toggleSummary(); });
     installInfoTips();
-    this.navigationToggle.addEventListener('click', () => this.toggleNavigation());
+    this.navigationToggle.addEventListener('click', () => { if (!this.revealPanel(!this.roots.navigation.hidden)) this.toggleNavigation(); });
     this.navigationToggle.setAttribute('aria-controls', 'navigation');
     this.navigationToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m2 4 5-2 6 2 5-2v14l-5 2-6-2-5 2Z M7 2v14 M13 4v14"/></svg>';
     for (const [button, label] of [[this.legendToggle, 'Легенда'], [this.navigationToggle, 'Миникарта'], [this.summaryToggle, 'Сводка']] as const) {
@@ -240,6 +240,18 @@ export class Panel {
     document.addEventListener('fullscreenchange', () => this.toggleFocus(document.fullscreenElement === roots.app));
     this.refresh();
     this.toggleSummary(true);
+    // На узком окне панель выезжает поверх карты — при запуске она закрыта.
+    if (matchMedia('(max-width: 999px)').matches) this.sidebar.hide();
+  }
+
+  /**
+   * Раздел уже открыт, но панель свёрнута — кнопка раздела показывает панель,
+   * а не закрывает раздел. Возвращает, показала ли.
+   */
+  private revealPanel(sectionOpen: boolean): boolean {
+    if (!sectionOpen || !this.roots.app.classList.contains('sidebar-collapsed')) return false;
+    this.sidebar.show();
+    return true;
   }
 
   /** Мир создан с этими параметрами — черновик совпадает с миром. */
@@ -478,34 +490,31 @@ export class Panel {
       this.focusToggle,
       picker,
     );
+    // Под картой — полоса минерала и управление ходом мира (одна раскладка на любой ширине).
     const playback = document.querySelector<HTMLElement>('.world-playback')!;
-    const playbackRun = el('div', { className: 'time-controls' });
-    const desktop = matchMedia('(min-width: 901px)');
-    const placePlayback = () => {
-      const mineralStats = document.querySelector<HTMLElement>('.mineral-stats')!;
-      if (desktop.matches) {
-        document.querySelector('.world-footer')!.prepend(mineralStats);
-        playbackRun.append(runGroup);
-        playback.append(playbackRun, speedControl, this.focusToggle);
-      } else {
-        document.querySelector('.world-footer')!.prepend(mineralStats);
-        timeControls.append(runGroup);
-        spacer.before(speedControl);
-        picker.before(this.focusToggle);
-      }
-    };
-    placePlayback();
-    desktop.addEventListener('change', () => { placePlayback(); this.handlers.onLayoutChange(); });
+    const playbackRun = el('div', { className: 'time-controls' }, runGroup);
+    document.querySelector('.world-footer')!.prepend(document.querySelector<HTMLElement>('.mineral-stats')!);
+    playback.append(playbackRun, speedControl, this.focusToggle);
     for (const disclosure of [document.querySelector<HTMLDetailsElement>('.mineral-details')!]) {
       disclosure.querySelector('summary')!.addEventListener('click', () => requestAnimationFrame(() => this.handlers.onLayoutChange()));
       disclosure.addEventListener('toggle', () => this.handlers.onLayoutChange());
     }
-    this.roots.viewControls.append(
-      el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn),
-      el('span', { className: 'process-control' }, processes, processLegend),
-      stream,
-      rulers,
-    );
+    // Переключатели вида; на узком окне — в меню «Вид», чтобы шапка оставалась в одну строку.
+    const toggles = [el('span', { className: 'process-control' }, processes, processLegend), stream, rulers];
+    const viewMenu = el('details', { className: 'view-menu' }, el('summary', { textContent: 'Вид', title: 'Процессы, перенос минерала, линейки' }), el('div', { className: 'menu-actions' }));
+    viewMenu.addEventListener('toggle', () => this.handlers.onLayoutChange());
+    document.addEventListener('pointerdown', (event) => {
+      if (viewMenu.open && !viewMenu.contains(event.target as Node)) viewMenu.open = false;
+    });
+    this.roots.viewControls.append(el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn), ...toggles, viewMenu);
+    const narrow = matchMedia('(max-width: 980px)');
+    const placeToggles = () => {
+      if (narrow.matches) viewMenu.querySelector('.menu-actions')!.append(...toggles);
+      else viewMenu.before(...toggles);
+      viewMenu.hidden = !narrow.matches;
+    };
+    placeToggles();
+    narrow.addEventListener('change', () => { placeToggles(); this.handlers.onLayoutChange(); });
   }
 
   private buildParams(): void {
@@ -728,7 +737,7 @@ export class Panel {
       el('details', { className: 'legend-extras' }, el('summary', { textContent: 'Блики и нагрев' }),
         el('p', { className: 'note', textContent: 'Блики отмечают воду на свету. Светлые пятна теплее; точные значения температуры доступны в панели «Точка на карте».' })),
     );
-    this.legendToggle.addEventListener('click', () => this.toggleLegend());
+    this.legendToggle.addEventListener('click', () => { if (!this.revealPanel(!this.roots.legend.hidden)) this.toggleLegend(); });
     this.legendToggle.setAttribute('aria-controls', 'legend');
     this.legendToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><rect x="2" y="3" width="4" height="4" rx="1"/><rect x="2" y="12" width="4" height="4" rx="1"/><path d="M10 5h8 M10 14h8"/></svg>';
     this.roots.legend.append(el('div', { className: 'legend-head' }, el('h2', { textContent: 'Легенда' })), this.legendBody, detail);
