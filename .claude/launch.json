@@ -2,9 +2,9 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "world-sandbox",
+      "name": "world-1",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "world", "run", "dev", "--", "--port", "5173", "--strictPort"],
+      "runtimeArgs": ["--prefix", "world-1", "run", "dev", "--", "--host", "127.0.0.1", "--port", "5173", "--strictPort"],
       "port": 5173
     }
   ]
