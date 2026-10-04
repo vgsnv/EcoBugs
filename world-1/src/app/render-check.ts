@@ -5,7 +5,7 @@
  * генератором и снимает отпечаток кадра (оба холста): хеши плиток. Отпечатки до и
  * после правки отрисовки сравниваются: совпали — картинка не изменилась.
  */
-import { createWorld, makeParams, mineralProcesses, stepWorld, type World, type WorldParams } from '../core/index.ts';
+import { createWorld, makeParams, mineralProcesses, stepWorld, takeGroundChanges, type World, type WorldParams } from '../core/index.ts';
 import type { WorldRenderer } from './render.ts';
 
 export interface CheckScene {
@@ -165,9 +165,31 @@ export function installRenderCheck(renderer: WorldRenderer): void {
   };
   const run = (scene: CheckScene): CheckResult => render(scene, (frame) => ({ name: scene.name, ...fingerprint(frame), minimap: fingerprint(mini).hash }));
 
+  let looked: World | null = null;
   Object.assign(window, {
     renderCheck: {
       scenes: CHECK_SCENES,
+      /**
+       * Мир с показом грунта: идёт до шага `step` (или продолжает прошлый, если
+       * `step` больше его шага), отдавая показу изменения грунта; вид — на точку
+       * (x, y) при масштабе `zoom` (без точки — вся чашка). Возвращает идущие подвижки.
+       */
+      look: (params: Partial<WorldParams>, step: number, x?: number, y?: number, zoom = 1, time = 0) => {
+        if (!looked || looked.params.seed !== (params.seed ?? looked.params.seed) || looked.step > step) {
+          looked = createWorld(makeParams(params));
+          renderer.showProcesses = false;
+          renderer.setWorld(looked);
+        }
+        const w = looked;
+        while (w.step < step) {
+          stepWorld(w);
+          if (w.step % 10_000 === 0) renderer.acceptGround(takeGroundChanges(w.mineral));
+        }
+        w.drift.nodes(w.step);
+        if (x === undefined || y === undefined) renderer.fit(); else renderer.lookAt(x, y, zoom);
+        renderer.draw(time, w.step);
+        return w.terrain.active.map((m) => ({ n: m.n, quake: m.quake, band: m.band, x: Math.round(m.x), y: Math.round(m.y), size: Math.round(m.size), amp: +m.amp.toFixed(2), done: +((w.step - m.start) / m.duration).toFixed(2) }));
+      },
       run: (index: number) => run(CHECK_SCENES[index]),
       all: () => CHECK_SCENES.map(run),
       /** Средние цвета кадра сеткой n × n (RGB подряд) — для сравнения картинок, которые не обязаны совпадать точно. */

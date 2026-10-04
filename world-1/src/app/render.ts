@@ -6,9 +6,10 @@
  * стекло стен и перегородок, проба, линейки. Слои — в render/*.ts.
  */
 import { CoordinateRulers } from './rulers.ts';
-import { DRIFT_REFERENCE, insideDish, sunAt, type MineralProcesses, type World } from '../core/index.ts';
+import { DRIFT_REFERENCE, insideDish, sunAt, type GroundChanges, type MineralProcesses, type World } from '../core/index.ts';
 import { Camera } from './render/camera.ts';
 import { FieldRenderer } from './render/field.ts';
+import { GroundLayer } from './render/ground.ts';
 import type { Frame } from './render/frame.ts';
 import { LightLayer } from './render/light.ts';
 import { MineralLayer } from './render/mineral.ts';
@@ -43,6 +44,7 @@ export class WorldRenderer {
   private readonly minimap = new Minimap();
   private readonly field = new FieldRenderer();
   private readonly suspension = new SuspensionLayer();
+  private readonly ground = new GroundLayer();
   private probePoint: { x: number; y: number } | null = null;
   private world!: World;
   private frameKey = '';
@@ -79,12 +81,18 @@ export class WorldRenderer {
     this.water.resetFlow();
     this.camera.setWorld(world);
     this.terrain.setWorld(world);
+    this.ground.setWorld(world);
     this.walls.setWorld(world);
     const fresh = this.terrain.refresh();
     if (fresh) this.water.buildSparkles(world, fresh.level, fresh.deposits);
     this.water.resetFoam();
     this.resize();
     this.fit();
+  }
+
+  /** Изменения грунта из очередного снимка мира (для свежего грунта и песочной взвеси). */
+  acceptGround(changes: GroundChanges): void {
+    this.ground.accept(changes);
   }
 
   /** Изменение компоновки сохраняет масштаб, левый край чашки или центр приближенного вида. */
@@ -174,6 +182,8 @@ export class WorldRenderer {
       spots: light.spots,
       mineral,
       terrain: this.terrain.data(),
+      fresh: this.ground.freshGrid(),
+      tectonics: this.ground.tectonics(animTime),
       ripple: this.water.ripple,
       foam: this.water.foam(w),
       ...light.strength,
@@ -217,7 +227,7 @@ export class WorldRenderer {
     const stream = this.water.streamField(frame, this.streamView, ref);
     return {
       trailMix: this.water.trailMix(),
-      particles: this.suspension.update(frame, dt, stream, this.streamView),
+      particles: this.suspension.update(frame, dt, stream, this.streamView, (x, y) => this.ground.liftAt(x, y)),
       stream,
       averageMix: this.water.averageMix(),
       view: this.streamView,

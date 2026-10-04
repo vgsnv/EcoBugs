@@ -127,6 +127,7 @@ simulation.onmessage = ({ data }: MessageEvent<SimulationReply>) => {
       }
       worldSummary.observe(world, data.exchanges);
       renderer.processes = data.processes ?? null;
+      if (data.ground) renderer.acceptGround(data.ground);
       actualRate = data.rate;
       behind = data.behind;
       send({ type: 'ack', epoch });

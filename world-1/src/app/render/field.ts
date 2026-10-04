@@ -12,6 +12,7 @@ import { SPOT_FS, SPOT_VS, type SpotShapes } from './light.ts';
 import { TRAIL_DASH_FS, TRAIL_FADE_FS, TRAIL_SECONDS } from './trails.ts';
 import type { StreamField, StreamView } from './water.ts';
 import { TERRAIN_GLSL, type Grid, type TerrainData } from './terrain.ts';
+import { TECTONICS_GLSL, type Tectonics } from './ground.ts';
 
 /** Свечения и блёстки: копятся за кадр и рисуются после полей, в порядке вызовов. */
 export interface GlowSink {
@@ -31,6 +32,9 @@ export interface FieldInputs {
   readonly mineral: { readonly image: TextureSource; readonly version: number; readonly width: number; readonly height: number };
   /** Местность: сетки для шейдера. */
   readonly terrain: TerrainData;
+  /** Свежесть грунта (сетка минерала) и идущие подвижки и толчки. */
+  readonly fresh: Grid;
+  readonly tectonics: Tectonics;
   /** Узор ряби (альфа, бесшовный): равномерная рябь при «Процессах» и пена. */
   readonly ripple: HTMLCanvasElement;
   /** Пена у берега (альфа), на всю чашку. */
@@ -132,11 +136,12 @@ precision highp float;
 precision highp int;
 ${COMMON}
 ${TERRAIN_GLSL}
+${TECTONICS_GLSL}
 uniform sampler2D u_spotMask;    // R — пятна с резким краем, G — с мягким
 uniform sampler2D u_mineral;
 uniform sampler2D u_ripple;
 uniform sampler2D u_foam;
-uniform sampler2D u_trails;       // R — взвесь и её следы
+uniform sampler2D u_trails;       // R — взвесь и её следы, G — песочная взвесь
 uniform float u_trailMix;         // длина следов 0…1
 uniform sampler2D u_stream;       // поле течений для взвеси: направление, сила
 uniform vec3 u_streamGrid;
@@ -177,13 +182,18 @@ void main() {
   c = screenOver(c, u_sun * u_glow * mb);
   c = screenOver(c, vec3(u_glare * mb));
 
+  // Подвижки и толчки — тонко, поверх света.
+  c = tectonics(c, w, u_time);
+
   // Рябь на воде.
   float water = waterAt(w);
   float spots = sp.x * (1. - held);
   if (u_rippleMode == 0) {
     // Взвесь и её следы (suspension.ts, trails.ts): светлые, у минерала — сиреневые; в пятнах света ярче.
-    float tr = texture(u_trails, gl_FragCoord.xy / u_size).r;
-    c = screenOver(c, u_trailColor * tr * (.55 + .45 * sp.y) * water * .9);
+    vec2 tr = texture(u_trails, gl_FragCoord.xy / u_size).rg;
+    c = screenOver(c, u_trailColor * tr.x * (.55 + .45 * sp.y) * water * .9);
+    // Песок — своим цветом поверх воды (осветление выбелило бы его до цвета остальной взвеси).
+    c = mix(c, vec3(.86, .7, .42) * (.8 + .25 * sp.y), min(1., tr.y * 1.2) * water * .75);
     // Устойчивая картина: где течение (перенос) сильное в среднем — мягкая подсветка.
     if (u_averageMix > 0.) {
       float strong = texture(u_stream, w / u_streamGrid.z / u_streamGrid.xy).z;
@@ -302,6 +312,7 @@ export class FieldRenderer implements GlowSink {
   private readonly grainKey = {};
   private readonly cracksKey = {};
   private readonly blockedKey = {};
+  private readonly freshKey = {};
   private terrainWorld: object | null = null;
   /** Следы взвеси: программы, два холста по очереди, какой из них текущий, время и камера прошлого шага. */
   private trailFade!: Program;
@@ -597,7 +608,7 @@ export class FieldRenderer implements GlowSink {
     const t = input.terrain;
     if (t.world !== this.terrainWorld) {
       // Новый мир — сетки местности загрузить заново.
-      for (const key of [this.levelKey, this.depositKey, this.mottleKey, this.grainKey, this.cracksKey, this.blockedKey]) this.textures.release(key);
+      for (const key of [this.levelKey, this.depositKey, this.freshKey, this.mottleKey, this.grainKey, this.cracksKey, this.blockedKey]) this.textures.release(key);
       this.terrainWorld = t.world;
     }
     // Загрузка текстур и проходы вне экрана — до выбора программы полей.
@@ -620,6 +631,13 @@ export class FieldRenderer implements GlowSink {
     this.bindGrid(p, 10, 'u_grain', this.grainKey, t.grain, 'r16f');
     this.bindGrid(p, 11, 'u_cracks', this.cracksKey, t.cracks, 'rg32f');
     this.bindGrid(p, 12, 'u_blocked', this.blockedKey, t.blocked, 'r8');
+    this.bindGrid(p, 14, 'u_fresh', this.freshKey, input.fresh, 'r16f');
+    const tec = input.tectonics;
+    gl.uniform4fv(p.uniform('u_moveA'), tec.moves.filter((_, i) => i % 8 < 4));
+    gl.uniform4fv(p.uniform('u_moveB'), tec.moves.filter((_, i) => i % 8 >= 4));
+    gl.uniform1i(p.uniform('u_moveCount'), tec.moveCount);
+    gl.uniform4fv(p.uniform('u_ring'), tec.rings);
+    gl.uniform1i(p.uniform('u_ringCount'), tec.ringCount);
     gl.uniform1ui(p.uniform('u_seed'), t.seed >>> 0);
     // Мелкие детали камня проявляются с приближением, как прежде у плиток местности.
     gl.uniform1f(p.uniform('u_detail'), smoothstep(0.5, 4, frame.camera.zoom));

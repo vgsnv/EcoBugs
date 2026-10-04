@@ -25,6 +25,9 @@ export const SHORE_LIGHT: Rgb = [151, 201, 194];
  * с какой густоты залежей (от средней плотности запаса) начинаются и с какой
  * сплошные, наибольшая укрывистость, доля и яркость кристаллов.
  */
+/** Свежий грунт (намытый течениями): светлее и чище камня; доля цвета у полностью свежего. */
+export const FRESH_GROUND: Rgb = [196, 178, 138];
+export const FRESH_MAX = 0.5;
 export const DEPOSIT_COLOR: Rgb = [101, 57, 137];
 export const DEPOSIT_FROM = 0.5;
 export const DEPOSIT_FULL = 8;

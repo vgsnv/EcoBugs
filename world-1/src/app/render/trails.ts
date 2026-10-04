@@ -43,7 +43,7 @@ void main() {
   o = max(old * u_keep - u_floor, 0.);
 }`;
 
-/** Частица в картинку следов: капсула вдоль течения, к голове ярче; яркость — в R (наложение «максимум»). */
+/** Частица в картинку следов: капсула вдоль течения, к голове ярче; яркость — в R, у песка — в G (наложение «максимум»). */
 export const TRAIL_DASH_FS = `#version 300 es
 precision highp float;
 uniform float u_zoom;       // пикселей устройства на единицу мира
@@ -57,5 +57,5 @@ void main() {
   vec2 q = v_local * v_dash;
   float d = length(vec2(max(abs(q.x) - (v_dash.x - v_dash.y), 0.), q.y)) - v_dash.y;
   float a = clamp(.5 - d * u_zoom, 0., 1.) * mix(.35, 1., v_local.x * .5 + .5) * v_alpha;
-  o = vec4(a, 0., 0., a);
+  o = v_color.r > .5 ? vec4(0., a, 0., a) : vec4(a, 0., 0., a);
 }`;

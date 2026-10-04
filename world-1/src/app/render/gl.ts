@@ -21,8 +21,10 @@ export function createProgram(gl: WebGL2RenderingContext, vertex: string, fragme
   const program = gl.createProgram()!;
   gl.attachShader(program, vs);
   gl.attachShader(program, fs);
-  // Вершины прямоугольника — всегда в атрибуте 0: один набор атрибутов на все программы.
+  // Вершины прямоугольника — всегда в атрибуте 0, атрибуты спрайтов — в 1…3: программы
+  // спрайтов и следов делят один набор атрибутов (VAO), номера у них должны совпадать.
   gl.bindAttribLocation(program, 0, 'a_pos');
+  ['a_sprite', 'a_color', 'a_shape'].forEach((name, i) => gl.bindAttribLocation(program, i + 1, name));
   gl.linkProgram(program);
   gl.deleteShader(vs);
   gl.deleteShader(fs);

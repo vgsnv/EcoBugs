@@ -170,6 +170,20 @@ export function mineralProcesses(m: MineralState): MineralProcesses {
 export interface MineralExchanges { emitted: number; funnelSunk: number }
 export function mineralExchanges(m: MineralState): MineralExchanges { return workspace(m).exchanges; }
 
+/**
+ * Изменения грунта от течений и осыпания, накопленные с прошлого запроса —
+ * только для показа (не состояние, не хеш, не файл): сколько грунта течения
+ * подняли с клетки (`lift`) и насколько грунт клетки изменился (`net`), за `steps` шагов.
+ */
+export interface GroundChanges { lift: Float32Array; net: Float32Array; steps: number }
+/** Забрать накопленные изменения грунта (копии) и начать копить заново. */
+export function takeGroundChanges(m: MineralState): GroundChanges {
+  const g = workspace(m).groundChanges;
+  const out = { lift: g.lift.slice(), net: g.net.slice(), steps: g.steps };
+  g.lift.fill(0); g.net.fill(0); g.steps = 0;
+  return out;
+}
+
 interface MineralWork {
   exchanges: MineralExchanges;
   dst: Float64Array;
@@ -186,6 +200,7 @@ interface MineralWork {
   seen: Uint8Array;
   /** Грунт после переноса и осыпания (считается от снимка). */
   ground: Float64Array;
+  groundChanges: GroundChanges;
   processes: MineralProcesses;
 }
 const workspaces = new WeakMap<MineralState, MineralWork>();
@@ -202,6 +217,7 @@ function workspace(m: MineralState): MineralWork {
       speed: new Float32Array(n), flowX: new Float32Array(n), flowY: new Float32Array(n),
       tvx: new Float32Array(n), tvy: new Float32Array(n), pushX: new Float32Array(n), pushY: new Float32Array(n),
       holes: new Uint8Array(n), seen: new Uint8Array(n), ground: new Float64Array(n),
+      groundChanges: { lift: new Float32Array(n), net: new Float32Array(n), steps: 0 },
       processes: { step: 0, vx: new Float32Array(n), vy: new Float32Array(n),
         erosion: new Float32Array(n), settling: new Float32Array(n), sinking: new Float32Array(n) },
     };
@@ -373,6 +389,7 @@ function settleRange(m: MineralState, params: WorldParams, terrain: TerrainState
 function sandRows(m: MineralState, params: WorldParams, terrain: TerrainState, work: MineralWork, sMax: number, perLvl: number, out: Float64Array, first: number, last: number): void {
   const { cols, rows, blocked } = m;
   const { speed, flowX, flowY } = work;
+  const lift = work.groundChanges.lift;
   const gr = terrain.ground, dep = terrain.deposits;
   const open = (n: number) => !blocked[n] && (gr[n] + dep[n]) / perLvl < SAND_TOP;
   if (!(sMax > 0)) return;
@@ -388,8 +405,8 @@ function sandRows(m: MineralState, params: WorldParams, terrain: TerrainState, w
       const amount = Math.min(gr[k], SAND_RATE * over * perLvl * params.terrainSpeed);
       const tx = vx > 0 ? (i < cols - 1 ? k + 1 : -1) : (i > 0 ? k - 1 : -1);
       const ty = vy > 0 ? (j < rows - 1 ? k + cols : -1) : (j > 0 ? k - cols : -1);
-      if (tx >= 0 && ax > 0 && open(tx)) { const a = amount * ax / sum; out[k] -= a; out[tx] += a; }
-      if (ty >= 0 && ay > 0 && open(ty)) { const a = amount * ay / sum; out[k] -= a; out[ty] += a; }
+      if (tx >= 0 && ax > 0 && open(tx)) { const a = amount * ax / sum; out[k] -= a; out[tx] += a; lift[k] += a; }
+      if (ty >= 0 && ay > 0 && open(ty)) { const a = amount * ay / sum; out[k] -= a; out[ty] += a; lift[k] += a; }
     }
   }
 }
@@ -568,11 +585,15 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
     yield;
     sandRows(m, params, terrain, work, sMax, perLvl, sand, first, Math.min(rows, first + 8));
   }
+  const shown = work.groundChanges;
+  for (let k = 0; k < n; k++) shown.net[k] += sand[k] - gr[k];
   gr.set(sand);
   for (let first = 0; first < rows; first += 8) {
     yield;
     slumpRows(m, params, terrain, perLvl, sand, first, Math.min(rows, first + 8));
   }
+  for (let k = 0; k < n; k++) shown.net[k] += sand[k] - gr[k];
+  shown.steps += P;
   gr.set(sand);
 
   phase('стекание');

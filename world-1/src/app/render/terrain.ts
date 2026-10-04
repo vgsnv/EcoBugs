@@ -8,7 +8,7 @@
 import type { Calculation } from '../../core/task.ts';
 import { hash3, insideDish, periodicFbm, smoothLevelAt, type World } from '../../core/index.ts';
 import {
-  CRYSTAL_LIGHT, CRYSTAL_SHARE, DEEP_WATER, DEPOSIT_COLOR, DEPOSIT_FROM, DEPOSIT_FULL, DEPOSIT_MAX, SHALLOW_WATER, SHALLOWS_CLARITY,
+  CRYSTAL_LIGHT, CRYSTAL_SHARE, DEEP_WATER, FRESH_GROUND, FRESH_MAX, DEPOSIT_COLOR, DEPOSIT_FROM, DEPOSIT_FULL, DEPOSIT_MAX, SHALLOW_WATER, SHALLOWS_CLARITY,
   SHORE_LIGHT, STONE_BASE, STONE_CRACK, STONE_GRAIN, STONE_MOTTLE, STONE_SLAB, STONE_UNDERWATER_LIFT, WET_SHORE, mix, smoothstep,
 } from './palette.ts';
 
@@ -232,6 +232,7 @@ const vec3 = (c: readonly number[]) => `vec3(${c.map((x) => x.toFixed(1)).join('
 export const TERRAIN_GLSL = `
 uniform sampler2D u_level;      uniform vec3 u_levelGrid;    // столбцы, строки, клетка
 uniform sampler2D u_deposit;    uniform vec3 u_depositGrid;
+uniform sampler2D u_fresh;      uniform vec3 u_freshGrid;    // свежесть грунта 0…1 (render/ground.ts)
 uniform sampler2D u_mottle;     uniform vec3 u_mottleGrid;
 uniform sampler2D u_grain;      uniform vec3 u_grainGrid;
 uniform highp sampler2D u_cracks;
@@ -300,6 +301,10 @@ vec3 terrainAt(vec2 w) {
   // Плотные залежи слегка просвечивают и в глубокой воде.
   float cover = (1. - ${SHALLOWS_CLARITY.toFixed(3)} * shallow) * (1. - dry) * (1. - .24 * lode);
   c += (water - c) * cover;
+  // Свежий грунт светлее и чище; темнеет до старого со временем. Виден сквозь
+  // воду — тем лучше, чем мельче (намывается он на отмели и у берегов).
+  float fresh = centered(u_fresh, u_freshGrid, w);
+  if (fresh > 0.) c += (${vec3(FRESH_GROUND)} - c) * ${FRESH_MAX.toFixed(2)} * smoothstep(.1, 1., fresh) * (.35 + .65 * shallow) * (1. - lode);
   // Светлое мелководье снаружи, мокрый камень внутри — тон берега.
   float shoreLight = smoothstep(1.08, 1.3, L) * (1. - smoothstep(1.3, 1.5, L)) * .22 * (1. - lode);
   float wet = smoothstep(1.35, 1.53, L) * (1. - smoothstep(1.58, 1.83, L)) * .42 * (1. - .65 * lode);

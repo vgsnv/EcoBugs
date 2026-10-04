@@ -11,6 +11,9 @@
  * течений (WaterLayer.streamField): на больших скоростях — усреднённого.
  * В виде «минерал» частицы рождаются там, где минерал переносится, и
  * видны настолько, насколько он переносится.
+ * В виде «вода» часть частиц — песочная взвесь: рождается там, где течения
+ * поднимают грунт (render/ground.ts), плывёт по течению и гаснет там, где
+ * грунт ложится; в картинке следов она идёт в отдельном канале (G).
  */
 import { insideDish, isBlocked, smoothLevelAt, type World } from '../../core/index.ts';
 import { SPRITE_FLOATS } from './field.ts';
@@ -29,20 +32,26 @@ const DASH_HALF_WIDTH = 0.6;
 const DASH_HALF_LENGTH: readonly [number, number] = [0.7, 3];
 /** Сколько экранных пикселей в секунду удлиняют чёрточку на пиксель. */
 const DASH_PER_SPEED = 0.05;
+/** Какая доля частиц ищет место, где течения поднимают грунт; за сколько секунд гаснет песок вне таких мест. */
+const SAND_SHARE = 0.35;
+const SAND_FADE = 0.8;
+/** Чисел на частицу. */
+const STRIDE = 8;
 
 export class SuspensionLayer {
-  /** x, y, возраст, жизнь (с), скорость (единиц мира в секунду модели), направление x, y. */
+  /** x, y, возраст, жизнь (с), скорость (единиц мира в секунду модели), направление x, y; песок 0…1 (−1 — не песок). */
   private particles = new Float32Array(0);
   private out = new Float32Array(0);
   private world: World | null = null;
   private lastTime: number | null = null;
   private stream: StreamField | null = null;
   private view: StreamView = 'water';
+  private lift: (x: number, y: number) => number = () => 0;
 
   setWorld(world: World): void {
     this.world = world;
     const count = Math.round(world.dish.width * world.dish.height * SUSPENSION_DENSITY);
-    this.particles = new Float32Array(count * 7);
+    this.particles = new Float32Array(count * STRIDE);
     this.out = new Float32Array(count * SPRITE_FLOATS);
     // Сразу разного возраста — без общей вспышки при старте.
     for (let n = 0; n < count; n++) this.spawn(n, Math.random());
@@ -60,15 +69,23 @@ export class SuspensionLayer {
   /** Новая частица в случайном месте воды (у минерала — чаще там, где он переносится); `age` — доля уже прожитого. */
   private spawn(n: number, age = 0): void {
     const w = this.world!;
-    const p = this.particles, o = n * 7;
-    let x = 0, y = 0;
-    for (let tries = 0; tries < 8; tries++) {
+    const p = this.particles, o = n * STRIDE;
+    let x = 0, y = 0, sand = -1;
+    const seekSand = this.view === 'water' && Math.random() < SAND_SHARE;
+    if (seekSand) {
+      for (let tries = 0; tries < 16 && sand < 0; tries++) {
+        x = Math.random() * w.dish.width; y = Math.random() * w.dish.height;
+        const lift = this.water(x, y) > 0.3 ? this.lift(x, y) : 0;
+        if (Math.random() < lift * lift) sand = lift;
+      }
+    }
+    for (let tries = 0; tries < 8 && sand < 0; tries++) {
       x = Math.random() * w.dish.width; y = Math.random() * w.dish.height;
       if (this.water(x, y) <= 0.3) continue;
       if (!this.stream || this.view === 'water' || Math.random() < 0.05 + sample(this.stream, x, y, 2)) break;
     }
     const life = SUSPENSION_LIFE[0] + (SUSPENSION_LIFE[1] - SUSPENSION_LIFE[0]) * Math.random();
-    p[o] = x; p[o + 1] = y; p[o + 2] = age * life; p[o + 3] = life; p[o + 4] = 0; p[o + 5] = 1; p[o + 6] = 0;
+    p[o] = x; p[o + 1] = y; p[o + 2] = age * life; p[o + 3] = life; p[o + 4] = 0; p[o + 5] = 1; p[o + 6] = 0; p[o + 7] = sand;
   }
 
   /**
@@ -76,22 +93,23 @@ export class SuspensionLayer {
    * вернуть чёрточки для картинки следов: по SPRITE_FLOATS чисел — x, y,
    * полуширина, яркость; …; направление (x, y), полудлина.
    */
-  update(frame: Frame, dt: number, stream: StreamField, view: StreamView): Float32Array {
+  update(frame: Frame, dt: number, stream: StreamField, view: StreamView, lift: (x: number, y: number) => number): Float32Array {
     const w = frame.world;
     if (w !== this.world) this.setWorld(w);
     this.stream = stream;
     this.view = view;
+    this.lift = lift;
     const real = this.lastTime === null ? 0 : Math.max(0, Math.min(0.25, frame.animTime - this.lastTime));
     this.lastTime = frame.animTime;
     const { camera } = frame;
     const p = this.particles, out = this.out;
-    const count = p.length / 7;
+    const count = p.length / STRIDE;
     const [x0, y0, x1, y1] = camera.visible();
     const halfWidth = camera.px(DASH_HALF_WIDTH);
     const pxPerUnit = camera.zoom / camera.dpr;
     let shown = 0;
     for (let n = 0; n < count; n++) {
-      const o = n * 7;
+      const o = n * STRIDE;
       p[o + 2] += real;
       if (p[o + 2] >= p[o + 3]) { this.spawn(n); continue; }
       const vx = sample(stream, p[o], p[o + 1], 0), vy = sample(stream, p[o], p[o + 1], 1);
@@ -101,6 +119,11 @@ export class SuspensionLayer {
         if (this.water(nx, ny) <= 0) { this.spawn(n); continue; }
         p[o] = nx; p[o + 1] = ny;
       }
+      // Песок держится, пока течение его несёт, и гаснет там, где грунт ложится.
+      if (p[o + 7] >= 0) {
+        p[o + 7] = Math.max(view === 'water' ? lift(p[o], p[o + 1]) : 0, p[o + 7] * Math.exp(-real / SAND_FADE));
+        if (p[o + 7] < 0.03) { this.spawn(n); continue; }
+      }
       p[o + 4] = speed;
       if (speed > 1e-6) { p[o + 5] = vx / speed; p[o + 6] = vy / speed; }
       const x = p[o], y = p[o + 1];
@@ -108,14 +131,16 @@ export class SuspensionLayer {
       const f = p[o + 2] / p[o + 3];
       const life = Math.min(1, f / SUSPENSION_FADE, (1 - f) / SUSPENSION_FADE);
       const strength = sample(stream, x, y, 2);
-      const alpha = life * this.water(x, y) * (view === 'water' ? 0.4 + 0.6 * strength : strength) * 0.8;
+      const sand = p[o + 7];
+      const alpha = life * this.water(x, y) * (sand >= 0 ? Math.min(1, 0.3 + sand) : view === 'water' ? 0.4 + 0.6 * strength : strength) * 0.8;
       if (alpha <= 0.01) continue;
       // Длина — по экранной скорости частицы.
       const screenSpeed = speed * SUSPENSION_GAIN * pxPerUnit;
       const halfLength = camera.px(Math.min(DASH_HALF_LENGTH[1], DASH_HALF_LENGTH[0] + DASH_PER_SPEED * screenSpeed));
       const q = shown++ * SPRITE_FLOATS;
       out[q] = x; out[q + 1] = y; out[q + 2] = halfWidth; out[q + 3] = alpha;
-      out[q + 4] = out[q + 5] = out[q + 6] = 1; out[q + 7] = 2;
+      // Цвет: R — 1 у песка (канал G картинки следов), иначе 0.
+      out[q + 4] = sand >= 0 ? 1 : 0; out[q + 5] = out[q + 6] = 1; out[q + 7] = 2;
       out[q + 8] = p[o + 5]; out[q + 9] = p[o + 6]; out[q + 10] = Math.max(halfLength, halfWidth); out[q + 11] = 0;
     }
     return out.subarray(0, shown * SPRITE_FLOATS);
