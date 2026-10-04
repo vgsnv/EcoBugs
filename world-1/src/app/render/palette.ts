@@ -5,6 +5,8 @@ export type Rgb = readonly [number, number, number];
 
 /** Вода: глубокая и над отмелью. */
 export const DEEP_WATER: Rgb = [28, 101, 142];
+/** Самая глубокая вода (у самого дна чашки): темнее и насыщеннее. */
+export const ABYSS_WATER: Rgb = [14, 62, 106];
 export const SHALLOW_WATER: Rgb = [102, 180, 188];
 /** Камень суши: средняя яркость, разброс пятнами и зерном, трещины. */
 export const STONE_BASE = 61;
