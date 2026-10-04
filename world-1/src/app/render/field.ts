@@ -19,6 +19,12 @@ export interface GlowSink {
   glow(color: Rgb, x: number, y: number, radius: number, alpha: number, clip: boolean): void;
   /** Четырёхлучевая звёздочка (блёстка), только в пятнах света и внутри чашки. */
   star(x: number, y: number, radius: number, alpha: number): void;
+  /**
+   * Чёрточки (взвесь): по SPRITE_FLOATS чисел на штуку — x, y, полуширина,
+   * непрозрачность; цвет (r, g, b), вид 2; направление (x, y), полудлина, 0.
+   * Яркость в тени ниже, в пятнах света выше.
+   */
+  dashes(data: Float32Array): void;
   /** Картинка поверх полей (обычное наложение), например отверстия воронок. */
   image(source: TextureSource, version: number, dx: number, dy: number, dw: number, dh: number, alpha: number): void;
 }
@@ -31,10 +37,8 @@ export interface FieldInputs {
   readonly mineral: { readonly image: TextureSource; readonly version: number; readonly width: number; readonly height: number };
   /** Местность: сетки для шейдера. */
   readonly terrain: TerrainData;
-  /** Узор ряби (альфа, бесшовный). */
+  /** Узор ряби (альфа, бесшовный): равномерная рябь при «Процессах» и пена. */
   readonly ripple: HTMLCanvasElement;
-  /** Рябь по плиткам (см. WaterLayer.rippleTiles); null — при «Процессах» (равномерная рябь). */
-  readonly tiles: { readonly data: Float32Array; readonly cols: number; readonly rows: number; readonly size: number; readonly version: number } | null;
   /** Пена у берега (альфа), на всю чашку. */
   readonly foam: { readonly canvas: HTMLCanvasElement; readonly version: number };
   /** Сила света: тёплый оттенок, высветление, блик яркого солнца; полутень, px устройства. */
@@ -150,8 +154,6 @@ uniform float u_warmth;
 uniform float u_glow;
 uniform float u_glare;
 uniform int u_rippleMode;
-uniform sampler2D u_tiles;  // рябь по плиткам: cos, sin направления, сдвиг узора, сила
-uniform vec3 u_tileGrid;    // столбцы, строки, сторона плитки
 uniform float u_time;       // секунды анимации
 uniform vec3 u_shade;
 uniform vec3 u_sun;
@@ -160,26 +162,6 @@ uniform vec3 u_mineralDeep;
 out vec4 o;
 
 float rippleAt(vec2 uv) { return texture(u_ripple, uv).a; }
-
-/**
- * Рябь направленным потоком: в каждой плитке узор повёрнут по течению
- * (x — вдоль, y — поперёк), вытянут вдоль него и сдвинут на накопленный
- * сдвиг; четыре ближайшие плитки смешиваются плавно, без швов.
- */
-float tileRipple(vec2 w, ivec2 t) {
-  vec4 d = texelFetch(u_tiles, clamp(t, ivec2(0), ivec2(u_tileGrid.xy) - 1), 0);
-  vec2 p = vec2(dot(w, d.xy), dot(w, vec2(-d.y, d.x)));
-  float x = p.x - d.z;
-  float lines = rippleAt(vec2(x / 320., p.y / 160.)) * .7 + rippleAt(vec2((x + 37.) / 470., (p.y + 61.) / 235.)) * .3;
-  return lines * (.45 + .55 * d.w);
-}
-float directionalRipple(vec2 w) {
-  vec2 g = w / u_tileGrid.z - .5;
-  ivec2 i = ivec2(floor(g));
-  vec2 f = smoothstep(0., 1., fract(g));
-  return mix(mix(tileRipple(w, i), tileRipple(w, i + ivec2(1, 0)), f.x),
-             mix(tileRipple(w, i + ivec2(0, 1)), tileRipple(w, i + ivec2(1, 1)), f.x), f.y);
-}
 
 vec3 screenOver(vec3 c, vec3 s) { return c + s * (1. - c); }
 
@@ -205,8 +187,7 @@ void main() {
   float water = waterAt(w);
   float spots = sp.x * (1. - held);
   if (u_rippleMode == 0) {
-    float a = directionalRipple(w);
-    c = screenOver(c, vec3(.78, .9, .89) * a * water * .5 * lit1 * (1. - u_streakMix));
+    // Течения на небольших скоростях показывает взвесь (частицы, suspension.ts); здесь — штрихи на ускорении.
     // Штрихи течений: светлые, ярче и плотнее на сильном течении; не зависят от света.
     if (u_streakMix > 0.) {
       vec2 st = texture(u_streaks, gl_FragCoord.xy / u_size).rg;
@@ -244,17 +225,21 @@ void main() {
 
 const SPRITE_VS = `#version 300 es
 in vec2 a_pos;
-in vec4 a_sprite;   // x, y, радиус, непрозрачность
-in vec4 a_color;    // цвет, вид (0 — свечение, 1 — звёздочка)
+in vec4 a_sprite;   // x, y, радиус (у чёрточки — полуширина), непрозрачность
+in vec4 a_color;    // цвет, вид (0 — свечение, 1 — звёздочка, 2 — чёрточка)
+in vec4 a_shape;    // направление (x, y), полудлина
 uniform vec3 u_view;
 uniform vec2 u_size;
 out vec2 v_local;
 out vec4 v_color;
 out float v_alpha;
 out float v_radiusPx;
+out vec2 v_dash;    // полудлина и полуширина чёрточки, единиц мира
 void main() {
   vec2 local = a_pos * 2. - 1.;
-  vec2 w = a_sprite.xy + local * a_sprite.z;
+  vec2 dir = a_shape.xy, side = vec2(-dir.y, dir.x);
+  vec2 w = a_sprite.xy + dir * local.x * a_shape.z + side * local.y * a_sprite.z;
+  v_dash = vec2(a_shape.z, a_sprite.z);
   vec2 p = w * u_view.x + u_view.yz;
   gl_Position = vec4(p.x / u_size.x * 2. - 1., 1. - p.y / u_size.y * 2., 0., 1.);
   v_local = local;
@@ -274,12 +259,19 @@ in vec2 v_local;
 in vec4 v_color;
 in float v_alpha;
 in float v_radiusPx;
+in vec2 v_dash;
 out vec4 o;
 void main() {
   vec2 px = screenPx();
   vec2 w = worldAt(px);
   float a;
-  if (v_color.a < .5) {
+  if (v_color.a > 1.5) {
+    // Чёрточка: капсула вдоль течения, край сглажен в пиксель; к голове (вниз по течению) ярче.
+    vec2 q = v_local * v_dash;
+    float d = length(vec2(max(abs(q.x) - (v_dash.x - v_dash.y), 0.), q.y)) - v_dash.y;
+    a = clamp(.5 - d * u_cam.x, 0., 1.) * mix(.35, 1., v_local.x * .5 + .5);
+    a *= .55 + .45 * texture(u_spotMask, gl_FragCoord.xy / u_size).g;
+  } else if (v_color.a < .5) {
     // Свечение: непрозрачность 1 → 0,55 к 0,4 радиуса → 0 у края.
     float r = length(v_local);
     if (r >= 1.) discard;
@@ -296,10 +288,13 @@ void main() {
   o = vec4(v_color.rgb * a, a);
 }`;
 
+/** Чисел на спрайт: положение и размер, цвет и вид, направление и полудлина. */
+export const SPRITE_FLOATS = 12;
+
 /** Шаг экрана, после которого скопленные свечения и картинки рисуются по порядку. */
 type Command =
   | { kind: 'image'; source: TextureSource; version: number; rect: readonly number[]; alpha: number }
-  | { kind: 'sprites'; clip: boolean; data: number[] };
+  | { kind: 'sprites'; clip: boolean; data: number[] | Float32Array };
 
 export class FieldRenderer implements GlowSink {
   readonly canvas = document.createElement('canvas');
@@ -317,7 +312,6 @@ export class FieldRenderer implements GlowSink {
   private frame: Frame | null = null;
   /** Ключи текстур, которые не меняются между кадрами. */
   private readonly mineralKey = {};
-  private readonly tilesKey = {};
   private readonly streamKey = {};
   private readonly levelKey = {};
   private readonly depositKey = {};
@@ -381,8 +375,11 @@ export class FieldRenderer implements GlowSink {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.spriteBuffer);
     const sprite = gl.getAttribLocation(this.sprites.program, 'a_sprite');
     const color = gl.getAttribLocation(this.sprites.program, 'a_color');
-    gl.enableVertexAttribArray(sprite); gl.vertexAttribPointer(sprite, 4, gl.FLOAT, false, 32, 0); gl.vertexAttribDivisor(sprite, 1);
-    gl.enableVertexAttribArray(color); gl.vertexAttribPointer(color, 4, gl.FLOAT, false, 32, 16); gl.vertexAttribDivisor(color, 1);
+    const shape = gl.getAttribLocation(this.sprites.program, 'a_shape');
+    const stride = SPRITE_FLOATS * 4;
+    gl.enableVertexAttribArray(sprite); gl.vertexAttribPointer(sprite, 4, gl.FLOAT, false, stride, 0); gl.vertexAttribDivisor(sprite, 1);
+    gl.enableVertexAttribArray(color); gl.vertexAttribPointer(color, 4, gl.FLOAT, false, stride, 16); gl.vertexAttribDivisor(color, 1);
+    gl.enableVertexAttribArray(shape); gl.vertexAttribPointer(shape, 4, gl.FLOAT, false, stride, 32); gl.vertexAttribDivisor(shape, 1);
     gl.bindVertexArray(null);
     this.mineralTexture = null;
     this.spotProgram = createProgram(gl, SPOT_VS, SPOT_FS);
@@ -609,7 +606,6 @@ export class FieldRenderer implements GlowSink {
     this.mineralTexture = this.textures.get(this.mineralKey, input.mineral.image, input.mineral.version);
     const ripple = this.textures.get(input.ripple, input.ripple, 0, { repeat: true });
     const foam = this.textures.get(this.foamKey, input.foam.canvas, input.foam.version);
-    const tiles = input.tiles;
     const streaks = input.streakMix > 0 && input.stream ? this.drawStreaks(input) : null;
     if (!streaks) this.streakTime = null;
     gl.useProgram(p.program);
@@ -618,10 +614,6 @@ export class FieldRenderer implements GlowSink {
     this.bind(p, 2, 'u_mineral', this.mineralTexture);
     this.bind(p, 3, 'u_streaks', streaks);
     this.bind(p, 4, 'u_ripple', ripple);
-    if (tiles) {
-      this.bind(p, 5, 'u_tiles', this.textures.get(this.tilesKey, { data: tiles.data, width: tiles.cols, height: tiles.rows }, tiles.version, { format: 'rgba32f', nearest: true }));
-      gl.uniform3f(p.uniform('u_tileGrid'), tiles.cols, tiles.rows, tiles.size);
-    }
     if (input.stream) this.bindStream(p, 13, input.stream);
     this.bind(p, 6, 'u_foam', foam);
     this.bindGrid(p, 7, 'u_level', this.levelKey, t.level, 'r16f');
@@ -656,16 +648,20 @@ export class FieldRenderer implements GlowSink {
   }
 
   glow(color: Rgb, x: number, y: number, radius: number, alpha: number, clip: boolean): void {
-    this.sprite(clip, [x, y, radius, alpha, color[0] / 255, color[1] / 255, color[2] / 255, 0]);
+    this.sprite(clip, [x, y, radius, alpha, color[0] / 255, color[1] / 255, color[2] / 255, 0, 1, 0, radius, 0]);
   }
 
   star(x: number, y: number, radius: number, alpha: number): void {
-    this.sprite(true, [x, y, radius, alpha, 245 / 255, 230 / 255, 1, 1]);
+    this.sprite(true, [x, y, radius, alpha, 245 / 255, 230 / 255, 1, 1, 1, 0, radius, 0]);
+  }
+
+  dashes(data: Float32Array): void {
+    if (data.length) this.commands.push({ kind: 'sprites', clip: true, data });
   }
 
   private sprite(clip: boolean, values: number[]): void {
     const last = this.commands[this.commands.length - 1];
-    if (last && last.kind === 'sprites' && last.clip === clip) last.data.push(...values);
+    if (last && last.kind === 'sprites' && last.clip === clip && Array.isArray(last.data)) last.data.push(...values);
     else this.commands.push({ kind: 'sprites', clip, data: values });
   }
 
@@ -703,9 +699,9 @@ export class FieldRenderer implements GlowSink {
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.spotMask!.texture); gl.uniform1i(p.uniform('u_spotMask'), 1);
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.mineralTexture); gl.uniform1i(p.uniform('u_mineral'), 2);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.spriteBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(command.data), gl.STREAM_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, command.data instanceof Float32Array ? command.data : new Float32Array(command.data), gl.STREAM_DRAW);
       gl.bindVertexArray(this.spriteVao);
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, command.data.length / 8);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, command.data.length / SPRITE_FLOATS);
     }
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.bindVertexArray(null);

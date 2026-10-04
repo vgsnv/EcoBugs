@@ -3,7 +3,7 @@
  * где течение бьёт в сушу, и блёстки кристаллов залежей в пятнах света.
  * Здесь — данные для шейдера полей (течения в виде, маска пены) и блёстки.
  */
-import { DRIFT_REFERENCE, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, flowAt, hash3, multiplierForLevel, periodicFbm, sunAt, type World } from '../../core/index.ts';
+import { DRIFT_REFERENCE, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, hash3, multiplierForLevel, periodicFbm, sunAt, type World } from '../../core/index.ts';
 import type { GlowSink } from './field.ts';
 import type { Frame } from './frame.ts';
 import { smoothstep } from './palette.ts';
@@ -26,14 +26,10 @@ const SPARKLE_DEPOSIT = 2;
 const SPARKLE_SPEED = 1.3;
 const SPARKLE_THRESHOLD = 0.965;
 /**
- * Рябь сменяет узор по времени модели, но не быстрее RIPPLE_MAX_RATE ×
- * реального: иначе на ускорении узор мелькает (на ×100 — десятки раз в секунду).
+ * Взвесь движется по времени модели, но не быстрее RIPPLE_MAX_RATE ×
+ * реального: на ускорении её сменяют штрихи.
  */
 const RIPPLE_MAX_RATE = 3;
-/** Плитка ряби, единиц мира; во сколько раз узор движется быстрее течения; период узора вдоль течения. */
-const RIPPLE_TILE = 64;
-const RIPPLE_GAIN = 20;
-const RIPPLE_PERIOD = 320 * 470;
 /** Пересчёт маски пены не чаще, мс (её вид — фактура 60 единиц, ровная часть 0,35, сила 0,4 — в шейдере полей). */
 const FOAM_REBUILD_MS = 300;
 
@@ -77,14 +73,6 @@ export class WaterLayer {
   private foamBuiltAt = 0;
   private foamStep = -1;
   private foamVersion = 0;
-  /**
-   * Рябь направленным потоком: по плитке — направление течения (cos, sin),
-   * накопленный сдвиг узора вдоль течения и сила (для контраста).
-   */
-  private tiles = new Float32Array(0);
-  private tileCols = 0;
-  private tileRows = 0;
-  private tileVersion = 0;
   /** Часы ряби (секунды модели, с ограничением скорости) и по каким кадрам они шли. */
   private rippleClock = 0;
   private rippleFlowStep: number | null = null;
@@ -104,15 +92,15 @@ export class WaterLayer {
 
   resetFlow(): void {
     this.rippleFlowStep = null;
-    this.tileCols = this.tileRows = 0;
   }
 
   /**
-   * Часы ряби этого кадра: шаги течений → секунды модели, но не быстрее
-   * RIPPLE_MAX_RATE × реального времени. Возвращает, сколько секунд модели
-   * прошло с прошлого кадра по этим часам.
+   * Часы показа течений этого кадра (взвесь): шаги течений → секунды модели,
+   * но не быстрее RIPPLE_MAX_RATE × реального времени. Заодно оценивает
+   * скорость показа (для смены вида). Возвращает, сколько секунд модели
+   * прошло с прошлого кадра по этим часам. Вызывать раз в кадр.
    */
-  private rippleTime(frame: Frame): number {
+  clock(frame: Frame): number {
     const before = this.rippleClock;
     if (this.rippleFlowStep === null || frame.flowStep < this.rippleFlowStep) {
       this.rippleClock = frame.flowStep / 10;
@@ -129,48 +117,6 @@ export class WaterLayer {
     this.rippleFlowStep = frame.flowStep;
     this.rippleAnimTime = frame.animTime;
     return this.rippleClock - before;
-  }
-
-  /**
-   * Рябь направленным потоком (как directional flow в играх): чашка поделена
-   * на плитки RIPPLE_TILE; в каждой узор повёрнут по течению в её центре и
-   * сдвигается вдоль него — сдвиг накапливается по кадрам, поэтому узор не
-   * пульсирует и не прыгает при смене силы течения. Скорость сдвига условная:
-   * течение × RIPPLE_GAIN (честное течение в несколько мм/с глазу не видно);
-   * соотношение «где быстрее» — честное. Соседние плитки шейдер смешивает.
-   */
-  rippleTiles(frame: Frame): { data: Float32Array; cols: number; rows: number; size: number; version: number } {
-    const w = frame.world;
-    const dt = this.rippleTime(frame);
-    const cols = Math.ceil(w.dish.width / RIPPLE_TILE) + 1, rows = Math.ceil(w.dish.height / RIPPLE_TILE) + 1;
-    if (cols !== this.tileCols || rows !== this.tileRows) {
-      this.tileCols = cols; this.tileRows = rows;
-      this.tiles = new Float32Array(cols * rows * 4);
-      for (let k = 0; k < cols * rows; k++) this.tiles[k * 4] = 1;
-    }
-    const v: [number, number] = [0, 0];
-    const t = this.tiles;
-    for (let j = 0; j < rows; j++) {
-      for (let i = 0; i < cols; i++) {
-        const o = (j * cols + i) * 4;
-        const x = (i + 0.5) * RIPPLE_TILE, y = (j + 0.5) * RIPPLE_TILE;
-        flowAt(w, Math.min(w.dish.width - 1, x), Math.min(w.dish.height - 1, y), v);
-        // Снос за шаг → единиц мира в секунду модели.
-        const speed = Math.hypot(v[0], v[1]) * 10;
-        if (speed > 1e-6) {
-          // Направление поворачивается плавно: течение меняется, а узор не должен дёргаться.
-          const blend = 1 - Math.exp(-Math.max(0, dt) * 2 - 0.05);
-          let cx = t[o] + (v[0] * 10 / speed - t[o]) * blend, cy = t[o + 1] + (v[1] * 10 / speed - t[o + 1]) * blend;
-          const l = Math.hypot(cx, cy) || 1;
-          cx /= l; cy /= l;
-          t[o] = cx; t[o + 1] = cy;
-        }
-        t[o + 2] = (t[o + 2] + speed * RIPPLE_GAIN * dt) % RIPPLE_PERIOD;
-        t[o + 3] = speed / (speed + 1.7);
-      }
-    }
-    this.tileVersion++;
-    return { data: t, cols, rows, size: RIPPLE_TILE, version: this.tileVersion };
   }
 
   resetFoam(): void {
@@ -195,6 +141,7 @@ export class WaterLayer {
     }
     this.sparkles = Float32Array.from(out);
   }
+
 
   /** Доля усреднённого течения в штрихах: 0 до ×AVERAGE_FROM, 1 от ×AVERAGE_FULL. */
   averageMix(): number {

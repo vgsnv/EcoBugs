@@ -16,6 +16,7 @@ import { Minimap } from './render/minimap.ts';
 import { lightTone, smoothstep } from './render/palette.ts';
 import { ProcessesLayer } from './render/processes.ts';
 import { SourcesLayer } from './render/sources.ts';
+import { SuspensionLayer } from './render/suspension.ts';
 import { TerrainLayer } from './render/terrain.ts';
 import { WallsLayer } from './render/walls.ts';
 import { WaterLayer, type StreamField, type StreamView } from './render/water.ts';
@@ -41,6 +42,7 @@ export class WorldRenderer {
   private readonly processLayer = new ProcessesLayer();
   private readonly minimap = new Minimap();
   private readonly field = new FieldRenderer();
+  private readonly suspension = new SuspensionLayer();
   private probePoint: { x: number; y: number } | null = null;
   private world!: World;
   private frameKey = '';
@@ -165,6 +167,7 @@ export class WorldRenderer {
 
     // Нижний холст: поля.
     const light = this.light.update(frame);
+    const flowTime = this.water.clock(frame);
     this.field.begin(frame, w.partitions.thickness);
     const mineral = this.mineral.field(w);
     this.field.fields({
@@ -172,13 +175,14 @@ export class WorldRenderer {
       mineral,
       terrain: this.terrain.data(),
       ripple: this.water.ripple,
-      tiles: this.showProcesses ? null : this.water.rippleTiles(frame),
       foam: this.water.foam(w),
       ...light.strength,
       rippleMode: this.showProcesses ? 1 : 0,
       ...this.streams(frame),
     });
     this.water.drawSparkles(frame, this.field);
+    const streams = this.showProcesses ? 0 : this.water.streakMix();
+    this.suspension.draw(frame, flowTime, this.showProcesses ? 0 : 1 - streams, this.field);
 
     // Верхний холст: объекты; свечения и отверстия воронок копятся для нижнего.
     ctx.setTransform(...camera.view());
