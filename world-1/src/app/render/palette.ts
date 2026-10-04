@@ -38,8 +38,10 @@ export const CRYSTAL_LIGHT = 70;
 export const STONE_SAMPLE: Rgb = [STONE_BASE + 6, STONE_BASE + 3, STONE_BASE];
 export const SHALLOWS_SAMPLE: Rgb = mix(lift(STONE_SAMPLE, STONE_UNDERWATER_LIFT), SHALLOW_WATER, 1 - SHALLOWS_CLARITY);
 
-/** Тень умножается на местность: темнее и холоднее. */
-export const SHADE_COLOR: Rgb = [140, 150, 185];
+/** Самая глубокая тень (света нет) умножается на местность: темнее и холоднее, но всё видно. */
+export const SHADE_COLOR: Rgb = [176, 186, 214];
+/** Блик освещённых мест сверх полного света (солнце ярче 1). */
+export const GLARE_STRENGTH = 0.55;
 /** Солнечный оттенок освещённых мест. */
 export const SUN_COLOR: Rgb = [255, 232, 185];
 
@@ -66,6 +68,18 @@ export const smoothstep = (a: number, b: number, t: number) => { const u = clamp
 export function lightTone(light: number): number {
   return 1 - Math.exp(-1.1 * light);
 }
+
+/**
+ * Яркость места по свету, который туда доходит (1 — пятно при солнце 1):
+ * доля тени 0…1 (1 — SHADE_COLOR целиком) и блик сверх полного света.
+ * Та же формула — в шейдере полей (LIGHT_SHADE_GLSL).
+ */
+export function lightShade(light: number): { dark: number; glare: number } {
+  const t = lightTone(light) / lightTone(1);
+  return { dark: clamp01(1 - t), glare: Math.max(0, t - 1) * GLARE_STRENGTH };
+}
+export const LIGHT_SHADE_GLSL = `
+float lightTone(float L) { return (1. - exp(-1.1 * L)) / (1. - exp(-1.1)); }`;
 
 export const rgb = (c: Rgb, alpha = 1) => `rgba(${Math.round(c[0])}, ${Math.round(c[1])}, ${Math.round(c[2])}, ${alpha})`;
 

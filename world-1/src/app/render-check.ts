@@ -166,6 +166,7 @@ export function installRenderCheck(renderer: WorldRenderer): void {
   const run = (scene: CheckScene): CheckResult => render(scene, (frame) => ({ name: scene.name, ...fingerprint(frame), minimap: fingerprint(mini).hash }));
 
   let looked: World | null = null;
+  let lookedKey = '';
   Object.assign(window, {
     renderCheck: {
       scenes: CHECK_SCENES,
@@ -175,8 +176,10 @@ export function installRenderCheck(renderer: WorldRenderer): void {
        * (x, y) при масштабе `zoom` (без точки — вся чашка). Возвращает идущие подвижки.
        */
       look: (params: Partial<WorldParams>, step: number, x?: number, y?: number, zoom = 1, time = 0) => {
-        if (!looked || looked.params.seed !== (params.seed ?? looked.params.seed) || looked.step > step) {
+        const key = JSON.stringify(params);
+        if (!looked || lookedKey !== key || looked.step > step) {
           looked = createWorld(makeParams(params));
+          lookedKey = key;
           renderer.showProcesses = false;
           renderer.setWorld(looked);
         }

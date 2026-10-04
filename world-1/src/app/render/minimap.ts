@@ -1,7 +1,7 @@
 /** Мини-карта в отдельной панели: вся чашка, пятна света, перегородки и рамка вида. */
-import { spotOutlines, type World } from '../../core/index.ts';
+import { spotOutlines, sunAt, type World } from '../../core/index.ts';
 import type { Camera } from './camera.ts';
-import { SHADE_COLOR, rgb, traceDish } from './palette.ts';
+import { SHADE_COLOR, lightShade, rgb, traceDish } from './palette.ts';
 
 export interface MinimapSources {
   readonly world: World;
@@ -46,10 +46,15 @@ export class Minimap {
     m.save(); m.beginPath(); traceDish(m, world.dish); m.clip();
     m.globalCompositeOperation = 'source-over';
     m.drawImage(s.base, 0, 0, width, height);
-    m.globalCompositeOperation = 'multiply';
-    m.fillStyle = rgb(SHADE_COLOR);
-    m.fillRect(0, 0, width, height);
-    m.globalCompositeOperation = 'source-over';
+    // Яркость — как на карте (lightShade): тень по доле фона, пятна — по солнцу; без мутности.
+    const sun = sunAt(world.light, world.step);
+    const shade = (light: number) => {
+      m.globalCompositeOperation = 'multiply';
+      m.fillStyle = rgb(SHADE_COLOR, lightShade(light).dark);
+      m.fillRect(0, 0, width, height);
+      m.globalCompositeOperation = 'source-over';
+    };
+    shade(sun * world.params.backgroundLevel);
     // Пятна света — контурами по модели.
     const spots = new Path2D();
     for (const poly of spotOutlines(world.light, world.step, width, height, 48)) {
@@ -60,6 +65,7 @@ export class Minimap {
     m.save();
     m.clip(spots);
     m.drawImage(s.base, 0, 0, width, height);
+    shade(sun);
     m.restore();
     m.fillStyle = 'rgba(214, 230, 245, 0.9)';
     m.fill(s.parts);

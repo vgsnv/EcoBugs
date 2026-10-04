@@ -7,7 +7,7 @@
 import type { Dish } from '../../core/index.ts';
 import type { Frame } from './frame.ts';
 import { createProgram, Textures, type Program, type TextureSource } from './gl.ts';
-import { MINERAL_COLOR, MINERAL_DEEP, SHADE_COLOR, SUN_COLOR, smoothstep, type Rgb } from './palette.ts';
+import { GLARE_STRENGTH, LIGHT_SHADE_GLSL, MINERAL_COLOR, MINERAL_DEEP, SHADE_COLOR, SUN_COLOR, smoothstep, type Rgb } from './palette.ts';
 import { SPOT_FS, SPOT_VS, type SpotShapes } from './light.ts';
 import { TRAIL_DASH_FS, TRAIL_FADE_FS, TRAIL_SECONDS } from './trails.ts';
 import type { StreamField, StreamView } from './water.ts';
@@ -43,7 +43,8 @@ export interface FieldInputs {
   /** Сила света: тёплый оттенок, высветление, блик яркого солнца; полутень, px устройства. */
   readonly warmth: number;
   readonly glow: number;
-  readonly glare: number;
+  readonly sunNow: number;
+  readonly background: number;
   readonly penumbra: number;
   /** Рябь: 0 — по течениям, 1 — две равномерные ряби (при «Процессах»). */
   readonly rippleMode: 0 | 1;
@@ -142,6 +143,7 @@ ${COMMON}
 ${TABLE_GLSL}
 ${TERRAIN_GLSL}
 ${TECTONICS_GLSL}
+${LIGHT_SHADE_GLSL}
 uniform sampler2D u_spotMask;    // R — пятна с резким краем, G — с мягким
 uniform sampler2D u_mineral;
 uniform sampler2D u_ripple;
@@ -156,7 +158,9 @@ uniform vec2 u_grid;        // протяжённость сетки минер�
 uniform float u_lit;
 uniform float u_warmth;
 uniform float u_glow;
-uniform float u_glare;
+uniform float u_sunNow;     // сила солнца сейчас
+uniform float u_background; // доля фона
+uniform float u_glareStrength;
 uniform int u_rippleMode;
 uniform float u_time;       // секунды анимации
 uniform vec3 u_shade;
@@ -179,13 +183,15 @@ void main() {
   float held = mineral.g;
   float lit1 = min(1., u_lit);
 
-  // Свет: тень вне пятен (умножением), тёплый оттенок, высветление, блик яркого солнца.
+  // Свет: яркость — по свету, который доходит (солнце × пятно или фон × прозрачность),
+  // по постоянной шкале; тёплый оттенок и высветление пятен, блик сверх полного света.
   vec2 sp = texture(u_spotMask, gl_FragCoord.xy / u_size).rg;
-  float mb = sp.y * (1. - held);
-  c *= mix(vec3(1.), u_shade, 1. - mb * lit1);
+  float t = lightTone(u_sunNow * mix(u_background, 1., sp.y) * (1. - held));
+  float mb = sp.y * (1. - held) * min(1., t);
+  c *= mix(vec3(1.), u_shade, clamp(1. - t, 0., 1.));
   c *= mix(vec3(1.), u_sun, u_warmth * mb);
   c = screenOver(c, u_sun * u_glow * mb);
-  c = screenOver(c, vec3(u_glare * mb));
+  c = screenOver(c, vec3(max(0., t - 1.) * u_glareStrength * sp.y));
 
   // Подвижки и толчки — тонко, поверх света.
   c = tectonics(c, w, u_time);
@@ -652,7 +658,9 @@ export class FieldRenderer implements GlowSink {
     gl.uniform1f(p.uniform('u_lit'), frame.lit);
     gl.uniform1f(p.uniform('u_warmth'), input.warmth);
     gl.uniform1f(p.uniform('u_glow'), input.glow);
-    gl.uniform1f(p.uniform('u_glare'), input.glare);
+    gl.uniform1f(p.uniform('u_sunNow'), input.sunNow);
+    gl.uniform1f(p.uniform('u_background'), input.background);
+    gl.uniform1f(p.uniform('u_glareStrength'), GLARE_STRENGTH);
     gl.uniform1i(p.uniform('u_rippleMode'), input.rippleMode);
     gl.uniform1f(p.uniform('u_trailMix'), input.trailMix);
     gl.uniform1f(p.uniform('u_averageMix'), input.averageMix);

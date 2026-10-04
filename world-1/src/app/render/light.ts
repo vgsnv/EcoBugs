@@ -1,11 +1,13 @@
 /**
- * Свет освещает местность пятнами: вне пятен тень, освещённые места теплеют
- * (нагрев усиливает) и чуть высветляются; мутность минерала гасит пятна
- * ровно настолько, насколько модель задерживает свет. Здесь — эллипсы пятен
+ * Свет освещает местность пятнами. Яркость места — свет, который туда
+ * реально доходит: солнце × (пятно, фон или переход) × прозрачность среды,
+ * по постоянной шкале (lightShade в palette.ts): пятно при солнце 1 — обычная
+ * яркость, тень — по доле фона, но не темнее SHADE_COLOR. Освещённые места
+ * теплеют (нагрев усиливает) и чуть высветляются; ярче солнца 1 — блик. Здесь — эллипсы пятен
  * (параметрами, из модели) и сила света; маску (форма края и мягкость)
  * строит GPU (SPOT_VS / SPOT_FS), смешивание — шейдер полей.
  */
-import { SPOT_EDGE, SPOT_SHAPE_SIZE, spotShapes } from '../../core/index.ts';
+import { SPOT_EDGE, SPOT_SHAPE_SIZE, spotShapes, sunAt } from '../../core/index.ts';
 import type { Frame } from './frame.ts';
 
 /** Сила солнечного оттенка при солнце 1 и добавка от нагрева (при нагреве 2). */
@@ -13,13 +15,13 @@ const SUN_WARMTH = 0.2;
 const HEAT_WARMTH = 0.35;
 /** Лёгкое высветление освещённых мест, чтобы свет читался и на тёмном камне. */
 const SUN_GLOW = 0.07;
-/** Высветление освещённых мест при солнце ярче 1. */
-const GLARE_STRENGTH = 0.55;
 
 export interface LightStrength {
   readonly warmth: number;
   readonly glow: number;
-  readonly glare: number;
+  /** Сила солнца сейчас и доля фона — для яркости места в шейдере полей. */
+  readonly sunNow: number;
+  readonly background: number;
   /** Полутень: σ мягкого края, пикселей устройства. */
   readonly penumbra: number;
 }
@@ -41,7 +43,7 @@ export class LightLayer {
 
   /** Эллипсы пятен этого шага (пересчёт — при смене шага) и сила света кадра. */
   update(frame: Frame): { spots: SpotShapes; strength: LightStrength } {
-    const { camera, world: w, lit } = frame;
+    const { camera, world: w } = frame;
     const p = w.params;
     if (w.step !== this.step) {
       this.step = w.step;
@@ -51,11 +53,13 @@ export class LightLayer {
     return {
       spots: this.shapes,
       strength: {
-        // Свет — солнечный тёплый оттенок освещённых мест; нагрев его усиливает.
-        warmth: Math.min(0.95, SUN_WARMTH * Math.min(1, lit) + HEAT_WARMTH * Math.min(1, p.spotHeat / 2)),
-        // И чуть высветляет их, чтобы свет читался и на тёмной суше; яркое солнце — сильнее.
-        glow: SUN_GLOW * Math.min(1, lit),
-        glare: lit > 1 ? Math.min(1, (lit - 1) * GLARE_STRENGTH) : 0,
+        // Свет — солнечный тёплый оттенок освещённых мест; нагрев его усиливает
+        // (в шейдере — ещё по тому, сколько света дошло).
+        warmth: Math.min(0.95, SUN_WARMTH + HEAT_WARMTH * Math.min(1, p.spotHeat / 2)),
+        // И чуть высветляет их, чтобы свет читался и на тёмной суше.
+        glow: SUN_GLOW,
+        sunNow: sunAt(w.light, w.step),
+        background: p.backgroundLevel,
         penumbra: Math.min(3 * camera.dpr, Math.max(0.5, (p.spotSize * SPOT_EDGE * camera.zoom) / 6)),
       },
     };
