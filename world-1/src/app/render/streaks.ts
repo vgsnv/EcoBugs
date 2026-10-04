@@ -26,6 +26,15 @@ export const STREAK_DUTY = 0.25;
 /** Рябь сменяется штрихами между этими множителями скорости мира. */
 export const STREAKS_FROM = 3;
 export const STREAKS_FULL = 10;
+/**
+ * Мгновенное течение в штрихах сменяется скользящим средним (окно —
+ * AVERAGE_SECONDS реального времени) между этими множителями: на ×1000 и
+ * выше течения меняются быстрее, чем за ними можно следить, и смысл имеет
+ * только устойчивая картина — главные потоки, круговороты, заводи.
+ */
+export const AVERAGE_FROM = 300;
+export const AVERAGE_FULL = 1000;
+export const AVERAGE_SECONDS = 0.6;
 
 /** Общий кусок: течение в точке мира по сетке вида и сила течения 0…1 (логарифм от мерила). */
 export const FLOW_GLSL = `
@@ -33,7 +42,6 @@ uniform sampler2D u_flow;
 uniform vec4 u_bounds;      // видимая часть мира для поля течений
 uniform float u_flowScale;
 uniform float u_hasFlow;
-uniform float u_flowRef;    // сильное течение (мерило), единиц мира в секунду модели
 /** Скорость течения, единиц мира в секунду модели. */
 vec2 flowAt(vec2 w) {
   if (u_hasFlow < .5) return vec2(0.);
@@ -41,8 +49,6 @@ vec2 flowAt(vec2 w) {
   vec2 encoded = vec2(f.r * 65280. + f.g * 255., f.b * 65280. + f.a * 255.);
   return (encoded - 32768.) / 32767. * u_flowScale;
 }
-/** Сила течения 0…1: по логарифму, мерило — около 0,7. */
-float flowStrength(vec2 v) { return clamp(log(1. + 4. * length(v) / u_flowRef) / log(9.), 0., 1.); }
 `;
 
 export const STREAK_FS = `#version 300 es
@@ -59,8 +65,9 @@ uniform float u_time;       // секунды анимации
 uniform float u_fresh;
 uniform vec2 u_px;          // сдвиг за кадр у слабого и сильного течения, пикселей штрихов
 uniform sampler2D u_prev;
+uniform sampler2D u_stream;      // поле штрихов: направление (x, y), сила
+uniform vec3 u_streamGrid;       // столбцы, строки, клетка
 ${TERRAIN_GLSL}
-${FLOW_GLSL}
 out vec4 o;
 
 float hash12(vec2 p) {
@@ -78,8 +85,9 @@ void main() {
   float fresh = fract(u_time * ${STREAK_PULSE.toFixed(2)} + hash12(floor(gl_FragCoord.xy / ${STREAK_CELL.toFixed(1)}))) < ${STREAK_DUTY.toFixed(2)} ? 1. : 0.;
   float water = waterAt(w);
   if (water <= 0.) { o = vec4(fresh, 0., 0., 1.); return; }
-  vec2 v = flowAt(w);
-  float s = flowStrength(v);
+  vec4 f = texture(u_stream, w / u_streamGrid.z / u_streamGrid.xy);
+  vec2 v = f.xy;
+  float s = f.z;
   float speed = length(v);
   // Откуда пришла точка за прошедшие кадры: вверх по течению на сдвиг в пикселях штрихов.
   float shift = mix(u_px.x, u_px.y, s) * u_frames;

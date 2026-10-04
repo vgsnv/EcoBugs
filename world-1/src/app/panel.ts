@@ -25,6 +25,7 @@ export interface PanelHandlers {
   onZoomFit(): void;
   onProcesses(enabled: boolean): void;
   onRulers(enabled: boolean): void;
+  onStreamView(view: 'water' | 'mineral'): void;
 }
 
 export interface PanelRoots {
@@ -409,6 +410,14 @@ export class Panel {
       rulers.classList.toggle('active', enabled);
       this.handlers.onRulers(enabled);
     });
+    // Что показывают штрихи течений на ускорении (×10 и выше): течение воды или перенос минерала.
+    const stream = el('button', { textContent: 'Минерал', title: 'Штрихи течений на ускорении (×10 и выше): показать, куда переносится минерал, вместо течения воды', ariaPressed: 'false' });
+    stream.addEventListener('click', () => {
+      const mineral = stream.getAttribute('aria-pressed') !== 'true';
+      stream.setAttribute('aria-pressed', String(mineral));
+      stream.classList.toggle('active', mineral);
+      this.handlers.onStreamView(mineral ? 'mineral' : 'water');
+    });
     const processes = el('button', { textContent: 'Процессы', title: 'Общее течение, размыв, оседание и уход в недра', ariaPressed: 'false' });
     const processLegend = el('span', { className: 'process-legend', hidden: true, title: 'Цвет показывает количество минерала за последнее обновление (10 с мира, 100 шагов); ярче — больше. При одновременных процессах цвета смешиваются.' });
     processLegend.innerHTML = '<span><i style="color:#e88536">↗</i>размыв</span><span><i style="color:#32c995">↧</i>оседание</span><span><i style="color:#c27bff">⊙</i>в недра</span>';
@@ -488,6 +497,7 @@ export class Panel {
     this.roots.viewControls.append(
       el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn),
       el('span', { className: 'process-control' }, processes, processLegend),
+      stream,
       rulers,
     );
   }

@@ -18,10 +18,12 @@ import { ProcessesLayer } from './render/processes.ts';
 import { SourcesLayer } from './render/sources.ts';
 import { TerrainLayer } from './render/terrain.ts';
 import { WallsLayer } from './render/walls.ts';
-import { WaterLayer } from './render/water.ts';
+import { WaterLayer, type StreamField, type StreamView } from './render/water.ts';
 
 export class WorldRenderer {
   showProcesses = false;
+  /** Что показывают штрихи течений на ускорении: течение воды или перенос минерала. */
+  streamView: StreamView = 'water';
   processes: MineralProcesses | null = null;
   /** Вызывается при смене масштаба (для подписи в панели). */
   onZoomChange: (relative: number) => void = () => {};
@@ -141,7 +143,7 @@ export class WorldRenderer {
   /** Кадр; `animTime` — секунды анимации бликов (стоит на паузе). */
   draw(animTime = 0, flowStep = this.world.step): void {
     const camera = this.camera;
-    const key = `${animTime}:${flowStep}:${this.world.step}:${this.world.mineral.version}:${this.world.viscosity.version}:${camera.zoom}:${camera.cx}:${camera.cy}:${this.canvas.width}:${this.canvas.height}:${this.showProcesses}`;
+    const key = `${animTime}:${flowStep}:${this.world.step}:${this.world.mineral.version}:${this.world.viscosity.version}:${camera.zoom}:${camera.cx}:${camera.cy}:${this.canvas.width}:${this.canvas.height}:${this.showProcesses}:${this.streamView}`;
     if (key === this.frameKey) return;
     this.frameKey = key;
     const w = this.world;
@@ -175,8 +177,7 @@ export class WorldRenderer {
       ...light.strength,
       rippleMode: this.showProcesses ? 1 : 0,
       rippleTime: this.water.rippleTime(frame),
-      streakMix: this.showProcesses ? 0 : this.water.streakMix(),
-      flowRef: DRIFT_REFERENCE * 10 * Math.max(0.05, sunAt(w.light, w.step)),
+      ...this.streams(frame),
     });
     this.water.drawSparkles(frame, this.field);
 
@@ -199,6 +200,23 @@ export class WorldRenderer {
     }
     this.rulers.draw(ctx, w.dish, camera.zoom, camera.cx, camera.cy, camera.dpr);
     this.field.finish();
+  }
+
+  /**
+   * Вид течений на ускорении: доля штрихов (от ×3), поле для них — мгновенное
+   * или усреднённое (от ×300) течение воды либо перенос минерала (`streamView`).
+   */
+  private streams(frame: Frame): { streakMix: number; stream: StreamField | null; averageMix: number; view: StreamView } {
+    const streakMix = this.showProcesses ? 0 : this.water.streakMix();
+    const w = frame.world;
+    // Мерило силы — сильное течение при текущем солнце, единиц мира в секунду модели.
+    const ref = DRIFT_REFERENCE * 10 * Math.max(0.05, sunAt(w.light, w.step));
+    return {
+      streakMix,
+      stream: streakMix > 0 ? this.water.streamField(frame, this.streamView, ref) : null,
+      averageMix: this.water.averageMix(),
+      view: this.streamView,
+    };
   }
 
   /** Сообщение вместо мира, когда WebGL2 нет или контекст потерян. */

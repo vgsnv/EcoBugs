@@ -10,6 +10,7 @@ import { createProgram, Textures, type Program, type TextureSource } from './gl.
 import { MINERAL_COLOR, MINERAL_DEEP, SHADE_COLOR, SUN_COLOR, smoothstep, type Rgb } from './palette.ts';
 import { SPOT_FS, SPOT_VS, type SpotShapes } from './light.ts';
 import { FLOW_GLSL, STREAK_FRESH, STREAK_FS, STREAK_PX } from './streaks.ts';
+import type { StreamField, StreamView } from './water.ts';
 import { TERRAIN_GLSL, type Grid, type TerrainData } from './terrain.ts';
 
 /** Свечения и блёстки: копятся за кадр и рисуются после полей, в порядке вызовов. */
@@ -44,9 +45,11 @@ export interface FieldInputs {
   /** Рябь: 0 — по течениям, 1 — две равномерные ряби (при «Процессах»); часы ряби, секунды модели. */
   readonly rippleMode: 0 | 1;
   readonly rippleTime: number;
-  /** Доля штрихов вместо ряби (0…1) и сильное течение (мерило), единиц мира в секунду модели. */
+  /** Доля штрихов вместо ряби (0…1); поле для них; доля усреднённого течения; что показывают. */
   readonly streakMix: number;
-  readonly flowRef: number;
+  readonly stream: StreamField | null;
+  readonly averageMix: number;
+  readonly view: StreamView;
 }
 
 const QUAD_VS = `#version 300 es
@@ -138,6 +141,11 @@ uniform sampler2D u_ripple;
 uniform sampler2D u_foam;
 uniform sampler2D u_streaks;      // R — штрихи, G — сила течения
 uniform float u_streakMix;        // 0 — рябь, 1 — штрихи
+uniform sampler2D u_stream;       // поле штрихов: направление, сила
+uniform vec3 u_streamGrid;
+uniform float u_averageMix;       // доля усреднённого течения
+uniform vec3 u_streakColor;
+uniform float u_streakFloor;      // яркость штрихов при нулевой силе
 uniform vec2 u_grid;        // протяжённость сетки минерала в мире
 uniform float u_lit;
 uniform float u_warmth;
@@ -197,7 +205,12 @@ void main() {
     if (u_streakMix > 0.) {
       vec2 st = texture(u_streaks, gl_FragCoord.xy / u_size).rg;
       float b = smoothstep(.26, .46, st.r);
-      c = screenOver(c, vec3(.86, .95, .97) * b * (.25 + .75 * st.g) * water * u_streakMix * .45);
+      c = screenOver(c, u_streakColor * b * (u_streakFloor + (1. - u_streakFloor) * st.g) * water * u_streakMix * .45);
+      // Устойчивая картина: где течение (перенос) сильное в среднем — мягкая подсветка.
+      if (u_averageMix > 0.) {
+        float strong = texture(u_stream, w / u_streamGrid.z / u_streamGrid.xy).z;
+        c = screenOver(c, u_streakColor * strong * strong * water * u_averageMix * u_streakMix * .14);
+      }
     }
   } else {
     vec3 tone = vec3(1., 250. / 255., 230. / 255.);
@@ -299,6 +312,7 @@ export class FieldRenderer implements GlowSink {
   /** Ключи текстур, которые не меняются между кадрами. */
   private readonly mineralKey = {};
   private readonly flowKey = {};
+  private readonly streamKey = {};
   private readonly levelKey = {};
   private readonly depositKey = {};
   private readonly mottleKey = {};
@@ -495,13 +509,18 @@ export class FieldRenderer implements GlowSink {
   }
 
   /** Поле течений вида (FLOW_GLSL). */
-  private bindFlow(p: Program, unit: number, flow: FieldInputs['flow'], flowRef: number): void {
+  private bindFlow(p: Program, unit: number, flow: FieldInputs['flow']): void {
     const gl = this.gl!;
     this.bind(p, unit, 'u_flow', flow ? this.flowTexture : null);
     gl.uniform4f(p.uniform('u_bounds'), flow?.bounds[0] ?? 0, flow?.bounds[1] ?? 0, flow?.bounds[2] ?? 1, flow?.bounds[3] ?? 1);
     gl.uniform1f(p.uniform('u_flowScale'), flow?.scale ?? 0);
     gl.uniform1f(p.uniform('u_hasFlow'), flow ? 1 : 0);
-    gl.uniform1f(p.uniform('u_flowRef'), flowRef);
+  }
+
+  /** Поле штрихов (сетка минерала, по 4 числа на клетку). */
+  private bindStream(p: Program, unit: number, stream: StreamField): void {
+    this.bind(p, unit, 'u_stream', this.textures.get(this.streamKey, { data: stream.data, width: stream.cols, height: stream.rows }, stream.version, { format: 'rgba16f' }));
+    this.gl!.uniform3f(p.uniform('u_streamGrid'), stream.cols, stream.rows, stream.step);
   }
 
   /** Холсты штрихов (прошлый и новый кадр) в пикселях CSS; создаются под размер. */
@@ -559,7 +578,7 @@ export class FieldRenderer implements GlowSink {
       gl.uniform1f(p.uniform('u_fresh'), 1 - (1 - STREAK_FRESH) ** frames);
       gl.uniform2f(p.uniform('u_px'), STREAK_PX[0], STREAK_PX[1]);
       this.bind(p, 0, 'u_prev', prev.texture);
-      this.bindFlow(p, 5, input.flow, input.flowRef);
+      this.bindStream(p, 5, input.stream!);
       this.bindGrid(p, 7, 'u_level', this.levelKey, input.terrain.level, 'r16f');
       this.bindGrid(p, 12, 'u_blocked', this.blockedKey, input.terrain.blocked, 'r8');
       gl.bindVertexArray(this.quadVao);
@@ -596,7 +615,7 @@ export class FieldRenderer implements GlowSink {
     const foam = this.textures.get(this.foamKey, input.foam.canvas, input.foam.version);
     const flow = input.flow;
     if (flow) this.flowTexture = this.textures.get(this.flowKey, { data: flow.data, width: flow.cols, height: flow.rows }, flow.version);
-    const streaks = input.streakMix > 0 && flow ? this.drawStreaks(input) : null;
+    const streaks = input.streakMix > 0 && input.stream ? this.drawStreaks(input) : null;
     if (!streaks) this.streakTime = null;
     gl.useProgram(p.program);
     this.common(p, world.dish);
@@ -604,7 +623,8 @@ export class FieldRenderer implements GlowSink {
     this.bind(p, 2, 'u_mineral', this.mineralTexture);
     this.bind(p, 3, 'u_streaks', streaks);
     this.bind(p, 4, 'u_ripple', ripple);
-    this.bindFlow(p, 5, flow, input.flowRef);
+    this.bindFlow(p, 5, flow);
+    if (input.stream) this.bindStream(p, 13, input.stream);
     this.bind(p, 6, 'u_foam', foam);
     this.bindGrid(p, 7, 'u_level', this.levelKey, t.level, 'r16f');
     this.bindGrid(p, 8, 'u_deposit', this.depositKey, t.deposits, 'r16f');
@@ -622,6 +642,11 @@ export class FieldRenderer implements GlowSink {
     gl.uniform1f(p.uniform('u_glare'), input.glare);
     gl.uniform1i(p.uniform('u_rippleMode'), input.rippleMode);
     gl.uniform1f(p.uniform('u_streakMix'), streaks ? input.streakMix : 0);
+    gl.uniform1f(p.uniform('u_averageMix'), input.averageMix);
+    // Вода — светлые штрихи, видны и на слабом течении; минерал — его цветом, только где переносится.
+    const tone = input.view === 'water' ? [0.86, 0.95, 0.97] : [0.9, 0.72, 1];
+    gl.uniform3f(p.uniform('u_streakColor'), tone[0], tone[1], tone[2]);
+    gl.uniform1f(p.uniform('u_streakFloor'), input.view === 'water' ? 0.25 : 0);
     gl.uniform1f(p.uniform('u_flowTime'), input.rippleTime % 4096);
     gl.uniform1f(p.uniform('u_time'), frame.animTime);
     const unit = (c: Rgb) => [c[0] / 255, c[1] / 255, c[2] / 255] as const;

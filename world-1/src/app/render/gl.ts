@@ -48,7 +48,7 @@ export interface TextureOptions {
   /** Без сглаживания (клетки видны как есть). */
   readonly nearest?: boolean;
   /** Сетка чисел: одно число на клетку (r16f — сглаживается, r8 — байт), два (rg32f — только точное чтение). */
-  readonly format?: 'r16f' | 'rg32f' | 'rgba32f' | 'r8';
+  readonly format?: 'r16f' | 'rgba16f' | 'rg32f' | 'rgba32f' | 'r8';
 }
 
 /**
@@ -91,6 +91,7 @@ export class Textures {
     if ('data' in source) {
       const { data, width, height } = source;
       if (options.format === 'r16f') gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, width, height, 0, gl.RED, gl.FLOAT, data as Float32Array);
+      else if (options.format === 'rgba16f') gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.FLOAT, data as Float32Array);
       else if (options.format === 'rg32f') gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, width, height, 0, gl.RG, gl.FLOAT, data as Float32Array);
       else if (options.format === 'rgba32f') gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, height, 0, gl.RGBA, gl.FLOAT, data as Float32Array);
       else if (options.format === 'r8') gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, data as Uint8Array);
