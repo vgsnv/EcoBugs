@@ -1,10 +1,11 @@
 import { dishOf } from './dish.ts';
 /**
- * Местность (спецификация, раздел «Местность»): уровень местности — толщина
- * грунта, а грунт — минерал. Намыв (растворённый минерал оседает в грунт, тем
- * сильнее, чем слабее течение), размыв (течение срывает грунт обратно в
- * среду), подвижки (участки медленно поднимаются — из недр — или опускаются —
- * в недра) и толчки (короткие резкие подвижки).
+ * Местность (спецификация, раздел «Местность»): уровень — грунт плюс залежи.
+ * Грунт — не минерал: его переносят течения и осыпание (mineral.ts), а
+ * количество в чашке меняет только тектоника — подвижки (участки медленно
+ * поднимаются или опускаются) и толчки (короткие резкие подвижки). Грунт для
+ * подъёма берётся из подложки под чашкой, при опускании уходит в неё; ниже
+ * стеклянного дна (грунт 0) опускаться нечему.
  *
  * Грунт живёт на сетке минерала и меняется вместе с минералом (раз в
  * MINERAL_PERIOD шагов). Карта вязкости, течения и картинка пересобираются
@@ -12,7 +13,7 @@ import { dishOf } from './dish.ts';
  * в файле мира, поэтому ход мира не зависит от того, когда что пересчитано.
  */
 import {
-  GROUND_PER_LEVEL, MOVE_AMPLITUDE, MOVE_BAND_LENGTH, MOVE_BAND_WIDTH,
+  GROUND_FLOOR_LEVEL, GROUND_PER_LEVEL, MOVE_AMPLITUDE, MOVE_BAND_LENGTH, MOVE_BAND_WIDTH,
   MOVE_DURATION, MOVE_GAP, MOVE_SPOT_RADIUS, QUAKE_AMPLITUDE, QUAKE_DURATION, QUAKE_RADIUS,
 } from './constants.ts';
 import type { WorldParams } from './params.ts';
@@ -35,15 +36,10 @@ export interface Movement {
   readonly amp: number;
   readonly start: number;
   readonly duration: number;
-  /**
-   * Парный участок той же формы рядом (только у подвижек): когда основной
-   * поднимается, парный опускается на столько же, и наоборот; null — у толчков.
-   */
-  readonly pair: Movement | null;
 }
 
 export interface TerrainState {
-  /** Коренной грунт по клеткам сетки минерала. */
+  /** Грунт по клеткам сетки минерала (не минерал; в единицах залежей). */
   ground: Float64Array;
   /** Залежи — осевший минерал поверх грунта; тоже поднимает уровень. */
   deposits: Float64Array;
@@ -73,7 +69,7 @@ export function movement(params: WorldParams, quake: boolean, n: number, start: 
   if (quake) {
     return {
       n, quake, band: false, x, y, angle: 0, size: span(QUAKE_RADIUS, rnd(s, n, 4)), width: 0,
-      amp: sign * span(QUAKE_AMPLITUDE, rnd(s, n, 5)), start, duration: Math.round(span(QUAKE_DURATION, rnd(s, n, 6))), pair: null,
+      amp: sign * span(QUAKE_AMPLITUDE, rnd(s, n, 5)), start, duration: Math.round(span(QUAKE_DURATION, rnd(s, n, 6))),
     };
   }
   const band = rnd(s, n, 7) < 0.5;
@@ -82,13 +78,7 @@ export function movement(params: WorldParams, quake: boolean, n: number, start: 
   const width = band ? span(MOVE_BAND_WIDTH, rnd(s, n, 9)) : 0;
   const amp = sign * span(MOVE_AMPLITUDE, rnd(s, n, 5));
   const duration = Math.round(span(MOVE_DURATION, rnd(s, n, 6)));
-  // Парный участок: у полосы — параллельная полоса сбоку, у пятна — пятно рядом.
-  const dir = band ? angle + Math.PI / 2 : rnd(s, n, 10) * 2 * Math.PI;
-  const dist = band ? width * 2.6 : size * 1.7;
-  const pair: Movement = {
-    n, quake, band, x: x + Math.cos(dir) * dist, y: y + Math.sin(dir) * dist, angle, size, width, amp: -amp, start, duration, pair: null,
-  };
-  return { n, quake, band, x, y, angle, size, width, amp, start, duration, pair };
+  return { n, quake, band, x, y, angle, size, width, amp, start, duration };
 }
 
 /** Промежуток до начала следующей подвижки или толчка номер n. */
@@ -154,7 +144,12 @@ export function createTerrain(params: WorldParams, viscosity: ViscosityMap, cols
   const applied = levelsOnGrid(viscosity, cols, rows, cell);
   const ground = new Float64Array(cols * rows);
   const area = cell * cell;
-  for (let k = 0; k < ground.length; k++) if (!blocked[k]) ground[k] = applied[k] * GROUND_PER_LEVEL * area;
+  // Под водой — тонкий слой грунта: голого стекла при сотворении нет.
+  for (let k = 0; k < ground.length; k++) {
+    if (blocked[k]) continue;
+    applied[k] = Math.max(applied[k], GROUND_FLOOR_LEVEL);
+    ground[k] = applied[k] * GROUND_PER_LEVEL * area;
+  }
   const q = params.quakeInterval;
   return {
     ground, deposits: new Float64Array(ground.length), applied, active: [],
@@ -166,12 +161,13 @@ export function createTerrain(params: WorldParams, viscosity: ViscosityMap, cols
 
 /**
  * Подвижки и толчки за промежуток (from, to]: начать наступившие, сдвинуть
- * грунт на прирост их хода, закончить завершившиеся. Подъём берёт минерал из
- * недр (не больше, чем там есть), опускание отдаёт грунт в недра.
- * Возвращает изменение недр.
+ * грунт на прирост их хода, закончить завершившиеся. Подъём добавляет грунт
+ * из подложки, опускание убирает его в подложку (не ниже стеклянного дна) и
+ * топит залежи опускающегося участка в недра — в той же доле.
+ * Возвращает, сколько минерала ушло в недра (утонувшие залежи).
  */
 export function moveGround(
-  t: TerrainState, params: WorldParams, depths: number, from: number, to: number,
+  t: TerrainState, params: WorldParams, from: number, to: number,
   cols: number, rows: number, cell: number, blocked: Uint8Array,
 ): number {
   const seed = params.seed;
@@ -185,49 +181,28 @@ export function moveGround(
     t.nextQuake++;
     t.nextQuakeStep += gap(seed, true, t.nextQuake, params.quakeInterval);
   }
-  const area = cell * cell;
-  const scale = params.terrainSpeed * GROUND_PER_LEVEL * area;
-  let delta = 0;
+  const scale = params.terrainSpeed * GROUND_PER_LEVEL * cell * cell;
+  let drowned = 0;
   for (const m of t.active) {
     const step = (progress(m, to) - progress(m, from)) * m.amp * scale;
     if (step === 0) continue;
-    // Опускается участок с отрицательным размахом, поднимается — с положительным.
-    const rise = step > 0 ? m : m.pair;
-    const sink = step > 0 ? m.pair : m;
-    const size = Math.abs(step);
-    // 1. Опускание: грунт уходит из опускающегося участка (не ниже дна).
-    let released = 0;
-    if (sink) {
-      const f = footprint(sink, cols, rows, cell, blocked);
-      for (let n = 0; n < f.cells.length; n++) {
-        const k = f.cells[n];
-        const before = t.ground[k];
-        const take = Math.min(before, size * f.weights[n]);
-        t.ground[k] -= take;
-        released += take;
-        // Залежи опускающегося участка тонут в недра — в той же доле.
-        if (before > 0 && t.deposits[k] > 0) {
-          const drown = t.deposits[k] * (take / before);
-          t.deposits[k] -= drown;
-          delta += drown;
-        }
+    const f = footprint(m, cols, rows, cell, blocked);
+    for (let n = 0; n < f.cells.length; n++) {
+      const k = f.cells[n];
+      const change = step * f.weights[n];
+      if (change > 0) { t.ground[k] += change; continue; }
+      const before = t.ground[k];
+      const take = Math.min(before, -change);
+      t.ground[k] -= take;
+      if (before > 0 && t.deposits[k] > 0) {
+        const drown = t.deposits[k] * (take / before);
+        t.deposits[k] -= drown;
+        drowned += drown;
       }
-    }
-    // 2. Подъём: из опустившегося рядом; недостающее — из недр (сколько есть);
-    // лишнее (если поднимать нечего) — в недра.
-    if (rise) {
-      const f = footprint(rise, cols, rows, cell, blocked);
-      const need = size * f.total;
-      const fromDepths = need > released ? Math.min(Math.max(0, depths + delta), need - released) : 0;
-      const supply = Math.min(need, released) + fromDepths;
-      delta += released - Math.min(need, released) - fromDepths;
-      for (let n = 0; n < f.cells.length; n++) t.ground[f.cells[n]] += f.total > 0 ? (supply * f.weights[n]) / f.total : 0;
-    } else {
-      delta += released;
     }
   }
   t.active = t.active.filter((m) => m.start + m.duration > to);
-  return delta;
+  return drowned;
 }
 
 /** Снимок уровня из грунта (для пересборки карты вязкости). */
@@ -238,8 +213,8 @@ export function levelFromGround(t: TerrainState, cell: number): Float32Array {
   return out;
 }
 
-/** Минерал в коренном грунте — всего. */
-export function mineralInGround(t: TerrainState): number {
+/** Грунт в чашке — всего (не минерал). */
+export function groundTotal(t: TerrainState): number {
   let s = 0;
   for (let k = 0; k < t.ground.length; k++) s += t.ground[k];
   return s;

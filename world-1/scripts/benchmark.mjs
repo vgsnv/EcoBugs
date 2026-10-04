@@ -11,8 +11,7 @@ const summarize = (values) => {
     p99: percentile(values, .99), max: values.at(-1) ?? 0 };
 };
 const mass = (world) => world.mineral.depths + mineralInMedium(world.mineral)
-  + mineralInDeposits(world.terrain) + mineralInEruptions(world.mineral)
-  + world.terrain.ground.reduce((sum, value) => sum + value, 0);
+  + mineralInDeposits(world.terrain) + mineralInEruptions(world.mineral);
 const scenarios = [
   { seed: 1, shape: 'rectangle', aspectRatio: 4 / 3 },
   { seed: 2, shape: 'circle', aspectRatio: 1 },

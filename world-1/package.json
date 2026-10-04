@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "simulate": "node --experimental-strip-types scripts/simulate.mjs",
     "benchmark": "node --experimental-strip-types scripts/benchmark.mjs",
-    "profile": "node --experimental-strip-types scripts/profile.mjs"
+    "profile": "node --experimental-strip-types scripts/profile.mjs",
+    "landscape": "node --experimental-strip-types scripts/landscape.mjs"
   },
   "overrides": {
     "source-map-js": "1.2.1"

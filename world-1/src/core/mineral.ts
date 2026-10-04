@@ -1,8 +1,8 @@
 /**
  * Минерал (спецификация, раздел «Минерал»): постоянное количество, переходит
- * между средой, телами, останками, недрами и грунтом. Здесь — среда и недра
- * (тел и останков пока нет; грунт — в terrain.ts): растворённый минерал на
- * сетке, снос несёт его, избыток намывается в грунт, вулканы редко и
+ * между средой, телами, останками, недрами и залежами. Здесь — среда, залежи и
+ * недра (тел и останков пока нет): растворённый минерал на сетке, снос несёт
+ * его, избыток оседает в залежи, вулканы редко и
  * нерегулярно выбрасывают минерал из недр — по одному за раз, каждое
  * извержение длится своё время и выбрасывает своё количество.
  *
@@ -14,7 +14,7 @@
 import { finishCalculation, type Calculation } from './task.ts';
 import {
   ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_BURST, ERUPTION_TAIL_AREA, ERUPTION_BURSTS_MAX, BURST_WIDTH, BURST_FROM, THROW_RAYS, THROW_SAMPLES, MINERAL_SPREAD,
-  MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_SINK_SETTLE, MINERAL_LAYER, MINERAL_MOBILITY, TRANSPORT_SUBSTEPS, DRIFT_REFERENCE, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, WEATHERING,
+  MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_SINK_SETTLE, MINERAL_LAYER, MINERAL_MOBILITY, TRANSPORT_SUBSTEPS, DRIFT_REFERENCE, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, SAND_RATE, SAND_TOP, SAND_UNDER, SLUMP_RATE, SLUMP_SLOPE,
   FUNNEL_DEPOSIT, FUNNEL_SHAPE, FUNNEL_MIN_CELLS, FUNNEL_HOLE_SHARE, FUNNEL_RAMP, FUNNEL_REACH, FUNNEL_DRAW, FUNNEL_LIFT, FUNNEL_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
   VOLCANO_MIN_GAP, VOLCANO_POWER, VOLCANO_BIRTH, VOLCANO_MATURE, VOLCANO_EXTINCT_CHANCE, VOLCANO_WAKE_CHANCE, VOLCANO_DORMANT_LIFE, VOLCANO_FADE, VOLCANO_DEPOSIT_AVOID,
 } from './constants.ts';
@@ -184,6 +184,8 @@ interface MineralWork {
   pushY: Float32Array;
   holes: Uint8Array;
   seen: Uint8Array;
+  /** Грунт после переноса и осыпания (считается от снимка). */
+  ground: Float64Array;
   processes: MineralProcesses;
 }
 const workspaces = new WeakMap<MineralState, MineralWork>();
@@ -199,7 +201,7 @@ function workspace(m: MineralState): MineralWork {
       dst: new Float64Array(n), runoff: new Float64Array(n), spread: new Float64Array(n),
       speed: new Float32Array(n), flowX: new Float32Array(n), flowY: new Float32Array(n),
       tvx: new Float32Array(n), tvy: new Float32Array(n), pushX: new Float32Array(n), pushY: new Float32Array(n),
-      holes: new Uint8Array(n), seen: new Uint8Array(n),
+      holes: new Uint8Array(n), seen: new Uint8Array(n), ground: new Float64Array(n),
       processes: { step: 0, vx: new Float32Array(n), vy: new Float32Array(n),
         erosion: new Float32Array(n), settling: new Float32Array(n), sinking: new Float32Array(n) },
     };
@@ -348,41 +350,80 @@ function settleRange(m: MineralState, params: WorldParams, terrain: TerrainState
       + (j < rows - 1 && !blocked[k + cols] ? flowY[k + cols] : flowY[k]) - (j > 0 && !blocked[k - cols] ? flowY[k - cols] : flowY[k])) / (2 * cell);
     const sink = Math.min(0.9, Math.max(0, -div) * MINERAL_SINK_SETTLE * P * params.terrainSpeed);
     const settled = dst[k] * (1 - (1 - settle * calm * calm) * (1 - sink)) * room;
-    // Размыв: заметное течение срывает сначала залежи, потом коренной грунт.
+    // Размыв: заметное течение срывает залежи обратно в среду (грунт под ними
+    // не растворяется — его переносит moveSand).
     const over = speed[k] - EROSION_THRESHOLD * sMax;
-    let erode = over > 0 ? EROSION * over * P * area * params.terrainSpeed : 0;
-    const fromDep = Math.min(dep[k], erode);
-    const fromGround = Math.min(gr[k], erode - fromDep);
-    erode = fromDep + fromGround;
+    const erode = Math.min(dep[k], over > 0 ? EROSION * over * P * area * params.terrainSpeed : 0);
     // Залежи понемногу растворяются обратно — на месте.
-    const dissolved = (dep[k] - fromDep) * dissolve;
+    const dissolved = (dep[k] - erode) * dissolve;
     dst[k] += erode - settled + dissolved;
-    dep[k] += settled - fromDep - dissolved;
-    gr[k] -= fromGround;
+    dep[k] += settled - erode - dissolved;
     processes.erosion[k] = erode;
     processes.settling[k] = settled;
   }
 }
 
-function weatherRange(m: MineralState, params: WorldParams, terrain: TerrainState, perLvl: number, P: number, first: number, last: number): void {
+/**
+ * Перенос грунта за обновление (строки first…last): течение сильнее порога
+ * размыва сдвигает грунт к соседям вниз по течению — доли по составляющим
+ * скорости. Количество сохраняется: всё считается от снимка `gr`, изменения
+ * копятся в `out`. Не кладёт в перегородки, за край, в клетки выше верха
+ * отмели; под залежами толще SAND_UNDER грунт не трогает (сначала размываются они).
+ */
+function sandRows(m: MineralState, params: WorldParams, terrain: TerrainState, work: MineralWork, sMax: number, perLvl: number, out: Float64Array, first: number, last: number): void {
+  const { cols, rows, blocked } = m;
+  const { speed, flowX, flowY } = work;
+  const gr = terrain.ground, dep = terrain.deposits;
+  const open = (n: number) => !blocked[n] && (gr[n] + dep[n]) / perLvl < SAND_TOP;
+  if (!(sMax > 0)) return;
+  for (let j = first; j < last; j++) {
+    for (let i = 0; i < cols; i++) {
+      const k = j * cols + i;
+      if (blocked[k] || gr[k] <= 0 || dep[k] > SAND_UNDER * perLvl) continue;
+      const over = (speed[k] - EROSION_THRESHOLD * sMax) / sMax;
+      if (!(over > 0)) continue;
+      const vx = flowX[k], vy = flowY[k];
+      const ax = Math.abs(vx), ay = Math.abs(vy), sum = ax + ay;
+      if (sum === 0) continue;
+      const amount = Math.min(gr[k], SAND_RATE * over * perLvl * params.terrainSpeed);
+      const tx = vx > 0 ? (i < cols - 1 ? k + 1 : -1) : (i > 0 ? k - 1 : -1);
+      const ty = vy > 0 ? (j < rows - 1 ? k + cols : -1) : (j > 0 ? k - cols : -1);
+      if (tx >= 0 && ax > 0 && open(tx)) { const a = amount * ax / sum; out[k] -= a; out[tx] += a; }
+      if (ty >= 0 && ay > 0 && open(ty)) { const a = amount * ay / sum; out[k] -= a; out[ty] += a; }
+    }
+  }
+}
+
+/**
+ * Осыпание за обновление (строки first…last): склон круче SLUMP_SLOPE
+ * осыпается — грунт сползает к нижним соседям, SLUMP_RATE от превышения,
+ * поровну по превышению; ровная середина суши стоит. От снимка, в `out`.
+ */
+function slumpRows(m: MineralState, params: WorldParams, terrain: TerrainState, perLvl: number, out: Float64Array, first: number, last: number): void {
   const { cols, rows, blocked } = m;
   const gr = terrain.ground, dep = terrain.deposits;
-  const top = (k: number) => gr[k] + dep[k];
-  for (let k = first; k < last; k++) {
-    const above = top(k) - perLvl;
-    if (above <= 0 || blocked[k]) continue;
-    const i = k % cols, j = (k - i) / cols;
-    let slope = 0;
-    if (i > 0 && !blocked[k - 1]) slope = Math.max(slope, top(k) - top(k - 1));
-    if (i < cols - 1 && !blocked[k + 1]) slope = Math.max(slope, top(k) - top(k + 1));
-    if (j > 0 && !blocked[k - cols]) slope = Math.max(slope, top(k) - top(k - cols));
-    if (j < rows - 1 && !blocked[k + cols]) slope = Math.max(slope, top(k) - top(k + cols));
-    if (slope <= 0) continue;
-    const w = above * Math.min(1, WEATHERING * (slope / perLvl) * P * params.terrainSpeed);
-    const fromDep = Math.min(dep[k], w);
-    dep[k] -= fromDep;
-    gr[k] -= w - fromDep;
-    m.field[k] += w;
+  const h = (n: number) => (gr[n] + dep[n]) / perLvl;
+  const rate = SLUMP_RATE * params.terrainSpeed;
+  for (let j = first; j < last; j++) {
+    for (let i = 0; i < cols; i++) {
+      const k = j * cols + i;
+      if (blocked[k] || gr[k] <= 0) continue;
+      const hk = h(k);
+      const dl = i > 0 && !blocked[k - 1] ? Math.max(0, hk - h(k - 1) - SLUMP_SLOPE) : 0;
+      const dr = i < cols - 1 && !blocked[k + 1] ? Math.max(0, hk - h(k + 1) - SLUMP_SLOPE) : 0;
+      const du = j > 0 && !blocked[k - cols] ? Math.max(0, hk - h(k - cols) - SLUMP_SLOPE) : 0;
+      const dd = j < rows - 1 && !blocked[k + cols] ? Math.max(0, hk - h(k + cols) - SLUMP_SLOPE) : 0;
+      const total = dl + dr + du + dd;
+      if (total === 0) continue;
+      // Не больше четверти превышения: осыпание не перекидывает склон в обратный.
+      const moved = Math.min(gr[k], rate * total * perLvl, 0.25 * total * perLvl);
+      const f = moved / total;
+      out[k] -= moved;
+      if (dl > 0) out[k - 1] += f * dl;
+      if (dr > 0) out[k + 1] += f * dr;
+      if (du > 0) out[k - cols] += f * du;
+      if (dd > 0) out[k + cols] += f * dd;
+    }
   }
 }
 
@@ -518,13 +559,21 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   }
   m.field = dst;
 
-  phase('выветривание');
-  // Выветривание склонов: грунт выше середины отмели переходит в среду —
-  // тем быстрее, чем круче склон; ровная середина суши устойчива.
-  for (let first = 0; first < n; first += 512) {
+  phase('перенос и осыпание грунта');
+  // Грунт: течение переносит его вниз по течению, крутые склоны осыпаются.
+  // Каждый проход — от снимка, с сохранением количества.
+  const sand = work.ground;
+  sand.set(gr);
+  for (let first = 0; first < rows; first += 8) {
     yield;
-    weatherRange(m, params, terrain, perLvl, P, first, Math.min(n, first + 512));
+    sandRows(m, params, terrain, work, sMax, perLvl, sand, first, Math.min(rows, first + 8));
   }
+  gr.set(sand);
+  for (let first = 0; first < rows; first += 8) {
+    yield;
+    slumpRows(m, params, terrain, perLvl, sand, first, Math.min(rows, first + 8));
+  }
+  gr.set(sand);
 
   phase('стекание');
   // Стекание: растворённый минерал стекает к соседям ниже — с суши к воде.
@@ -538,9 +587,8 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
     work.exchanges.funnelSunk += sunk;
   }
 
-  // Подвижки и толчки: подъём — из опускающегося соседа и недр, опускание
-  // топит залежи в недра.
-  m.depths += moveGround(terrain, params, m.depths, step - P, step, cols, rows, cell, blocked);
+  // Подвижки и толчки: грунт из подложки и в неё; опускание топит залежи в недра.
+  m.depths += moveGround(terrain, params, step - P, step, cols, rows, cell, blocked);
 
   // 3. Выход вещества активных извержений за весь промежуток.
   for (const vol of m.volcanoes) {

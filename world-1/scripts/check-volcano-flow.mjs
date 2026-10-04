@@ -4,7 +4,7 @@ import { createWorld, makeParams, stepWorld, ventPushAverage, eruptionBursts, ER
   mineralInMedium, mineralInDeposits, mineralInEruptions, serializeWorld, parseWorldFile, worldHash } from '../src/core/index.ts';
 import { pushField } from '../src/core/push.ts';
 const total = (w) => w.mineral.depths + mineralInMedium(w.mineral) + mineralInDeposits(w.terrain)
-  + mineralInEruptions(w.mineral) + w.terrain.ground.reduce((sum, x) => sum + x, 0);
+  + mineralInEruptions(w.mineral);
 for (const config of [{seed: 1}, {seed: 2, shape: 'circle'}]) {
   const w = createWorld(makeParams(config)), initial = total(w);
   for (let i = 0; i < 200; i++) stepWorld(w);
