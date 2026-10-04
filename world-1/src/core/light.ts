@@ -144,16 +144,48 @@ function blobReach(b: Blob, t: number): number {
  * плавно до 0 на краю. Край волнистый: граница по углу — 1 ± волны.
  */
 function blobIntensity(b: Blob, dx: number, dy: number, t: number): number {
+  return shapeIntensity(blobShape(b, t), dx, dy);
+}
+
+/** Эллипс в шаге t: всё, что не зависит от точки, — один раз на эллипс, а не на каждую клетку. */
+interface BlobShape {
+  readonly c: number;
+  readonly sn: number;
+  /** Полуоси: вдоль и поперёк. */
+  readonly ru: number;
+  readonly rv: number;
+  readonly e3: number;
+  readonly e5: number;
+  readonly p3: number;
+  readonly p5: number;
+  /** Квадраты расстояний (в долях полуосей): ближе — заведомо 1, дальше — заведомо 0. */
+  readonly inner2: number;
+  readonly outer2: number;
+}
+
+function blobShape(b: Blob, t: number): BlobShape {
   const r = blobRadius(b, t);
   const k = Math.sqrt(b.aspect);
   const angle = b.a0 + b.wa * t;
-  const c = Math.cos(angle);
-  const sn = Math.sin(angle);
-  const u = (dx * c + dy * sn) / (r * k);
-  const v = (-dx * sn + dy * c) * k / r;
+  const waves = Math.abs(b.e3) + Math.abs(b.e5);
+  const inner = Math.max(0, 1 - waves), outer = (1 + waves) * (1 + SPOT_EDGE);
+  return {
+    c: Math.cos(angle), sn: Math.sin(angle), ru: r * k, rv: r / k,
+    e3: b.e3, e5: b.e5, p3: b.p3 + b.w3 * t, p5: b.p5 + b.w5 * t,
+    inner2: inner * inner, outer2: outer * outer,
+  };
+}
+
+function shapeIntensity(s: BlobShape, dx: number, dy: number): number {
+  const u = (dx * s.c + dy * s.sn) / s.ru;
+  const v = (-dx * s.sn + dy * s.c) / s.rv;
+  const d2 = u * u + v * v;
+  // Волны края меняют границу не больше чем на e3 + e5: вне этого кольца угол не нужен.
+  if (d2 <= s.inner2) return 1;
+  if (d2 >= s.outer2) return 0;
   const phi = Math.atan2(v, u);
-  const bound = 1 + b.e3 * Math.sin(3 * phi + b.p3 + b.w3 * t) + b.e5 * Math.sin(5 * phi + b.p5 + b.w5 * t);
-  return falloff(Math.hypot(u, v), bound);
+  const bound = 1 + s.e3 * Math.sin(3 * phi + s.p3) + s.e5 * Math.sin(5 * phi + s.p5);
+  return falloff(Math.sqrt(d2), bound);
 }
 
 /** Центры эллипсов пятна на карте в шаге t (без общего сдвига карты). */
@@ -195,6 +227,7 @@ class CoverageGrid {
     for (const b of spot.blobs) {
       const [cx, cy] = blobCenter(spot, b, t, this.mapW, this.mapH);
       const reach = blobReach(b, t);
+      const shape = blobShape(b, t);
       const i0 = Math.floor((cx - reach) / cw), i1 = Math.ceil((cx + reach) / cw);
       const j0 = Math.floor((cy - reach) / ch), j1 = Math.ceil((cy + reach) / ch);
       for (let jj = j0; jj <= Math.min(j1, j0 + cells - 1); jj++) {
@@ -204,7 +237,7 @@ class CoverageGrid {
           const i = wrap(ii, cells);
           const k = j * cells + i;
           if (field[k] >= 0.5) continue;
-          const v = blobIntensity(b, wrapDelta((i + 0.5) * cw - cx, this.mapW), dy, t);
+          const v = shapeIntensity(shape, wrapDelta((i + 0.5) * cw - cx, this.mapW), dy);
           if (v > field[k]) {
             field[k] = v;
             if (v >= 0.5) this.lit++;
@@ -356,6 +389,7 @@ export function* rasterizeSpotIntensityTask(map: LightMap, t: number, cols: numb
     for (const b of s.blobs) {
       const [mx, my] = blobCenter(s, b, t, W, H);
       const reach = blobReach(b, t);
+      const shape = blobShape(b, t);
       // Положение центра в координатах чашки — ближайшая копия на сомкнутой карте.
       const cx0 = wrap(mx + ox, W);
       const cy0 = wrap(my + oy, H);
@@ -371,7 +405,7 @@ export function* rasterizeSpotIntensityTask(map: LightMap, t: number, cols: numb
             if ((j & 3) === 0) yield;
             const py = (j + 0.5) * cell - cy;
             for (let i = i0; i <= i1; i++) {
-              const v = blobIntensity(b, (i + 0.5) * cell - cx, py, t);
+              const v = shapeIntensity(shape, (i + 0.5) * cell - cx, py);
               const k = j * cols + i;
               if (v > field[k]) field[k] = v;
             }

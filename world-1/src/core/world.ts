@@ -2,6 +2,7 @@
  * Мир: параметры + номер шага. Всё остальное строится из сида детерминированно.
  */
 import { finishCalculation, type Calculation } from './task.ts';
+import { phase } from './profile.ts';
 import { dishOf, type Dish } from './dish.ts';
 import { mix32 } from './prng.ts';
 import { type WorldParams, validateParams } from './params.ts';
@@ -77,10 +78,12 @@ export function* stepWorldTask(world: World): Calculation {
     yield* updateMineralTask(world.mineral, world.params, world.drift, world.partitions, world.terrain, world.light, step);
   }
   if (step % TERRAIN_PERIOD === 0) {
+    phase('смена местности');
     const level = levelFromGround(world.terrain, MINERAL_CELL);
     yield* applyLevelsTask(world.viscosity, level, world.mineral.cols, world.mineral.rows, world.mineral.cell);
     world.terrain.applied = level;
     world.drift.reset();
+    phase(null);
   }
   world.step = step;
 }

@@ -14,8 +14,9 @@
  * одного начального приближения, и кешируется по местности — загрузка точна.
  */
 import { finishCalculation, type Calculation } from './task.ts';
-import { PUSH_ITERATIONS, PUSH_LENGTH, PUSH_WINDOW } from './constants.ts';
+import { PUSH_ITERATIONS, PUSH_LENGTH, PUSH_OMEGA, PUSH_WINDOW } from './constants.ts';
 import { multiplierForLevel } from './viscosity.ts';
+import { phase } from './profile.ts';
 
 /** Единичное течение: скорость (единиц за шаг на единицу силы) в локальном окне сетки минерала. */
 export interface PushField {
@@ -68,7 +69,9 @@ export function* pushFieldTask(grid: Grid, level: Float32Array, key: string, see
   if (!byLevel) { byLevel = new Map(); cache.set(level, byLevel); }
   const hit = byLevel.get(key);
   if (hit) return hit;
+  phase('поле толчка (при смене местности)');
   const field = yield* solve(grid, level, seeds);
+  phase('течения вулканов и воронок');
   byLevel.set(key, field);
   return field;
 }
@@ -83,7 +86,7 @@ function relaxRange(cond: Float64Array, west: Float64Array, ce: Float64Array, no
     if (cE) acc += cE * p[q + 1];
     if (cn) acc += cn * p[q - w];
     if (cS) acc += cS * p[q + w];
-    p[q] += 1.6 * (acc / sum - p[q]);
+    p[q] += PUSH_OMEGA * (acc / sum - p[q]);
   }
 }
 
