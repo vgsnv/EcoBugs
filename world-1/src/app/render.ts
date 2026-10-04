@@ -174,6 +174,7 @@ export class WorldRenderer {
       foam: this.water.foam(w),
       ...light.strength,
       rippleMode: this.showProcesses ? 1 : 0,
+      rippleTime: this.water.rippleTime(frame),
     });
     this.water.drawSparkles(frame, this.field);
 

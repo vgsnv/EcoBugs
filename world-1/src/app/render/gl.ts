@@ -54,7 +54,11 @@ export interface TextureOptions {
 /**
  * Текстуры по ключу-объекту: загружаются заново, только когда меняется версия
  * источника. Ключи, которые больше не нужны, освобождаются явно (`release`).
+ * Загрузка идёт через отдельный блок UPLOAD_UNIT: иначе она подменила бы
+ * текстуру, уже привязанную к активному блоку для шейдера.
  */
+const UPLOAD_UNIT = 15;
+
 export class Textures {
   private readonly entries = new Map<object, { texture: WebGLTexture; version: number }>();
   private readonly gl: WebGL2RenderingContext;
@@ -67,6 +71,7 @@ export class Textures {
     const gl = this.gl;
     let entry = this.entries.get(key);
     if (entry && entry.version === version) return entry.texture;
+    gl.activeTexture(gl.TEXTURE0 + UPLOAD_UNIT);
     if (!entry) {
       const texture = gl.createTexture()!;
       gl.bindTexture(gl.TEXTURE_2D, texture);

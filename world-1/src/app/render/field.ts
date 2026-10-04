@@ -40,8 +40,9 @@ export interface FieldInputs {
   readonly glow: number;
   readonly glare: number;
   readonly penumbra: number;
-  /** Рябь: 0 — по течениям, 1 — две равномерные ряби (при «Процессах»). */
+  /** Рябь: 0 — по течениям, 1 — две равномерные ряби (при «Процессах»); часы ряби, секунды модели. */
   readonly rippleMode: 0 | 1;
+  readonly rippleTime: number;
 }
 
 const QUAD_VS = `#version 300 es
@@ -139,7 +140,7 @@ uniform float u_glare;
 uniform int u_rippleMode;
 uniform vec4 u_bounds;      // видимая часть мира для поля течений
 uniform float u_flowScale;
-uniform float u_flowTime;   // шаги течений / 10
+uniform float u_flowTime;   // часы ряби, секунды модели
 uniform float u_time;       // секунды анимации
 uniform float u_hasFlow;
 uniform vec3 u_shade;
@@ -522,7 +523,7 @@ export class FieldRenderer implements GlowSink {
     gl.uniform4f(p.uniform('u_bounds'), flow?.bounds[0] ?? 0, flow?.bounds[1] ?? 0, flow?.bounds[2] ?? 1, flow?.bounds[3] ?? 1);
     gl.uniform1f(p.uniform('u_flowScale'), flow?.scale ?? 0);
     gl.uniform1f(p.uniform('u_hasFlow'), flow ? 1 : 0);
-    gl.uniform1f(p.uniform('u_flowTime'), (frame.flowStep / 10) % 4096);
+    gl.uniform1f(p.uniform('u_flowTime'), input.rippleTime % 4096);
     gl.uniform1f(p.uniform('u_time'), frame.animTime);
     const unit = (c: Rgb) => [c[0] / 255, c[1] / 255, c[2] / 255] as const;
     gl.uniform3f(p.uniform('u_shade'), ...unit(SHADE_COLOR));

@@ -12,6 +12,11 @@ import { smoothstep } from './palette.ts';
 const SPARKLE_DEPOSIT = 2;
 const SPARKLE_SPEED = 1.3;
 const SPARKLE_THRESHOLD = 0.965;
+/**
+ * Рябь сменяет узор по времени модели, но не быстрее RIPPLE_MAX_RATE ×
+ * реального: иначе на ускорении узор мелькает (на ×100 — десятки раз в секунду).
+ */
+const RIPPLE_MAX_RATE = 3;
 /** Пересчёт маски пены не чаще, мс (её вид — фактура 60 единиц, ровная часть 0,35, сила 0,4 — в шейдере полей). */
 const FOAM_REBUILD_MS = 300;
 
@@ -64,9 +69,28 @@ export class WaterLayer {
   private flowBytes = new Uint8Array(0);
   private flowSamples = new Float32Array(0);
   private flowGrid: { cols: number; rows: number; bounds: number[] } = { cols: 0, rows: 0, bounds: [0, 0, 1, 1] };
+  /** Часы ряби (секунды модели, с ограничением скорости) и по каким кадрам они шли. */
+  private rippleClock = 0;
+  private rippleFlowStep: number | null = null;
+  private rippleAnimTime = 0;
 
   resetFlow(): void {
     this.flowKey = ''; this.flowStep = -1; this.flowBuiltAt = -Infinity;
+    this.rippleFlowStep = null;
+  }
+
+  /** Часы ряби этого кадра: шаги течений → секунды модели, но не быстрее RIPPLE_MAX_RATE × реального времени. */
+  rippleTime(frame: Frame): number {
+    if (this.rippleFlowStep === null || frame.flowStep < this.rippleFlowStep) {
+      this.rippleClock = frame.flowStep / 10;
+    } else {
+      const model = (frame.flowStep - this.rippleFlowStep) / 10;
+      const real = Math.max(0, frame.animTime - this.rippleAnimTime);
+      this.rippleClock += Math.min(model, real * RIPPLE_MAX_RATE);
+    }
+    this.rippleFlowStep = frame.flowStep;
+    this.rippleAnimTime = frame.animTime;
+    return this.rippleClock;
   }
 
   resetFoam(): void {
