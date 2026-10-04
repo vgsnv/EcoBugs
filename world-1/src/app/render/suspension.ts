@@ -25,8 +25,8 @@ const SUSPENSION_GAIN = 20;
 const SUSPENSION_LIFE: readonly [number, number] = [3, 7];
 const SUSPENSION_FADE = 0.25;
 /** Чёрточка, пикселей CSS: полуширина; полудлина у неподвижной и наибольшая. */
-const DASH_HALF_WIDTH = 0.9;
-const DASH_HALF_LENGTH: readonly [number, number] = [1, 4.5];
+const DASH_HALF_WIDTH = 0.6;
+const DASH_HALF_LENGTH: readonly [number, number] = [0.7, 3];
 /** Сколько экранных пикселей в секунду удлиняют чёрточку на пиксель. */
 const DASH_PER_SPEED = 0.05;
 
