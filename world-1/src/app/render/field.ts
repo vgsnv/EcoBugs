@@ -13,6 +13,7 @@ import { TRAIL_DASH_FS, TRAIL_FADE_FS, TRAIL_SECONDS } from './trails.ts';
 import type { StreamField, StreamView } from './water.ts';
 import { TERRAIN_GLSL, type Grid, type TerrainData } from './terrain.ts';
 import { TECTONICS_GLSL, type Tectonics } from './ground.ts';
+import { GLASS_TINT, TABLE_GLSL, TABLE_KINDS, type TableKind } from './table.ts';
 
 /** Свечения и блёстки: копятся за кадр и рисуются после полей, в порядке вызовов. */
 export interface GlowSink {
@@ -97,7 +98,10 @@ float insideDish(vec2 w) {
 
 const SHADOW_FS = `#version 300 es
 precision highp float;
+precision highp int;
 ${COMMON}
+${TABLE_GLSL}
+uniform vec3 u_glassTint;
 uniform float u_wall;
 uniform float u_dpr;
 out vec4 o;
@@ -121,20 +125,21 @@ float covered(vec2 px, float sigma, float drop) {
 }
 void main() {
   vec2 px = screenPx();
+  // Стол целиком, тень чашки на нём; под стеклом обода — стол сквозь стекло (обод поверх рисует Canvas).
+  vec3 table = tableAt(worldAt(px));
   float shape = covered(px, .35, 0.);
-  vec4 shadow = vec4(31., 53., 47., 255.) / 255.;
+  vec3 shadow = vec3(31., 53., 47.) / 255.;
   float a1 = .32 * covered(px, 6. * u_dpr, 5. * u_dpr);
   float a2 = .25 * covered(px, 1.5 * u_dpr, 2. * u_dpr);
-  vec4 c = vec4(shadow.rgb * a1, a1);
-  c = vec4(shadow.rgb * a2, a2) + c * (1. - a2);
-  vec4 fill = vec4(vec3(188., 206., 210.) / 255., 1.) * shape;
-  o = fill + c * (1. - shape);
+  vec3 c = mix(mix(table, shadow, a1), shadow, a2);
+  o = vec4(mix(c, table * u_glassTint, shape), 1.);
 }`;
 
 const FIELD_FS = `#version 300 es
 precision highp float;
 precision highp int;
 ${COMMON}
+${TABLE_GLSL}
 ${TERRAIN_GLSL}
 ${TECTONICS_GLSL}
 uniform sampler2D u_spotMask;    // R — пятна с резким краем, G — с мягким
@@ -303,6 +308,8 @@ export class FieldRenderer implements GlowSink {
   private quadVao!: WebGLVertexArrayObject;
   private commands: Command[] = [];
   private frame: Frame | null = null;
+  /** Стол под чашкой: коврик или дерево (render/table.ts). */
+  table: TableKind = 'mat';
   /** Ключи текстур, которые не меняются между кадрами. */
   private readonly mineralKey = {};
   private readonly streamKey = {};
@@ -420,8 +427,15 @@ export class FieldRenderer implements GlowSink {
     this.common(this.shadow, frame.world.dish);
     gl.uniform1f(this.shadow.uniform('u_wall'), wall);
     gl.uniform1f(this.shadow.uniform('u_dpr'), frame.camera.dpr);
+    this.tableUniforms(this.shadow);
     gl.bindVertexArray(this.quadVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  private tableUniforms(p: Program): void {
+    const gl = this.gl!;
+    gl.uniform1i(p.uniform('u_table'), TABLE_KINDS.indexOf(this.table));
+    gl.uniform3f(p.uniform('u_glassTint'), ...GLASS_TINT[this.table]);
   }
 
   private drawImage(texture: WebGLTexture, src: readonly number[], dst: readonly number[], alpha: number): void {
@@ -639,6 +653,7 @@ export class FieldRenderer implements GlowSink {
     gl.uniform4fv(p.uniform('u_ring'), tec.rings);
     gl.uniform1i(p.uniform('u_ringCount'), tec.ringCount);
     gl.uniform1ui(p.uniform('u_seed'), t.seed >>> 0);
+    this.tableUniforms(p);
     // Мелкие детали камня проявляются с приближением, как прежде у плиток местности.
     gl.uniform1f(p.uniform('u_detail'), smoothstep(0.5, 4, frame.camera.zoom));
     gl.uniform2f(p.uniform('u_grid'), m.cols * m.cell, m.rows * m.cell);

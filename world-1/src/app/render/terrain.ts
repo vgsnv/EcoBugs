@@ -239,6 +239,7 @@ uniform highp sampler2D u_cracks;
 uniform sampler2D u_blocked;    uniform vec3 u_blockedGrid;
 uniform uint u_seed;
 uniform float u_detail;
+uniform vec3 u_glassTint;       // оттенок стекла чашки
 
 /** Значение в центрах клеток, билинейно (за краем — как у крайней клетки). */
 float centered(sampler2D t, vec3 g, vec2 w) { return texture(t, w / g.z / g.xy).r; }
@@ -289,6 +290,9 @@ vec3 terrainAt(vec2 w) {
   float dry = smoothstep(1.35, 1.75, L);
   float stone = v + ${STONE_UNDERWATER_LIFT.toFixed(1)} * (1. - dry);
   vec3 c = vec3(stone + 6., stone + 3., stone);
+  // Голое стеклянное дно: грунта и залежей нет — сквозь стекло виден стол (render/table.ts).
+  float bare = 1. - smoothstep(.02, .12, L);
+  if (bare > 0.) c = mix(c, tableAt(w) * u_glassTint * 255., bare);
   // Залежи: тёмно-фиолетовый налёт на дне, по нему редкие светлые кристаллы.
   float lode = min(1., smoothstep(${DEPOSIT_FROM.toFixed(2)}, ${DEPOSIT_FULL.toFixed(2)}, centered(u_deposit, u_depositGrid, w)));
   if (lode > 0.) {
@@ -299,7 +303,7 @@ vec3 terrainAt(vec2 w) {
   }
   vec3 water = mix(${vec3(DEEP_WATER)}, ${vec3(SHALLOW_WATER)}, shallow);
   // Плотные залежи слегка просвечивают и в глубокой воде.
-  float cover = (1. - ${SHALLOWS_CLARITY.toFixed(3)} * shallow) * (1. - dry) * (1. - .24 * lode);
+  float cover = (1. - ${SHALLOWS_CLARITY.toFixed(3)} * shallow) * (1. - dry) * (1. - .24 * lode) * (1. - .5 * bare);
   c += (water - c) * cover;
   // Свежий грунт светлее и чище; темнеет до старого со временем. Виден сквозь
   // воду — тем лучше, чем мельче (намывается он на отмели и у берегов).

@@ -5,6 +5,7 @@
  * применяются кнопкой «Создать мир».
  */
 import { PROCESS_COLORS } from './render/processes.ts';
+import { TABLE_KINDS, TABLE_NAMES, type TableKind } from './render/table.ts';
 import { layoutPartitions, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type WorldParams } from '../core/index.ts';
 import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render/palette.ts';
 import { formatArea, formatDuration, formatLength, formatMultiplier, formatNumber, formatPercent, formatWorldAge } from './units.ts';
@@ -26,6 +27,7 @@ export interface PanelHandlers {
   onZoomFit(): void;
   onProcesses(enabled: boolean): void;
   onRulers(enabled: boolean): void;
+  onTable(kind: TableKind): void;
   onStreamView(view: 'water' | 'mineral'): void;
 }
 
@@ -411,7 +413,16 @@ export class Panel {
       rulers.classList.toggle('active', enabled);
       this.handlers.onRulers(enabled);
     });
-    // Что показывают штрихи течений на ускорении (×10 и выше): течение воды или перенос минерала.
+    // Стол под чашкой (вариант показа; начальный — из адреса, ?table=wood).
+    let table: TableKind = new URLSearchParams(location.search).get('table') === 'wood' ? 'wood' : 'mat';
+    const tableButton = el('button', { textContent: `Стол: ${TABLE_NAMES[table]}`, title: 'Сменить стол под чашкой: светлый коврик с сеткой или дерево' });
+    tableButton.addEventListener('click', () => {
+      table = TABLE_KINDS[(TABLE_KINDS.indexOf(table) + 1) % TABLE_KINDS.length];
+      tableButton.textContent = `Стол: ${TABLE_NAMES[table]}`;
+      this.handlers.onTable(table);
+    });
+    queueMicrotask(() => this.handlers.onTable(table));
+        // Что показывают штрихи течений на ускорении (×10 и выше): течение воды или перенос минерала.
     const stream = el('button', { textContent: 'Минерал', title: 'Штрихи течений на ускорении (×10 и выше): показать, куда переносится минерал, вместо течения воды', ariaPressed: 'false' });
     stream.addEventListener('click', () => {
       const mineral = stream.getAttribute('aria-pressed') !== 'true';
@@ -505,6 +516,7 @@ export class Panel {
       el('span', { className: 'process-control' }, processes, processLegend),
       stream,
       rulers,
+      tableButton,
     );
   }
 
