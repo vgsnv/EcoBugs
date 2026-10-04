@@ -167,7 +167,7 @@ export class WorldRenderer {
 
     // Нижний холст: поля.
     const light = this.light.update(frame);
-    const flowTime = this.water.clock(frame);
+    const flows = this.flows(frame);
     this.field.begin(frame, w.partitions.thickness);
     const mineral = this.mineral.field(w);
     this.field.fields({
@@ -178,11 +178,9 @@ export class WorldRenderer {
       foam: this.water.foam(w),
       ...light.strength,
       rippleMode: this.showProcesses ? 1 : 0,
-      ...this.streams(frame),
+      ...flows,
     });
     this.water.drawSparkles(frame, this.field);
-    const streams = this.showProcesses ? 0 : this.water.streakMix();
-    this.suspension.draw(frame, flowTime, this.showProcesses ? 0 : 1 - streams, this.field);
 
     // Верхний холст: объекты; свечения и отверстия воронок копятся для нижнего.
     ctx.setTransform(...camera.view());
@@ -206,17 +204,21 @@ export class WorldRenderer {
   }
 
   /**
-   * Вид течений на ускорении: доля штрихов (от ×3), поле для них — мгновенное
-   * или усреднённое (от ×300) течение воды либо перенос минерала (`streamView`).
+   * Течения: часы показа, поле течений (вода или перенос минерала, на
+   * больших скоростях — усреднённое), взвесь и длина её следов. При
+   * «Процессах» взвеси нет — течение показывают стрелки.
    */
-  private streams(frame: Frame): { streakMix: number; stream: StreamField | null; averageMix: number; view: StreamView } {
-    const streakMix = this.showProcesses ? 0 : this.water.streakMix();
+  private flows(frame: Frame): { trailMix: number; particles: Float32Array; stream: StreamField | null; averageMix: number; view: StreamView } {
+    const dt = this.water.clock(frame);
     const w = frame.world;
+    if (this.showProcesses) return { trailMix: 0, particles: new Float32Array(0), stream: null, averageMix: 0, view: this.streamView };
     // Мерило силы — сильное течение при текущем солнце, единиц мира в секунду модели.
     const ref = DRIFT_REFERENCE * 10 * Math.max(0.05, sunAt(w.light, w.step));
+    const stream = this.water.streamField(frame, this.streamView, ref);
     return {
-      streakMix,
-      stream: streakMix > 0 ? this.water.streamField(frame, this.streamView, ref) : null,
+      trailMix: this.water.trailMix(),
+      particles: this.suspension.update(frame, dt, stream, this.streamView),
+      stream,
       averageMix: this.water.averageMix(),
       view: this.streamView,
     };

@@ -7,12 +7,12 @@ import { DRIFT_REFERENCE, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, hash3
 import type { GlowSink } from './field.ts';
 import type { Frame } from './frame.ts';
 import { smoothstep } from './palette.ts';
-import { AVERAGE_FROM, AVERAGE_FULL, AVERAGE_SECONDS, STREAKS_FROM, STREAKS_FULL } from './streaks.ts';
+import { AVERAGE_FROM, AVERAGE_FULL, AVERAGE_SECONDS, TRAILS_FROM, TRAILS_FULL } from './trails.ts';
 
-/** Что показывают штрихи: течение воды или перенос минерала. */
+/** Что показывает взвесь: течение воды или перенос минерала. */
 export type StreamView = 'water' | 'mineral';
 
-/** Поле для штрихов на сетке минерала: по 4 числа на клетку — направление (x, y) и сила 0…1; номер версии. */
+/** Поле течений для взвеси на сетке минерала: по 4 числа на клетку — скорость (x, y, единиц мира в секунду модели) и сила 0…1; номер версии. */
 export interface StreamField {
   readonly data: Float32Array;
   readonly cols: number;
@@ -27,7 +27,7 @@ const SPARKLE_SPEED = 1.3;
 const SPARKLE_THRESHOLD = 0.965;
 /**
  * Взвесь движется по времени модели, но не быстрее RIPPLE_MAX_RATE ×
- * реального: на ускорении её сменяют штрихи.
+ * реального: на ускорении за частицами тянутся следы.
  */
 const RIPPLE_MAX_RATE = 3;
 /** Пересчёт маски пены не чаще, мс (её вид — фактура 60 единиц, ровная часть 0,35, сила 0,4 — в шейдере полей). */
@@ -82,13 +82,15 @@ export class WaterLayer {
   /**
    * Течение и перенос минерала по клеткам: мгновенные и скользящее среднее
    * за AVERAGE_SECONDS реального времени (по 4 числа: x, y воды, сила воды,
-   * сила переноса минерала); поле для штрихов и когда оно обновлено.
+   * сила переноса минерала); поле для взвеси и когда оно обновлено.
    */
   private now = new Float32Array(0);
   private mean = new Float32Array(0);
   private stream = new Float32Array(0);
   private streamVersion = 0;
   private streamTime: number | null = null;
+  /** Мерило переноса минерала: сильный перенос в этой чашке (95-й процентиль), сглаженный. */
+  private mineralRef = 0;
 
   resetFlow(): void {
     this.rippleFlowStep = null;
@@ -143,14 +145,14 @@ export class WaterLayer {
   }
 
 
-  /** Доля усреднённого течения в штрихах: 0 до ×AVERAGE_FROM, 1 от ×AVERAGE_FULL. */
+  /** Доля усреднённого течения для взвеси: 0 до ×AVERAGE_FROM, 1 от ×AVERAGE_FULL. */
   averageMix(): number {
     const x = Math.log(Math.max(1e-6, this.pace) / AVERAGE_FROM) / Math.log(AVERAGE_FULL / AVERAGE_FROM);
     return smoothstep(0, 1, x);
   }
 
   /**
-   * Поле для штрихов на сетке минерала. Вода — скорость течения (свет +
+   * Поле течений для взвеси на сетке минерала. Вода — скорость течения (свет +
    * вулканы и воронки); минерал — его поток: плотность × скорость × доля,
    * которую течение уносит (тоньше слой в вязком, как у зёрен). Сила — по
    * логарифму от мерила `ref`. С ростом скорости показа мгновенное поле
@@ -192,7 +194,18 @@ export class WaterLayer {
     const k = 1 - Math.exp(-dt / AVERAGE_SECONDS);
     const mean = this.mean;
     for (let i = 0; i < mean.length; i++) mean[i] += (now[i] - mean[i]) * k;
-    // Поле для штрихов: мгновенное или среднее; у минерала направление — по его потоку.
+    // Перенос минерала мерится своим мерилом: минерала в среде бывает мало, и мерило
+    // течения воды сделало бы его почти невидимым. Берётся сильный перенос в этой чашке.
+    if (view === 'mineral') {
+      const sample: number[] = [];
+      for (let c = 0; c < n; c += 7) if (mean[c * 4 + 3] > 0) sample.push(mean[c * 4 + 3]);
+      sample.sort((x, y) => x - y);
+      const high = sample.length ? sample[Math.floor(sample.length * 0.95)] : 0;
+      this.mineralRef = this.mineralRef > 0 ? this.mineralRef + (high - this.mineralRef) * k : high;
+    }
+    const mineralRef = Math.max(this.mineralRef, ref * 1e-4);
+    const strengthMineral = (x: number) => Math.min(1, Math.log(1 + 4 * x / mineralRef) / Math.log(9));
+    // Поле для взвеси: мгновенное или среднее; у минерала направление — по его потоку.
     const avg = this.averageMix();
     const out = this.stream;
     for (let c = 0; c < n; c++) {
@@ -202,16 +215,16 @@ export class WaterLayer {
       out[o + 1] = ny + (my - ny) * avg;
       const sn = view === 'water' ? now[o + 2] : now[o + 3];
       const sm = view === 'water' ? mean[o + 2] : mean[o + 3];
-      out[o + 2] = strength(sn + (sm - sn) * avg);
+      out[o + 2] = (view === 'water' ? strength : strengthMineral)(sn + (sm - sn) * avg);
       out[o + 3] = 0;
     }
     this.streamVersion++;
     return { data: out, cols: m.cols, rows: m.rows, step: m.cell, version: this.streamVersion };
   }
 
-  /** Доля штрихов вместо ряби: 0 до ×STREAKS_FROM, 1 от ×STREAKS_FULL, между — по логарифму скорости. */
-  streakMix(): number {
-    const x = Math.log(Math.max(1e-6, this.pace) / STREAKS_FROM) / Math.log(STREAKS_FULL / STREAKS_FROM);
+  /** Длина следов взвеси: 0 до ×TRAILS_FROM, 1 от ×TRAILS_FULL, между — по логарифму скорости показа. */
+  trailMix(): number {
+    const x = Math.log(Math.max(1e-6, this.pace) / TRAILS_FROM) / Math.log(TRAILS_FULL / TRAILS_FROM);
     return smoothstep(0, 1, x);
   }
 

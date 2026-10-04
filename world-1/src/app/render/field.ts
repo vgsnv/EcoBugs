@@ -9,7 +9,7 @@ import type { Frame } from './frame.ts';
 import { createProgram, Textures, type Program, type TextureSource } from './gl.ts';
 import { MINERAL_COLOR, MINERAL_DEEP, SHADE_COLOR, SUN_COLOR, smoothstep, type Rgb } from './palette.ts';
 import { SPOT_FS, SPOT_VS, type SpotShapes } from './light.ts';
-import { STREAK_FRESH, STREAK_FS, STREAK_PX } from './streaks.ts';
+import { TRAIL_DASH_FS, TRAIL_FADE_FS, TRAIL_SECONDS } from './trails.ts';
 import type { StreamField, StreamView } from './water.ts';
 import { TERRAIN_GLSL, type Grid, type TerrainData } from './terrain.ts';
 
@@ -19,12 +19,6 @@ export interface GlowSink {
   glow(color: Rgb, x: number, y: number, radius: number, alpha: number, clip: boolean): void;
   /** Четырёхлучевая звёздочка (блёстка), только в пятнах света и внутри чашки. */
   star(x: number, y: number, radius: number, alpha: number): void;
-  /**
-   * Чёрточки (взвесь): по SPRITE_FLOATS чисел на штуку — x, y, полуширина,
-   * непрозрачность; цвет (r, g, b), вид 2; направление (x, y), полудлина, 0.
-   * Яркость в тени ниже, в пятнах света выше.
-   */
-  dashes(data: Float32Array): void;
   /** Картинка поверх полей (обычное наложение), например отверстия воронок. */
   image(source: TextureSource, version: number, dx: number, dy: number, dw: number, dh: number, alpha: number): void;
 }
@@ -48,8 +42,9 @@ export interface FieldInputs {
   readonly penumbra: number;
   /** Рябь: 0 — по течениям, 1 — две равномерные ряби (при «Процессах»). */
   readonly rippleMode: 0 | 1;
-  /** Доля штрихов вместо ряби (0…1); поле для них; доля усреднённого течения; что показывают. */
-  readonly streakMix: number;
+  /** Длина следов взвеси (0 — без следов, 1 — полные); частицы взвеси (SPRITE_FLOATS чисел на штуку); поле течений; доля усреднённого течения; что показывают. */
+  readonly trailMix: number;
+  readonly particles: Float32Array;
   readonly stream: StreamField | null;
   readonly averageMix: number;
   readonly view: StreamView;
@@ -141,13 +136,12 @@ uniform sampler2D u_spotMask;    // R — пятна с резким краем,
 uniform sampler2D u_mineral;
 uniform sampler2D u_ripple;
 uniform sampler2D u_foam;
-uniform sampler2D u_streaks;      // R — штрихи, G — сила течения
-uniform float u_streakMix;        // 0 — рябь, 1 — штрихи
-uniform sampler2D u_stream;       // поле штрихов: направление, сила
+uniform sampler2D u_trails;       // R — взвесь и её следы
+uniform float u_trailMix;         // длина следов 0…1
+uniform sampler2D u_stream;       // поле течений для взвеси: направление, сила
 uniform vec3 u_streamGrid;
 uniform float u_averageMix;       // доля усреднённого течения
-uniform vec3 u_streakColor;
-uniform float u_streakFloor;      // яркость штрихов при нулевой силе
+uniform vec3 u_trailColor;
 uniform vec2 u_grid;        // протяжённость сетки минерала в мире
 uniform float u_lit;
 uniform float u_warmth;
@@ -187,17 +181,13 @@ void main() {
   float water = waterAt(w);
   float spots = sp.x * (1. - held);
   if (u_rippleMode == 0) {
-    // Течения на небольших скоростях показывает взвесь (частицы, suspension.ts); здесь — штрихи на ускорении.
-    // Штрихи течений: светлые, ярче и плотнее на сильном течении; не зависят от света.
-    if (u_streakMix > 0.) {
-      vec2 st = texture(u_streaks, gl_FragCoord.xy / u_size).rg;
-      float b = smoothstep(.26, .46, st.r);
-      c = screenOver(c, u_streakColor * b * (u_streakFloor + (1. - u_streakFloor) * st.g) * water * u_streakMix * .45);
-      // Устойчивая картина: где течение (перенос) сильное в среднем — мягкая подсветка.
-      if (u_averageMix > 0.) {
-        float strong = texture(u_stream, w / u_streamGrid.z / u_streamGrid.xy).z;
-        c = screenOver(c, u_streakColor * strong * strong * water * u_averageMix * u_streakMix * .14);
-      }
+    // Взвесь и её следы (suspension.ts, trails.ts): светлые, у минерала — сиреневые; в пятнах света ярче.
+    float tr = texture(u_trails, gl_FragCoord.xy / u_size).r;
+    c = screenOver(c, u_trailColor * tr * (.55 + .45 * sp.y) * water * .9);
+    // Устойчивая картина: где течение (перенос) сильное в среднем — мягкая подсветка.
+    if (u_averageMix > 0.) {
+      float strong = texture(u_stream, w / u_streamGrid.z / u_streamGrid.xy).z;
+      c = screenOver(c, u_trailColor * strong * strong * water * u_averageMix * u_trailMix * .14);
     }
   } else {
     vec3 tone = vec3(1., 250. / 255., 230. / 255.);
@@ -259,19 +249,12 @@ in vec2 v_local;
 in vec4 v_color;
 in float v_alpha;
 in float v_radiusPx;
-in vec2 v_dash;
 out vec4 o;
 void main() {
   vec2 px = screenPx();
   vec2 w = worldAt(px);
   float a;
-  if (v_color.a > 1.5) {
-    // Чёрточка: капсула вдоль течения, край сглажен в пиксель; к голове (вниз по течению) ярче.
-    vec2 q = v_local * v_dash;
-    float d = length(vec2(max(abs(q.x) - (v_dash.x - v_dash.y), 0.), q.y)) - v_dash.y;
-    a = clamp(.5 - d * u_cam.x, 0., 1.) * mix(.35, 1., v_local.x * .5 + .5);
-    a *= .55 + .45 * texture(u_spotMask, gl_FragCoord.xy / u_size).g;
-  } else if (v_color.a < .5) {
+  if (v_color.a < .5) {
     // Свечение: непрозрачность 1 → 0,55 к 0,4 радиуса → 0 у края.
     float r = length(v_local);
     if (r >= 1.) discard;
@@ -320,13 +303,14 @@ export class FieldRenderer implements GlowSink {
   private readonly cracksKey = {};
   private readonly blockedKey = {};
   private terrainWorld: object | null = null;
-  /** Штрихи течений: программа, два холста по очереди, какой из них текущий, время и камера прошлого шага. */
-  private streakProgram!: Program;
-  private streakBuffers: { framebuffer: WebGLFramebuffer; texture: WebGLTexture }[] = [];
-  private streakSize: [number, number] = [0, 0];
-  private streakFront = 0;
-  private streakTime: number | null = null;
-  private streakCamera: { zoom: number; cx: number; cy: number; width: number; height: number } | null = null;
+  /** Следы взвеси: программы, два холста по очереди, какой из них текущий, время и камера прошлого шага. */
+  private trailFade!: Program;
+  private trailDash!: Program;
+  private trailBuffers: { framebuffer: WebGLFramebuffer; texture: WebGLTexture }[] = [];
+  private trailSize: [number, number] = [0, 0];
+  private trailFront = 0;
+  private trailTime: number | null = null;
+  private trailCamera: { zoom: number; cx: number; cy: number; width: number; height: number } | null = null;
   private readonly foamKey = {};
   private mineralTexture: WebGLTexture | null = null;
   /** Маска пятен (вне экрана) и данные эллипсов для неё. */
@@ -383,10 +367,11 @@ export class FieldRenderer implements GlowSink {
     gl.bindVertexArray(null);
     this.mineralTexture = null;
     this.spotProgram = createProgram(gl, SPOT_VS, SPOT_FS);
-    this.streakProgram = createProgram(gl, FULL_VS, STREAK_FS);
-    this.streakBuffers = [];
-    this.streakSize = [0, 0];
-    this.streakTime = null;
+    this.trailFade = createProgram(gl, FULL_VS, TRAIL_FADE_FS);
+    this.trailDash = createProgram(gl, SPRITE_VS, TRAIL_DASH_FS);
+    this.trailBuffers = [];
+    this.trailSize = [0, 0];
+    this.trailTime = null;
     this.spotBuffer = gl.createBuffer()!;
     this.spotVao = gl.createVertexArray()!;
     gl.bindVertexArray(this.spotVao);
@@ -510,20 +495,20 @@ export class FieldRenderer implements GlowSink {
     this.gl!.uniform3f(p.uniform(`${name}Grid`), g.cols, g.rows, g.step);
   }
 
-  /** Поле штрихов (сетка минерала, по 4 числа на клетку). */
+  /** Поле течений для взвеси (сетка минерала, по 4 числа на клетку). */
   private bindStream(p: Program, unit: number, stream: StreamField): void {
     this.bind(p, unit, 'u_stream', this.textures.get(this.streamKey, { data: stream.data, width: stream.cols, height: stream.rows }, stream.version, { format: 'rgba16f' }));
     this.gl!.uniform3f(p.uniform('u_streamGrid'), stream.cols, stream.rows, stream.step);
   }
 
-  /** Холсты штрихов (прошлый и новый кадр) в пикселях CSS; создаются под размер. */
-  private streakTargets(): { framebuffer: WebGLFramebuffer; texture: WebGLTexture }[] {
+  /** Холсты следов (прошлый и новый кадр) в пикселях CSS; создаются под размер. */
+  private trailTargets(): { framebuffer: WebGLFramebuffer; texture: WebGLTexture }[] {
     const gl = this.gl!;
     const width = Math.max(1, Math.round(this.canvas.width / this.frame!.camera.dpr));
     const height = Math.max(1, Math.round(this.canvas.height / this.frame!.camera.dpr));
-    if (this.streakSize[0] !== width || this.streakSize[1] !== height) {
-      for (const t of this.streakBuffers) { gl.deleteFramebuffer(t.framebuffer); gl.deleteTexture(t.texture); }
-      this.streakBuffers = [0, 1].map(() => {
+    if (this.trailSize[0] !== width || this.trailSize[1] !== height) {
+      for (const t of this.trailBuffers) { gl.deleteFramebuffer(t.framebuffer); gl.deleteTexture(t.texture); }
+      this.trailBuffers = [0, 1].map(() => {
         const texture = gl.createTexture()!;
         gl.bindTexture(gl.TEXTURE_2D, texture);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
@@ -531,59 +516,72 @@ export class FieldRenderer implements GlowSink {
         const framebuffer = gl.createFramebuffer()!;
         gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-        gl.clearColor(0.5, 0, 0, 1);
+        gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
         return { framebuffer, texture };
       });
-      this.streakSize = [width, height];
-      this.streakCamera = null;
+      this.trailSize = [width, height];
+      this.trailCamera = null;
     }
-    return this.streakBuffers;
+    return this.trailBuffers;
   }
 
   /**
-   * Шаг штрихов (streaks.ts): новый кадр — прошлый, сдвинутый вдоль течения,
-   * плюс свежий шум. На паузе не меняется. Возвращает текстуру для полей.
+   * Шаг следов (trails.ts): прошлый кадр следов, пересчитанный под нынешнюю
+   * камеру, гаснет (на паузе — нет), и поверх рисуются частицы взвеси.
    */
-  private drawStreaks(input: FieldInputs): WebGLTexture {
+  private drawTrails(input: FieldInputs): WebGLTexture {
     const gl = this.gl!;
     const frame = this.frame!;
     const { camera } = frame;
-    const buffers = this.streakTargets();
-    const frames = this.streakTime === null ? 1 : Math.min(4, Math.max(0, (frame.animTime - this.streakTime) * 60));
-    if (frames > 0) {
-      const [prev, next] = [buffers[this.streakFront], buffers[1 - this.streakFront]];
-      const p = this.streakProgram;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, next.framebuffer);
-      gl.viewport(0, 0, this.streakSize[0], this.streakSize[1]);
-      gl.disable(gl.BLEND);
-      gl.useProgram(p.program);
-      const cam = this.streakCamera ?? { zoom: camera.zoom, cx: camera.cx, cy: camera.cy, width: this.canvas.width, height: this.canvas.height };
-      gl.uniform2f(p.uniform('u_size'), this.streakSize[0], this.streakSize[1]);
-      gl.uniform2f(p.uniform('u_device'), this.canvas.width, this.canvas.height);
-      gl.uniform1f(p.uniform('u_scale'), this.streakSize[0] / this.canvas.width);
-      gl.uniform3f(p.uniform('u_cam'), camera.zoom, camera.cx, camera.cy);
-      gl.uniform3f(p.uniform('u_prevCam'), cam.zoom, cam.cx, cam.cy);
-      gl.uniform2f(p.uniform('u_prevDevice'), cam.width, cam.height);
-      gl.uniform1f(p.uniform('u_frames'), frames);
-      gl.uniform1f(p.uniform('u_time'), frame.animTime);
-      // Доля свежего шума за прошедшие кадры — как за столько же кадров по одному.
-      gl.uniform1f(p.uniform('u_fresh'), 1 - (1 - STREAK_FRESH) ** frames);
-      gl.uniform2f(p.uniform('u_px'), STREAK_PX[0], STREAK_PX[1]);
-      this.bind(p, 0, 'u_prev', prev.texture);
-      this.bindStream(p, 5, input.stream!);
-      this.bindGrid(p, 7, 'u_level', this.levelKey, input.terrain.level, 'r16f');
-      this.bindGrid(p, 12, 'u_blocked', this.blockedKey, input.terrain.blocked, 'r8');
-      gl.bindVertexArray(this.quadVao);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    const buffers = this.trailTargets();
+    const real = this.trailTime === null ? 0 : Math.max(0, Math.min(0.25, frame.animTime - this.trailTime));
+    const seconds = TRAIL_SECONDS * input.trailMix;
+    // Сколько остаётся от прошлого кадра: на паузе всё, без следов — ничего.
+    const keep = real === 0 ? (this.trailTime === null ? 0 : 1) : seconds > 0.01 ? Math.exp(-real / seconds) : 0;
+    const [prev, next] = [buffers[this.trailFront], buffers[1 - this.trailFront]];
+    const scale = this.trailSize[0] / this.canvas.width;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, next.framebuffer);
+    gl.viewport(0, 0, this.trailSize[0], this.trailSize[1]);
+    gl.disable(gl.BLEND);
+    const f = this.trailFade;
+    gl.useProgram(f.program);
+    const cam = this.trailCamera ?? { zoom: camera.zoom, cx: camera.cx, cy: camera.cy, width: this.canvas.width, height: this.canvas.height };
+    gl.uniform2f(f.uniform('u_size'), this.trailSize[0], this.trailSize[1]);
+    gl.uniform2f(f.uniform('u_device'), this.canvas.width, this.canvas.height);
+    gl.uniform1f(f.uniform('u_scale'), scale);
+    gl.uniform3f(f.uniform('u_cam'), camera.zoom, camera.cx, camera.cy);
+    gl.uniform3f(f.uniform('u_prevCam'), cam.zoom, cam.cx, cam.cy);
+    gl.uniform2f(f.uniform('u_prevDevice'), cam.width, cam.height);
+    gl.uniform1f(f.uniform('u_keep'), keep);
+    this.bind(f, 0, 'u_prev', prev.texture);
+    gl.bindVertexArray(this.quadVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // Частицы — поверх, наложение «максимум» (голова не ярче себя самой).
+    const count = input.particles.length / SPRITE_FLOATS;
+    if (count > 0) {
+      const d = this.trailDash;
+      gl.useProgram(d.program);
+      const view = camera.view();
+      gl.uniform3f(d.uniform('u_view'), view[0], view[4], view[5]);
+      gl.uniform2f(d.uniform('u_size'), this.canvas.width, this.canvas.height);
+      gl.uniform1f(d.uniform('u_zoom'), camera.zoom * scale);
       gl.enable(gl.BLEND);
-      this.streakFront = 1 - this.streakFront;
-      this.streakTime = frame.animTime;
-      this.streakCamera = { zoom: camera.zoom, cx: camera.cx, cy: camera.cy, width: this.canvas.width, height: this.canvas.height };
+      gl.blendEquation(gl.MAX);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.spriteBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, input.particles, gl.STREAM_DRAW);
+      gl.bindVertexArray(this.spriteVao);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+      gl.blendEquation(gl.FUNC_ADD);
     }
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    this.trailFront = 1 - this.trailFront;
+    this.trailTime = frame.animTime;
+    this.trailCamera = { zoom: camera.zoom, cx: camera.cx, cy: camera.cy, width: this.canvas.width, height: this.canvas.height };
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    return buffers[this.streakFront].texture;
+    return buffers[this.trailFront].texture;
   }
 
   /** Поля поверх местности: свет, вода, минерал — в основной холст. */
@@ -606,13 +604,12 @@ export class FieldRenderer implements GlowSink {
     this.mineralTexture = this.textures.get(this.mineralKey, input.mineral.image, input.mineral.version);
     const ripple = this.textures.get(input.ripple, input.ripple, 0, { repeat: true });
     const foam = this.textures.get(this.foamKey, input.foam.canvas, input.foam.version);
-    const streaks = input.streakMix > 0 && input.stream ? this.drawStreaks(input) : null;
-    if (!streaks) this.streakTime = null;
+    const trails = this.drawTrails(input);
     gl.useProgram(p.program);
     this.common(p, world.dish);
     this.bind(p, 1, 'u_spotMask', this.spotMask!.texture);
     this.bind(p, 2, 'u_mineral', this.mineralTexture);
-    this.bind(p, 3, 'u_streaks', streaks);
+    this.bind(p, 3, 'u_trails', trails);
     this.bind(p, 4, 'u_ripple', ripple);
     if (input.stream) this.bindStream(p, 13, input.stream);
     this.bind(p, 6, 'u_foam', foam);
@@ -631,12 +628,11 @@ export class FieldRenderer implements GlowSink {
     gl.uniform1f(p.uniform('u_glow'), input.glow);
     gl.uniform1f(p.uniform('u_glare'), input.glare);
     gl.uniform1i(p.uniform('u_rippleMode'), input.rippleMode);
-    gl.uniform1f(p.uniform('u_streakMix'), streaks ? input.streakMix : 0);
+    gl.uniform1f(p.uniform('u_trailMix'), input.trailMix);
     gl.uniform1f(p.uniform('u_averageMix'), input.averageMix);
-    // Вода — светлые штрихи, видны и на слабом течении; минерал — его цветом, только где переносится.
+    // Вода — светлая взвесь; минерал — его цветом.
     const tone = input.view === 'water' ? [0.86, 0.95, 0.97] : [0.9, 0.72, 1];
-    gl.uniform3f(p.uniform('u_streakColor'), tone[0], tone[1], tone[2]);
-    gl.uniform1f(p.uniform('u_streakFloor'), input.view === 'water' ? 0.25 : 0);
+    gl.uniform3f(p.uniform('u_trailColor'), tone[0], tone[1], tone[2]);
     gl.uniform1f(p.uniform('u_time'), frame.animTime);
     const unit = (c: Rgb) => [c[0] / 255, c[1] / 255, c[2] / 255] as const;
     gl.uniform3f(p.uniform('u_shade'), ...unit(SHADE_COLOR));
@@ -653,10 +649,6 @@ export class FieldRenderer implements GlowSink {
 
   star(x: number, y: number, radius: number, alpha: number): void {
     this.sprite(true, [x, y, radius, alpha, 245 / 255, 230 / 255, 1, 1, 1, 0, radius, 0]);
-  }
-
-  dashes(data: Float32Array): void {
-    if (data.length) this.commands.push({ kind: 'sprites', clip: true, data });
   }
 
   private sprite(clip: boolean, values: number[]): void {
