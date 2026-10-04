@@ -61,6 +61,8 @@ export interface TerrainFile {
   nextMoveStep: number;
   nextQuake: number;
   nextQuakeStep: number;
+  /** Долг подложки (грунт), см. terrain.ts. */
+  debt: number;
   /** Идущие подвижки и толчки: номер, толчок ли (0/1), шаг начала. */
   active: [number, number, number][];
 }
@@ -114,6 +116,7 @@ export function worldToFile(world: World, savedAt?: Date): WorldFile {
       nextMoveStep: world.terrain.nextMoveStep,
       nextQuake: world.terrain.nextQuake,
       nextQuakeStep: world.terrain.nextQuakeStep,
+      debt: world.terrain.debt,
       active: world.terrain.active.map((m) => [m.n, m.quake ? 1 : 0, m.start]),
     },
     checksum: worldHash(world).toString(16).padStart(8, '0'),
@@ -269,6 +272,7 @@ function restoreTerrain(world: World, raw: unknown): string[] {
   const t = world.terrain;
   const ints = [raw.nextMove, raw.nextMoveStep, raw.nextQuake, raw.nextQuakeStep];
   if (!ints.every((x) => Number.isSafeInteger(x) && (x as number) >= 0)) return ['Местность: расписание подвижек повреждено'];
+  if (typeof raw.debt !== 'number' || !(raw.debt >= 0)) return ['Местность: долг подложки повреждён'];
   if (typeof raw.ground !== 'string' || typeof raw.deposits !== 'string' || typeof raw.applied !== 'string' || !Array.isArray(raw.active)) return ['Местность: нет грунта, залежей или снимка'];
   let ground: Uint8Array, deposits: Uint8Array, applied: Uint8Array;
   try {
@@ -287,6 +291,7 @@ function restoreTerrain(world: World, raw: unknown): string[] {
   t.ground = new Float64Array(ground.buffer, ground.byteOffset, t.ground.length).slice();
   t.deposits = new Float64Array(deposits.buffer, deposits.byteOffset, t.deposits.length).slice();
   [t.nextMove, t.nextMoveStep, t.nextQuake, t.nextQuakeStep] = ints as number[];
+  t.debt = raw.debt;
   t.active = active;
   applyTerrain(world, new Float32Array(applied.buffer, applied.byteOffset, t.applied.length).slice());
   return [];

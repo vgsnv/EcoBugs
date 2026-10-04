@@ -209,6 +209,8 @@ export const MOVE_BAND_WIDTH: readonly [number, number] = [30, 80];
 export const QUAKE_DURATION: readonly [number, number] = [200, 600];
 export const QUAKE_AMPLITUDE: readonly [number, number] = [0.6, 1.2];
 export const QUAKE_RADIUS: readonly [number, number] = [40, 120];
+/** Какую долю своего грунта подъём отдаёт на погашение долга подложки (см. terrain.ts). */
+export const TECTONIC_DEBT_SHARE = 0.5;
 
 /**
  * Оседание там, куда уходит поток: доля минерала, оседающая за шаг на

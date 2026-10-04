@@ -143,7 +143,7 @@ export function worldHash(world: World, legacyV18 = false): number {
     ...world.terrain.ground,
     ...world.terrain.deposits,
     ...world.terrain.applied,
-    world.terrain.nextMove, world.terrain.nextMoveStep, world.terrain.nextQuake, world.terrain.nextQuakeStep,
+    world.terrain.nextMove, world.terrain.nextMoveStep, world.terrain.nextQuake, world.terrain.nextQuakeStep, world.terrain.debt,
     ...world.terrain.active.flatMap((m) => [m.n, m.quake ? 1 : 0, m.start]),
     world.mineral.threshold, world.mineral.eruptions, world.mineral.genesis ? 1 : 0,
     world.mineral.births, world.mineral.volcanoes.length,

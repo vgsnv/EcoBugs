@@ -5,7 +5,9 @@ import { dishOf } from './dish.ts';
  * количество в чашке меняет только тектоника — подвижки (участки медленно
  * поднимаются или опускаются) и толчки (короткие резкие подвижки). Грунт для
  * подъёма берётся из подложки под чашкой, при опускании уходит в неё; ниже
- * стеклянного дна (грунт 0) опускаться нечему.
+ * стеклянного дна (грунт 0) опускаться нечему. Чего опускание не смогло
+ * забрать (дно уже голое), подложка «задолжала» — это вычитается из
+ * следующих подъёмов, поэтому грунта в среднем столько же, сколько было.
  *
  * Грунт живёт на сетке минерала и меняется вместе с минералом (раз в
  * MINERAL_PERIOD шагов). Карта вязкости, течения и картинка пересобираются
@@ -15,6 +17,7 @@ import { dishOf } from './dish.ts';
 import {
   GROUND_FLOOR_LEVEL, GROUND_PER_LEVEL, MOVE_AMPLITUDE, MOVE_BAND_LENGTH, MOVE_BAND_WIDTH,
   MOVE_DURATION, MOVE_GAP, MOVE_SPOT_RADIUS, QUAKE_AMPLITUDE, QUAKE_DURATION, QUAKE_RADIUS,
+  TECTONIC_DEBT_SHARE,
 } from './constants.ts';
 import type { WorldParams } from './params.ts';
 import { deriveSeed, hash3 } from './prng.ts';
@@ -52,6 +55,8 @@ export interface TerrainState {
   nextMoveStep: number;
   nextQuake: number;
   nextQuakeStep: number;
+  /** Долг подложки: грунт, который опускания не смогли забрать; гасится подъёмами. */
+  debt: number;
 }
 
 const rnd = (seed: number, n: number, k: number) => hash3(seed, n, k) / 4294967296;
@@ -155,7 +160,7 @@ export function createTerrain(params: WorldParams, viscosity: ViscosityMap, cols
     ground, deposits: new Float64Array(ground.length), applied, active: [],
     // Первая подвижка — раньше обычного промежутка: мир не стоит долго без тектоники.
     nextMove: 0, nextMoveStep: Math.round(gap(params.seed, false, 0, q) * 0.3),
-    nextQuake: 0, nextQuakeStep: gap(params.seed, true, 0, q),
+    nextQuake: 0, nextQuakeStep: gap(params.seed, true, 0, q), debt: 0,
   };
 }
 
@@ -184,16 +189,24 @@ export function moveGround(
   const scale = params.terrainSpeed * GROUND_PER_LEVEL * cell * cell;
   let drowned = 0;
   for (const m of t.active) {
-    const step = (progress(m, to) - progress(m, from)) * m.amp * scale;
+    let step = (progress(m, to) - progress(m, from)) * m.amp * scale;
     if (step === 0) continue;
     const f = footprint(m, cols, rows, cell, blocked);
+    if (step > 0) {
+      // Подъём сначала гасит долг подложки — не больше половины своего грунта.
+      const pay = Math.min(t.debt, step * f.total * TECTONIC_DEBT_SHARE);
+      t.debt -= pay;
+      step -= pay / f.total;
+      for (let n = 0; n < f.cells.length; n++) t.ground[f.cells[n]] += step * f.weights[n];
+      continue;
+    }
     for (let n = 0; n < f.cells.length; n++) {
       const k = f.cells[n];
-      const change = step * f.weights[n];
-      if (change > 0) { t.ground[k] += change; continue; }
+      const change = -step * f.weights[n];
       const before = t.ground[k];
-      const take = Math.min(before, -change);
+      const take = Math.min(before, change);
       t.ground[k] -= take;
+      t.debt += change - take;
       if (before > 0 && t.deposits[k] > 0) {
         const drown = t.deposits[k] * (take / before);
         t.deposits[k] -= drown;

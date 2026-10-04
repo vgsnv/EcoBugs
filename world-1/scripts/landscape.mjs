@@ -54,7 +54,7 @@ for (const seed of seeds) {
   const mineral = () => m.depths + mineralInMedium(m) + mineralInDeposits(w.terrain) + mineralInEruptions(m);
   const mineral0 = mineral(), ground0 = groundTotal(w.terrain);
   console.log(`\nсид ${seed}:`);
-  console.log('    шаг   вода  отмель  суша  стекло  островов   грунт   минерал (погрешность)');
+  console.log('    шаг   вода  отмель  суша  стекло  островов   грунт   долг  уровень p99/макс  минерал (погрешность)');
   for (let t = 0; t <= steps; t += every) {
     const start = performance.now();
     while (w.step < t) stepWorld(w);
@@ -68,8 +68,10 @@ for (const seed of seeds) {
       if (L < 0.02) glass++;
       if (L < 0.8) water++; else if (L < 1.5) shallow++; else land++;
     }
+    const sorted = Array.from(level).filter((_, k) => !m.blocked[k]).sort((a, b) => a - b);
+    const top = `${sorted[Math.floor(sorted.length * 0.99)].toFixed(2)}/${sorted[sorted.length - 1].toFixed(2)}`;
     const pct = (x) => `${(100 * x / free).toFixed(0).padStart(4)}%`;
-    console.log(`${String(t / 1000).padStart(6)}k ${pct(water)} ${pct(shallow)} ${pct(land)} ${pct(glass)}  ${String(islands(level, m.blocked, m.cols, m.rows)).padStart(6)}  ${(100 * groundTotal(w.terrain) / ground0).toFixed(1).padStart(6)}%  ${((mineral() - mineral0) / mineral0).toExponential(1)}`);
+    console.log(`${String(t / 1000).padStart(6)}k ${pct(water)} ${pct(shallow)} ${pct(land)} ${pct(glass)}  ${String(islands(level, m.blocked, m.cols, m.rows)).padStart(6)}  ${(100 * groundTotal(w.terrain) / ground0).toFixed(1).padStart(6)}% ${(100 * w.terrain.debt / ground0).toFixed(1).padStart(5)}%  ${top.padStart(11)}  ${((mineral() - mineral0) / mineral0).toExponential(1)}`);
   }
 }
 const updates = seeds.length * steps / MINERAL_PERIOD;
