@@ -16,7 +16,7 @@
 export const TRAILS_FROM = 3;
 export const TRAILS_FULL = 10;
 /** Время угасания следа (до e⁻¹), секунды реального времени, при полной длине. */
-export const TRAIL_SECONDS = 0.45;
+export const TRAIL_SECONDS = 1.2;
 export const AVERAGE_FROM = 300;
 export const AVERAGE_FULL = 1000;
 export const AVERAGE_SECONDS = 0.6;
@@ -31,6 +31,7 @@ uniform vec3 u_cam;         // масштаб (пикселей устройст
 uniform vec3 u_prevCam;     // то же в прошлом кадре
 uniform vec2 u_prevDevice;
 uniform float u_keep;       // сколько остаётся от прошлого кадра
+uniform float u_floor;      // и сколько ещё вычитается: в 8 битах слабый след иначе не гаснет (округление)
 uniform sampler2D u_prev;
 out vec4 o;
 void main() {
@@ -39,7 +40,7 @@ void main() {
   vec2 pq = ((w - u_prevCam.yz) * u_prevCam.x + u_prevDevice * .5) * u_scale;
   vec2 uv = vec2(pq.x, u_size.y - pq.y) / u_size;
   vec4 old = (uv.x < 0. || uv.y < 0. || uv.x > 1. || uv.y > 1.) ? vec4(0.) : texture(u_prev, uv);
-  o = old * u_keep;
+  o = max(old * u_keep - u_floor, 0.);
 }`;
 
 /** Частица в картинку следов: капсула вдоль течения, к голове ярче; яркость — в R (наложение «максимум»). */

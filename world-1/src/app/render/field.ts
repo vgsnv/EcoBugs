@@ -554,6 +554,7 @@ export class FieldRenderer implements GlowSink {
     gl.uniform3f(f.uniform('u_prevCam'), cam.zoom, cam.cx, cam.cy);
     gl.uniform2f(f.uniform('u_prevDevice'), cam.width, cam.height);
     gl.uniform1f(f.uniform('u_keep'), keep);
+    gl.uniform1f(f.uniform('u_floor'), keep < 1 ? 1.5 / 255 : 0);
     this.bind(f, 0, 'u_prev', prev.texture);
     gl.bindVertexArray(this.quadVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
