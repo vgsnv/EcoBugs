@@ -6,3 +6,5 @@
 /* Same glass gradient and light/dark edges as the archived cup. */
 .stage .cup-rim{position:absolute;pointer-events:none;overflow:visible;filter:drop-shadow(0 3px 5px #1e375a60)}
 #world[data-fitted="true"][data-shape="circle"]{border-radius:50%}
+
+.flow-control{display:flex;align-items:center;gap:6px;font-size:11px;padding:0 8px;color:#425465}.flow-control select{max-width:145px;padding:6px;border:1px solid #d5dde3;border-radius:6px;background:#f9fbfc;color:#344a59;font:inherit}.flow-note{position:absolute;bottom:10px;left:12px;pointer-events:none;padding:5px 8px;border-radius:5px;background:#eef5f3dd;color:#345562;font-size:10px;box-shadow:0 1px 5px #12304220}.flow-note[hidden]{display:none}

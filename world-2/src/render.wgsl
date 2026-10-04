@@ -3,7 +3,8 @@ struct View { cols: u32, rows: u32, cell: f32, time: f32, arrows: u32, burstAndS
 struct Surface{geometry:vec4f,climate:vec4f}
 @group(0) @binding(1) var<storage, read> surface: array<Surface>;
 @group(0) @binding(2) var<storage, read> state: array<vec4u>;
-@group(0) @binding(3) var<storage, read> flow: array<vec2f>;
+struct FlowDisplay {field:vec4f,activity:vec4f}
+@group(0) @binding(3) var<storage, read> flow: array<FlowDisplay>;
 struct LightSettings { cols:u32,rows:u32,regions:u32,count:u32,time:f32,drift:f32,sun:f32,background:f32,rhythm:f32,contrast:f32,entrainment:f32,pad:f32,world:vec4f,offset:vec4f,cycle:vec4f,spatial:vec4f }
 struct Ellipse {a:vec4f,b:vec4f,c:vec4f}
 struct Blob {a:vec4f,b:vec4f,c:vec4f,d:vec4f,e:vec4f,f:vec4f,ellipse:Ellipse,next:u32,pad0:u32,pad1:u32,pad2:u32}
@@ -18,6 +19,7 @@ struct Marker { state:vec4f,animation:vec4f }
 @group(0) @binding(11) var<uniform> lightSettings:LightSettings;
 struct GlassGeometry { info:vec4f, segments:array<vec4f,64> }
 @group(0) @binding(12) var<uniform> glassGeometry:GlassGeometry;
+@group(0) @binding(13) var<uniform> processView:vec4f;
 struct Varying { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertex(@builtin(vertex_index) i: u32) -> Varying {
   let p = array<vec2f, 3>(vec2f(-1., -1.), vec2f(3., -1.), vec2f(-1., 3.))[i];
@@ -153,6 +155,37 @@ fn wallCoverage(pos:vec2f,footprint:vec2f)->f32{
   let weight=select(left,vec2f(1.),lo==hi);
   return mix(mix(blockedAt(hi),blockedAt(vec2i(lo.x,hi.y)),weight.x),mix(blockedAt(vec2i(hi.x,lo.y)),blockedAt(lo),weight.x),weight.y);
 }
+fn flowAt(k:u32,x:i32,y:i32)->vec4f{return flow[nearby(k,x,y)].field;}
+// A sparse, screen-resolved diagram of the field. Its motion is illustrative;
+// it never advects matter or changes the velocity used by the physical model.
+fn flowGlyph(mm:vec2f,pixel:f32,cssMm:f32)->f32{
+ let spacing=max(view.cell*2.,pow(2.,floor(log2(max(1.,cssMm*44.)))));
+ let tile=floor(mm/spacing);let centre=(tile+.5)*spacing;
+ let cell=vec2i(centre/view.cell);
+ if(any(cell<vec2i(0))||cell.x>=i32(view.cols)||cell.y>=i32(view.rows)){return 0.;}
+ let k=u32(cell.y)*view.cols+u32(cell.x);let field=flow[k].field;
+ if(surface[k].geometry.z>.5||field.z*view.cell<.025||field.w<.2){return 0.;}
+ let axis=field.xy/max(length(field.xy),.000001);let d=mm-centre;
+ let along=dot(d,axis);let across=dot(d,vec2f(-axis.y,axis.x));
+ let half=spacing*.33;let width=max(pixel*.65,cssMm*.65);
+ let body=1.-smoothstep(width,width+pixel,abs(across));
+ let extent=1.-smoothstep(half-pixel,half,abs(along));
+ let tip=half*.72;
+ let headDistance=abs(abs(across)-(tip-along)*.5);
+ let head=(1.-smoothstep(width,width+pixel,headDistance))*smoothstep(tip-half*.3,tip-half*.3+pixel,along)*(1.-smoothstep(tip-pixel,tip,along));
+ let ink=max(body*extent,head);
+ if(ink<.001){return 0.;}
+ // Do not draw a vector through a sealed wall, even if its anchor is free.
+ for(var i=1;i<=8;i++){
+  let q=vec2i(mix(centre,mm,f32(i)/8.)/view.cell);
+  if(any(q<vec2i(0))||q.x>=i32(view.cols)||q.y>=i32(view.rows)){return 0.;}
+  if(surface[u32(q.y)*view.cols+u32(q.x)].geometry.z>.5){return 0.;}
+ }
+ let strength=clamp(log(1.+field.z*view.cell)/log(12.),0.,1.);
+ let travel=fract((along/spacing)-processView.y*.32+grainHash(vec2i(tile)));
+ let dash=mix(.45,1.,smoothstep(.25,.55,travel)*(1.-smoothstep(.8,1.,travel)));
+ return ink*(.18+.55*strength)*dash*smoothstep(.2,.65,field.w);
+}
 @fragment fn fragment(in: Varying) -> @location(0) vec4f {
   let uv=view.camera.xy+(in.uv-.5)/view.camera.z;
   let pos = uv * vec2f(f32(view.cols), f32(view.rows));
@@ -225,16 +258,17 @@ fn wallCoverage(pos:vec2f,footprint:vec2f)->f32{
   let relative=density/view.appearance.y;
   let mineral=clamp(log(max(relative,.15)/.15)/log(6./.15),0.,1.);
   var color=mix(base,mix(vec3f(216.,165.,255.),vec3f(185.,131.,237.),smoothstep(.4,1.,mineral))/255.,mineral*.46);
-  let west = select(k, k - 1u, x > 0u);
-  let north = select(k, k - view.cols, y > 0u);
-  var speed = vec2f((flow[k].x + flow[west].x) * .5, (flow[k].y + flow[north].y) * .5);
+  let field=mix(mix(flowAt(k,corner.x,corner.y),flowAt(k,corner.x+1,corner.y),blend.x),mix(flowAt(k,corner.x,corner.y+1),flowAt(k,corner.x+1,corner.y+1),blend.x),blend.y);
+  var speed=field.xy;
   if ((view.burstAndSeed&1u) == 1u && view.time >= 2.) { speed = vec2f(0.); }
   // A material coordinate field is advected by the same physical flow each model step.
   let maps=mix(mix(materialAt(k,corner.x,corner.y),materialAt(k,corner.x+1,corner.y),blend.x),mix(materialAt(k,corner.x,corner.y+1),materialAt(k,corner.x+1,corner.y+1),blend.x),blend.y);
-  let weight=.5+.5*cos(view.time*6.2831853/40.);
+  // XY renews at 0/40 s; ZW at 20 s. Hide the map exactly when it renews.
+  let weight=.5-.5*cos(view.time*6.2831853/40.);
   let ripple=mix(fluidTexture(maps.xy*view.cell,pixel),fluidTexture(maps.zw*view.cell,pixel),weight);
   let flowContrast=.45+.55*length(speed)*view.cell/(length(speed)*view.cell+1.7);
-  let rippleAlpha=ripple*flowContrast*(1.-land)*.5*min(1.,lit);
+  let rippleVisibility=select(select(.045,.0,processView.x>1.5),.24,processView.x<.5);
+  let rippleAlpha=ripple*flowContrast*(1.-land)*rippleVisibility*min(1.,lit);
   color=1.-(1.-color)*(1.-vec3f(.78,.9,.89)*rippleAlpha);
   // Small moving mineral grains share the advected coordinates; no particle readback.
   let spacing=36.;let grainPos=maps.xy*view.cell/spacing;let grainCell=vec2i(floor(grainPos));
@@ -244,7 +278,13 @@ fn wallCoverage(pos:vec2f,footprint:vec2f)->f32{
   let grain=1.-smoothstep(.55*cssMm,.55*cssMm+pixel,distance);
   let activity=clamp((relative*length(speed)*view.cell-.01)/.29,0.,1.);
   let life=.5+.5*sin(bitcast<f32>(view.pad1)*1.6+grainHash(grainCell)*6.2831853);
-  color=mix(color,vec3f(236.,214.,255.)/255.,grain*activity*.6*life);
+  color=mix(color,vec3f(236.,214.,255.)/255.,grain*activity*.6*life*select(0.,1.,processView.x<.5));
+  if(processView.x>.5&&processView.x<2.5&&view.camera.w<.5){
+   let strength=clamp(log(1.+field.z*view.cell)/log(12.),0.,1.);
+   if(processView.x>1.5){color=mix(color,vec3f(.38,.78,.77),strength*.20);}
+   let strokes=flowGlyph(mm,pixel,cssMm);
+   color=1.-(1.-color)*(1.-vec3f(.7,.94,.89)*strokes);
+  }
   if(view.camera.w>0.5&&view.camera.w<1.5){color=mix(vec3f(.03,.09,.16),vec3f(1.,.83,.39),clamp(illumination,0.,1.));}
   if(view.camera.w>1.5&&view.camera.w<2.5){color=mix(vec3f(.025,.14,.15),vec3f(.85,.52,.96),min(1.,density/view.appearance.y));}
   if(view.camera.w>2.5&&view.camera.w<3.5){color=mix(vec3f(.04,.13,.19),vec3f(1.,.68,.25),clamp(log(1.+length(speed)*view.cell)/5.,0.,1.));}
@@ -263,22 +303,51 @@ fn wallCoverage(pos:vec2f,footprint:vec2f)->f32{
     let edge = length(fract(pos) - .5);
     if (edge < .11) { color = mix(color, select(vec3f(.30, .76, .85), vec3f(.98, .70, .53), surface[k].geometry.y > 0.), .7); }
   }
-  if (state[k].z > 0u) {
-    let disk = 1. - smoothstep(.18,.45,length(fract(pos)-.5));
-    color = mix(color, select(vec3f(.18,.68,.8),vec3f(.95,.67,.81),state[k].z > 0u),disk);
+  if(view.camera.w<.5){
+   let centreCell=vec2i(floor(pos));
+   for(var dy=-1;dy<=1;dy++){for(var dx=-1;dx<=1;dx++){
+    let q=centreCell+vec2i(dx,dy);
+    if(any(q<vec2i(0))||q.x>=i32(view.cols)||q.y>=i32(view.rows)){continue;}
+    let j=u32(q.y)*view.cols+u32(q.x);let m=markers[j];
+    if(m.state.x<=0.){continue;}
+    let stage=m.state.x;let progress=clamp((view.time*10.-m.state.z)/max(1.,m.state.w-m.state.z),0.,1.);
+    let local=(pos-(vec2f(q)+.5))*view.cell;let d=length(local);
+    let radius=min(view.cell*.8,max(view.cell*.25,cssMm*2.8));
+    var tint=vec3f(.55,.41,.31);var intensity=.25;
+    if(stage<1.5){tint=mix(vec3f(.62,.39,.25),vec3f(.98,.72,.43),progress);intensity=.3+.4*progress;}
+    else if(stage<2.5){tint=vec3f(.86,.63,.95);intensity=.85;}
+    else if(stage>3.5){intensity=.25*(1.-progress);}
+    let crater=1.-smoothstep(radius*.45,radius*.8,d);
+    let lip=1.-smoothstep(max(pixel*.65,cssMm*.65),max(pixel*.65,cssMm*.65)+pixel,abs(d-radius));
+    let flash=m.animation.y*exp(-max(0.,processView.y-m.animation.x)*4.);
+    let halo=exp(-pow(d/max(radius*2.,.001),2.))*flash;
+    color=mix(color,vec3f(.12,.16,.2),crater*intensity*.7);
+    color=mix(color,tint,lip*intensity);
+    color=1.-(1.-color)*(1.-vec3f(.9,.61,.36)*halo*.5);
+    let pulseRadius=radius*(1.2+min(1.,max(0.,processView.y-m.animation.x))*2.);
+    let ring=exp(-pow((d-pulseRadius)/max(pixel,cssMm),2.))*flash;
+    color=mix(color,vec3f(1.,.87,.62),ring*.6);
+   }}
   }
-  if(markers[k].state.x>0.){
-    let m=markers[k];let stage=m.state.x;let progress=clamp((view.time*10.-m.state.z)/max(1.,m.state.w-m.state.z),0.,1.);
-    let displayTime=bitcast<f32>(view.pad1);let pulse=.5+.5*sin(displayTime*9.424778);
-    var radius=.15;var opacity=.45;var tint=vec3f(.53,.41,.36);var flash=0.;
-    if(stage<1.5){radius=.12+(.18+.12*m.state.y)*progress;opacity=.4+.5*progress;tint=mix(vec3f(.48,.31,.2),vec3f(.96,.77,.5),progress);if(progress>.98){opacity*=.85+.15*pulse;}}
-    else if(stage<2.5){radius=(.24+.16*m.state.y)*(1.-.3*progress);opacity=.95-.25*progress;tint=vec3f(.78,.54,.85);flash=m.animation.y*exp(-max(0.,displayTime-m.animation.x)*5.);}
-    else if(stage>3.5){radius=.15*(1.-progress*.6);opacity=.4*(1.-progress);tint=vec3f(.48,.48,.47);}
-    let d=length(fract(pos)-.5);let disk=1.-smoothstep(radius*.65,radius,d);let rim=exp(-pow((d-radius*.83)/.025,2.));
-    color=mix(color,tint,disk*opacity);color+=vec3f(.24,.2,.22)*rim*opacity;
-    color=mix(color,vec3f(1.,.98,.93),(1.-smoothstep(0.,radius*.6,d))*flash);
+  if (surface[k].geometry.w > .5) {
+   let strength=select(1.,surface[k].geometry.w-2.,surface[k].geometry.w>1.5);
+   let local=fract(pos)-.5;let d=length(local);let aa=max(pixel/view.cell,.005);
+   color*=mix(1.,.25+.65*smoothstep(0.,.5,d),strength);
+   let rim=1.-smoothstep(aa,aa*2.,abs(d-.42));
+   color=mix(color,vec3f(.43,.76,.78),rim*.55*strength);
+   let angle=atan2(local.y,local.x);
+   let spiral=(1.-smoothstep(.12,.23,abs(sin(angle*3.+d*19.+processView.y*1.4))))*smoothstep(.09,.2,d)*(1.-smoothstep(.36,.47,d));
+   color=mix(color,vec3f(.76,.84,.95),spiral*.25*strength);
   }
-  if (surface[k].geometry.w > .5) { let strength=select(1.,surface[k].geometry.w-2.,surface[k].geometry.w>1.5);let d=length(fract(pos)-.5);color*=mix(1.,.2+.65*smoothstep(0.,.6,d),strength);color+=vec3f(.08,.18,.2)*exp(-pow((d-.42)*25.,2.))*strength;}
+  if(processView.z>.5&&view.camera.w<.5){
+   let activity=mix(mix(flow[nearby(k,corner.x,corner.y)].activity,flow[nearby(k,corner.x+1,corner.y)].activity,blend.x),mix(flow[nearby(k,corner.x,corner.y+1)].activity,flow[nearby(k,corner.x+1,corner.y+1)].activity,blend.x),blend.y);
+   let visible=clamp(log(vec4f(1.)+activity*40.)/log(6.),vec4f(0.),vec4f(1.));
+   let total=dot(visible,vec4f(1.));
+   if(total>.0001){
+    let tint=(visible.x*vec3f(.94,.48,.2)+visible.y*vec3f(.2,.8,.59)+visible.z*vec3f(.76,.48,1.)+visible.w*vec3f(.98,.8,.36))/total;
+    color=mix(color,tint,min(.65,total*.42));
+   }
+  }
   let contact=wallCoverage(pos-vec2f(pixel/view.cell,pixel*2./view.cell),footprint)*(1.-wallAmount);
   color*=1.-contact*.28;
   let glass=glassMaterial(clamp(pos.y/f32(view.rows),0.,1.));

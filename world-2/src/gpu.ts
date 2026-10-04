@@ -1,3 +1,5 @@
+import flowViewShader from './flow-view.wgsl?raw';
+import { flowBlend, type FlowMode } from './flow-view.ts';
 import { layoutPartitions, layoutForSeed } from './generation/partitions.ts';
 import { dishOf } from './generation/dish.ts';
 import { PARTITION_THICKNESS } from './generation/constants.ts';
@@ -73,6 +75,14 @@ export class GpuWorld {
   private render!: GPURenderPipeline;
   private groups!: GPUBindGroup[][];
   private renderGroups!: GPUBindGroup[][];
+  private visualFlow!:GPUBuffer;
+  private visualFlowParams!:GPUBuffer;
+  private visualFlowPipeline!:GPUComputePipeline;
+  private visualFlowGroups!:GPUBindGroup[];
+  private visualStocks!:GPUBuffer;
+  private processView!:GPUBuffer;
+  private visualFlowStep=-1;
+  private visualFlowTime=0;
   private summaries!: GPUBuffer;
   private summaryPipeline!: GPUComputePipeline;
   private summaryGroups!: GPUBindGroup[];
@@ -234,6 +244,17 @@ export class GpuWorld {
     this.states = [this.buffer('state A', grid.state, storage), this.buffer('state B', grid.state, storage)];
     this.pressures = [this.buffer('pressure A', n * 4, storage), this.buffer('pressure B', n * 4, storage)];
     this.flow = this.buffer('face velocities', n * 8, storage);
+    this.visualFlowStep=-1;this.visualFlowTime=0;
+    // Presentation-only fields are excluded from checkpoints and physical state.
+    this.visualFlow=this.buffer('observation smoothed flow',n*32,storage);
+    this.visualStocks=this.buffer('observation previous stocks',n*16,storage);
+    this.visualFlowParams=this.buffer('observation flow params',32,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
+    this.processView=this.buffer('observation process view',16,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
+    const visualFlowModule=d.createShaderModule({label:'flow presentation',code:flowViewShader});
+    const flowErrors=(await visualFlowModule.getCompilationInfo()).messages.filter(m=>m.type==='error');
+    if(flowErrors.length)throw new Error(flowErrors.map(m=>`Вид течений ${m.lineNum}:${m.linePos}: ${m.message}`).join('\n'));
+    this.visualFlowPipeline=await d.createComputePipelineAsync({layout:'auto',compute:{module:visualFlowModule,entryPoint:'filterFlow'}});
+
     this.courantMaxima=this.buffer('advection face maxima',Math.ceil(n/64)*4,storage);
     this.courantPipeline=await d.createComputePipelineAsync({layout:'auto',compute:{module:d.createShaderModule({code:courantShader}),entryPoint:'maximum'}});
     this.courantGroup=d.createBindGroup({layout:this.courantPipeline.getBindGroupLayout(0),entries:[this.uniform,this.geometry,this.flow,this.courantMaxima].map((buffer,binding)=>({binding,resource:{buffer}}))});
@@ -329,9 +350,10 @@ export class GpuWorld {
       visualIndex=this.buffer('visual light index placeholder',new Uint32Array([0xffffffff]),storage);
     }
     // Eight storage bindings: reuse the prepared spatial index instead of adding a light raster pass.
+    this.visualFlowGroups=this.states.map(state=>d.createBindGroup({layout:this.visualFlowPipeline.getBindGroupLayout(0),entries:[this.visualFlowParams,this.geometry,this.flow,this.visualFlow,this.terrain,state,this.visualStocks].map((buffer,binding)=>({binding,resource:{buffer}}))}));
     this.renderGroups=this.states.map(state=>[0,1].map(material=>d.createBindGroup({layout:this.render.getBindGroupLayout(0),entries:[
-      ...[this.view,this.surface,state,this.flow,visualBlobs,visualIndex,this.markers,this.terrain,this.material[material]].map((buffer,binding)=>({binding,resource:{buffer}})),
-      {binding:9,resource:this.rippleTexture!.createView()},{binding:10,resource:rippleSampler},{binding:11,resource:{buffer:this.lightParams}},{binding:12,resource:{buffer:this.glassGeometry}}
+      ...[this.view,this.surface,state,this.visualFlow,visualBlobs,visualIndex,this.markers,this.terrain,this.material[material]].map((buffer,binding)=>({binding,resource:{buffer}})),
+      {binding:9,resource:this.rippleTexture!.createView()},{binding:10,resource:rippleSampler},{binding:11,resource:{buffer:this.lightParams}},{binding:12,resource:{buffer:this.glassGeometry}},{binding:13,resource:{buffer:this.processView}}
     ]})));
     if (grid.vents) {
       const settings = new ArrayBuffer(32); new Uint32Array(settings).set([grid.cols, grid.rows, grid.vents.length]);
@@ -633,7 +655,7 @@ export class GpuWorld {
     this.device.queue.submit([encoder.finish()]); if(!this.grid.mineral)this.current = 1 - this.current; this.step++;this.lastEncodingMs=performance.now()-encodeStart;
   }
 
-  draw(arrows: boolean, camera={x:.5,y:.5,zoom:1,layer:0}, target?:HTMLCanvasElement,effectTime=this.step*.1): void {
+  draw(arrows: boolean, camera={x:.5,y:.5,zoom:1,layer:0}, target?:HTMLCanvasElement,effectTime=this.step*.1,mode:FlowMode=0,processes=false): void {
     if (this.lost || !this.grid) return;
     const canvas=target??this.canvas;
     if(!target)this.canvas.parentElement?.style.setProperty('--world-aspect',String(this.grid.cols/this.grid.rows));
@@ -641,8 +663,9 @@ export class GpuWorld {
     for(const v of this.sources?.volcanoes??[]){
       const passed=v.bursts.filter(b=>b.start<=this.step*.1).length,signature=`${v.eruptions}:${passed}`;
       let flash=this.visualBursts.get(v.id);
-      if(v.stage==='erupting'&&passed>0&&flash?.signature!==signature){flash={signature,start:effectTime};this.visualBursts.set(v.id,flash);}
-      this.device.queue.writeBuffer(this.markers,v.cell*32,new Float32Array([codes[v.stage],v.power,v.begin,v.until,flash?.start??-1000,Number(v.stage==='erupting'&&passed>0),0,0]));
+      const newBurst=this.visualFlowStep>=0&&v.bursts.some(b=>b.start>this.visualFlowStep*.1&&b.start<=this.step*.1);
+      if(newBurst&&passed>0&&flash?.signature!==signature){flash={signature,start:effectTime};this.visualBursts.set(v.id,flash);}
+      this.device.queue.writeBuffer(this.markers,v.cell*32,new Float32Array([codes[v.stage],v.power,v.begin,v.until,flash?.start??-1000,Number(!!flash&&effectTime-flash.start<1),0,0]));
     }
     const context=target?target.getContext('webgpu')!:this.context;
     if(target)context.configure({device:this.device,format:navigator.gpu.getPreferredCanvasFormat(),alphaMode:'opaque'});
@@ -656,12 +679,22 @@ export class GpuWorld {
     // Preserve the 64-byte checkpoint layout. Render flags pack CSS width and heat; pad0 holds visual sun tone.
     f[7]=effectTime;u[4] = (Math.min(32767,Math.round(canvas.clientWidth))<<1)|Number(arrows)|(Math.round(Math.min(1,(this.grid.params?.spotHeat??1)/2)*255)<<16); if(!target)u[4]|=0x80000000; u[5] = ((this.grid.params?.seed??1)<<1)|Number(this.grid.scene === 'burst'); const sun=(this.grid.params?.sun??this.grid.light?.sun??1)*(this.grid.lightMap?sunRhythmAt(this.grid.lightMap,this.step):1);f[6]=this.grid.light?(1-Math.exp(-1.1*sun))/(1-Math.exp(-1.1)):0;f[8]=this.grid.quantum??.001;f[9]=this.grid.referenceDensity??(5/75);f[10]=Number(this.grid.scene==='world');f[11]=Number(this.grid.shape==='circle');
     this.device.queue.writeBuffer(this.view, 0, data);
+    this.device.queue.writeBuffer(this.processView,0,new Float32Array([target?3:mode,effectTime,Number(processes&&!target),0]));
     const encoder = this.device.createCommandEncoder();
+    if(this.visualFlowStep!==this.step){
+      const data=new ArrayBuffer(32);new Uint32Array(data).set([this.grid.cols,this.grid.rows,0,Number(this.visualFlowStep<0)]);
+      const values=new Float32Array(data),elapsed=effectTime-this.visualFlowTime;
+      values[2]=flowBlend(mode,elapsed,this.visualFlowStep<0);
+      values.set([this.grid.cell,this.grid.quantum??.001,(this.step-this.visualFlowStep)*.1,flowBlend(2,elapsed,this.visualFlowStep<0)],4);
+      this.device.queue.writeBuffer(this.visualFlowParams,0,data);
+      const smooth=encoder.beginComputePass();smooth.setPipeline(this.visualFlowPipeline);smooth.setBindGroup(0,this.visualFlowGroups[this.current]);smooth.dispatchWorkgroups(Math.ceil(this.grid.cols*this.grid.rows/64));smooth.end();
+      this.visualFlowStep=this.step;this.visualFlowTime=effectTime;
+    }
     {const pack=encoder.beginComputePass();pack.setPipeline(this.surfacePipeline);pack.setBindGroup(0,this.surfaceGroup);pack.dispatchWorkgroups(Math.ceil(this.grid.cols*this.grid.rows/64));pack.end();}
     const pass = encoder.beginRenderPass({ colorAttachments: [{ view: context.getCurrentTexture().createView(),
       clearValue: { r: .05, g: .08, b: .1, a: 1 }, loadOp: 'clear', storeOp: 'store' }] });
     pass.setPipeline(this.render); pass.setBindGroup(0,this.renderGroups[this.current][this.step%2]); pass.draw(3);
-    pass.setPipeline(this.flightRender);pass.setBindGroup(0,this.flightRenderGroup);pass.draw(6,Math.min(70,this.grid.ballistics?.capacity ?? 1));
+    if(camera.layer===0){pass.setPipeline(this.flightRender);pass.setBindGroup(0,this.flightRenderGroup);pass.draw(6,this.grid.ballistics?.capacity ?? 1);}
     if(this.funnels?.active.length&&camera.layer===0){pass.setPipeline(this.funnelParticleRender);pass.setBindGroup(0,this.funnelParticleRenderGroup);pass.draw(6,this.funnels.active.length*40);}
     pass.end();
     this.device.queue.submit([encoder.finish()]);

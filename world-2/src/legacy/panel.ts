@@ -409,9 +409,9 @@ export class Panel {
       rulers.classList.toggle('active', enabled);
       this.handlers.onRulers(enabled);
     });
-    const processes = el('button', { disabled: true, textContent: 'Процессы', title: 'Карта размыва, оседания и ухода в недра ещё не подключена к GPU-движку', ariaPressed: 'false' });
-    const processLegend = el('span', { className: 'process-legend', hidden: true, title: 'Цвет показывает количество минерала за последнее обновление (10 с мира, 100 шагов); ярче — больше. При одновременных процессах цвета смешиваются.' });
-    processLegend.innerHTML = '<span><i style="color:#e88536">↗</i>размыв</span><span><i style="color:#32c995">↧</i>оседание</span><span><i style="color:#c27bff">⊙</i>в недра</span>';
+    const processes = el('button', { textContent: 'Процессы', title: 'Показать изменения грунта, залежей и уход минерала в недра', ariaPressed: 'false' });
+    const processLegend = el('span', { className: 'process-legend', hidden: true, title: 'Средняя скорость изменений запасов между наблюдениями: ярче — больше. Убыль включает размыв, растворение и опускание; прирост — намыв и поднятие грунта. Это итоговые изменения, одновременные обмены могут компенсироваться.' });
+    processLegend.innerHTML = '<span><i style="color:#e88536">↗</i>убыль грунта / залежей</span><span><i style="color:#32c995">↧</i>прирост залежей</span><span><i style="color:#c27bff">⊙</i>в недра</span><span><i style="color:#f9cb5c">↑</i>прирост грунта</span>';
     processLegend.setAttribute('role', 'note');
     processes.addEventListener('click', () => {
       const enabled = processes.getAttribute('aria-pressed') !== 'true';
