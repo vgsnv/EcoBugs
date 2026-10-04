@@ -56,15 +56,10 @@ export interface FieldInputs {
   readonly stream: StreamField | null;
   readonly averageMix: number;
   readonly view: StreamView;
-  /** Часы узоров, которые несёт течение (секунды модели, не быстрее ×3 реального). */
-  readonly flowClock: number;
 }
 
 /** Цвет 0…255 → vec3 GLSL 0…1. */
 const vec3 = (c: readonly number[]) => `vec3(${c.map((x) => (x / 255).toFixed(4)).join(', ')})`;
-
-/** Узоры течения (тушь, каустика) движутся во столько раз быстрее течения — как взвесь. */
-const FLOW_GAIN = 20;
 
 /** Переход дымки минерала к новому состоянию — за средний промежуток между состояниями, в этих пределах, мс. */
 const MINERAL_FADE_MIN_MS = 60;
@@ -158,43 +153,6 @@ ${TABLE_GLSL}
 ${TERRAIN_GLSL}
 ${TECTONICS_GLSL}
 ${LIGHT_SHADE_GLSL}
-uniform float u_flowClock;    // часы узоров, которые несёт течение (секунды модели)
-uniform float u_flowGain;     // во сколько раз узоры быстрее течения (как у взвеси)
-uniform int u_hasStream;
-/** Узоры, которые несёт течение: период смены слоя (секунды модели); ячейки туши и каустики (единиц мира). */
-const float FLOW_PERIOD = 3.;
-const float INK_CELL = 16.;
-const float CAUSTIC_CELL = 6.5;
-float valueNoise(vec2 p, uint s) {
-  ivec2 i = ivec2(floor(p)); vec2 f = fract(p); f = f * f * (3. - 2. * f);
-  float a = float(hash3(s, i.x, i.y, 0)) / 4294967296., b = float(hash3(s, i.x + 1, i.y, 0)) / 4294967296.;
-  float c = float(hash3(s, i.x, i.y + 1, 0)) / 4294967296., d = float(hash3(s, i.x + 1, i.y + 1, 0)) / 4294967296.;
-  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-/** Прожилки туши: мягкие струи (плавные гребни шума), 0…1, в среднем около половины. */
-float ink(vec2 p) {
-  float n = .65 * valueNoise(p / INK_CELL, u_seed ^ 0x1a2bu) + .35 * valueNoise(p / (INK_CELL * .45), u_seed ^ 0x3c4du);
-  float r = 1. - abs(2. * n - 1.);
-  return smoothstep(.2, 1., r);
-}
-/** Каустика: тонкие изогнутые светлые линии (границы искривлённых колышущихся ячеек), 0…1. */
-float caustic(vec2 p, float t) {
-  // Искривление — линии плавные, а не многоугольники.
-  p += 1.1 * vec2(valueNoise(p * .45, u_seed ^ 0x7a1bu) - .5, valueNoise(p * .45 + 31.7, u_seed ^ 0x7a1bu) - .5);
-  ivec2 c = ivec2(floor(p));
-  float f1 = 9., f2 = 9.;
-  for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
-    ivec2 id = c + ivec2(dx, dy);
-    float hx = float(hash3(u_seed ^ 0x5e6fu, id.x, id.y, 1)) / 4294967296., hy = float(hash3(u_seed ^ 0x5e6fu, id.x, id.y, 2)) / 4294967296.;
-    vec2 q = vec2(id) + .5 + .38 * vec2(sin(t * .8 + 6.283 * hx), cos(t * .65 + 6.283 * hy));
-    float d = length(p - q);
-    if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) f2 = d;
-  }
-  float e = f2 - f1;
-  return (1. - smoothstep(0., .07, e)) * .8 + (1. - smoothstep(0., .3, e)) * .2;
-}
-/** Сдвиг узора на каждый новый цикл слоя — чтобы смена не повторяла одно и то же. */
-vec2 cycleShift(float k) { return vec2(float(hash3(u_seed, int(k), 7, 3)), float(hash3(u_seed, int(k), 8, 3))) / 4294967296. * 97.; }
 uniform sampler2D u_spotMask;    // R — пятна с резким краем, G — с мягким
 uniform sampler2D u_mineral;
 uniform sampler2D u_mineralPrev;  // прошлое состояние дымки — к нынешнему переходим плавно
@@ -271,12 +229,6 @@ void main() {
   vec3 c = ventHoles(terrainAt(w), w);
   vec4 mineral = mix(texture(u_mineralPrev, w / u_grid), texture(u_mineral, w / u_grid), u_mineralMix);
   float held = mineral.g;
-  // Узоры, которые несёт течение (карта течения): два слоя со сдвигом фазы, переносятся
-  // течением и плавно сменяют друг друга — узор не растягивается.
-  vec2 fv = u_hasStream == 1 ? texture(u_stream, w / u_streamGrid.z / u_streamGrid.xy).xy * u_flowGain : vec2(0.);
-  float ph = u_flowClock / FLOW_PERIOD, fa = fract(ph), fb = fract(ph + .5);
-  float wa = 1. - abs(2. * fa - 1.);
-  vec2 pa = w - fv * fa * FLOW_PERIOD + cycleShift(floor(ph)), pb = w - fv * fb * FLOW_PERIOD + cycleShift(floor(ph + .5) + 1000.);
   float lit1 = min(1., u_lit);
 
   // Свет: яркость — по свету, который доходит (солнце × пятно или фон × прозрачность),
@@ -288,12 +240,6 @@ void main() {
   c *= mix(vec3(1.), u_sun, u_warmth * mb);
   c = screenOver(c, u_sun * u_glow * mb);
   c = screenOver(c, vec3(max(0., t - 1.) * u_glareStrength * sp.y));
-  // Каустика: в пятнах света на воде — светлая колышущаяся сетка, которую несёт течение.
-  float litWater = sp.y * (1. - held) * waterAt(w);
-  if (litWater > .01 && u_detail > 0.) {
-    float cs = mix(caustic(pb / CAUSTIC_CELL, u_flowClock), caustic(pa / CAUSTIC_CELL, u_flowClock), wa);
-    c = screenOver(c, u_sun * cs * litWater * min(1.2, u_sunNow) * .16 * u_detail);
-  }
   // Голое стеклянное дно в пятне светится: свет проходит до освещённого стола.
   float bareLit = (1. - smoothstep(.02, .12, levelAt(w))) * mb;
   if (bareLit > 0.) c = screenOver(c, vec3(1., .95, .84) * bareLit * .24);
@@ -337,10 +283,7 @@ void main() {
   // Минерал: мутность затемняет дно, дымка ложится поверх.
   c *= mineral.r;
   vec3 haze = mix(u_mineralThin, u_mineralDeep, mineral.b);
-  // Тушь: в дымке — прожилки, которые несёт течение (гуще и реже, в среднем — та же дымка).
-  float veins = mix(ink(pb), ink(pa), wa);
-  float hazeA = clamp(mineral.a * (1. + mix(.35, .7, u_detail) * (veins - .5)), 0., 1.);
-  c = c * (1. - hazeA) + haze * hazeA;
+  c = c * (1. - mineral.a) + haze * mineral.a;
 
   o = vec4(c * inside, inside);
 }`;
@@ -748,9 +691,6 @@ export class FieldRenderer implements GlowSink {
     this.bind(p, 3, 'u_trails', trails);
     this.bind(p, 4, 'u_ripple', ripple);
     if (input.stream) this.bindStream(p, 13, input.stream);
-    gl.uniform1i(p.uniform('u_hasStream'), input.stream ? 1 : 0);
-    gl.uniform1f(p.uniform('u_flowClock'), input.flowClock);
-    gl.uniform1f(p.uniform('u_flowGain'), FLOW_GAIN);
     this.bind(p, 6, 'u_foam', foam);
     this.bindGrid(p, 7, 'u_level', this.levelKey, t.level, 'r16f');
     this.bindGrid(p, 8, 'u_deposit', this.depositKey, t.deposits, 'r16f');
