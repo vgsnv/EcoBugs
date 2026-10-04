@@ -88,9 +88,8 @@ const VENT_ERUPT_CSS: readonly [number, number] = [5, 11];
 const VENT_VOLUME_FROM = 0.35;
 /** Показанное жерло догоняет модель за столько секунд (до e⁻¹). */
 const VENT_EASE_S = 0.35;
-/** Отверстие жерла: тёмная глубина, неровность края (доля радиуса). */
+/** Отверстие жерла: тёмная глубина. */
 const VENT_HOLE: Rgb = [46, 24, 78];
-const VENT_RAGGED = 0.16;
 /** Волна залпа: сколько бежит, с; докуда (доля радиуса выброса); цвет. */
 const RING_S = 1.4;
 const RING_REACH = 0.7;
@@ -264,7 +263,7 @@ export class SourcesLayer {
       shown.size += (size - shown.size) * k;
       shown.light += (light - shown.light) * k;
       shown.hot += (hot - shown.hot) * k;
-      this.drawVent(frame, v.id, v.x, v.y, shown.size, shown.light, shown.hot, ash, beat);
+      this.drawVent(frame, v.x, v.y, shown.size, shown.light, shown.hot, ash, beat);
       if (v.stage === 'erupting') this.drawSpring(frame, v, shown.size, after);
     }
     for (const id of this.vents.keys()) if (!seen.has(id)) this.vents.delete(id);
@@ -540,28 +539,20 @@ export class SourcesLayer {
   }
 
   /**
-   * Жерло — отверстие в недра, плоское: неровный край (форма постоянна для
-   * вулкана), внутри темно, из глубины пробивается свет — тем ярче и шире, чем
+   * Жерло — отверстие в недра, плоское и круглое (как и выброс из него), внутри темно, из глубины пробивается свет — тем ярче и шире, чем
    * больше `light`; `hot` — белая сердцевина (залп, набухание); кромка светится;
    * `ash` — потухшее сереет; `beat` — пульс созревшего.
    */
-  private drawVent(frame: Frame, id: number, x: number, y: number, radius: number, light: number, hot: number, ash: number, beat: number): void {
+  private drawVent(frame: Frame, x: number, y: number, radius: number, light: number, hot: number, ash: number, beat: number): void {
     if (radius <= 0.01) return;
     const { ctx, camera } = frame;
     // Ореол вокруг — свет из недр на дне.
     this.softSpot(ctx, x, y, radius * (3 + 1.2 * beat), [[0, MINERAL_COLOR, (0.4 + 0.3 * beat) * light], [0.45, MINERAL_COLOR, 0.14 * light], [1, MINERAL_COLOR, 0]]);
     const path = new Path2D();
-    const n = 28;
-    for (let q = 0; q <= n; q++) {
-      const a = (q / n) * Math.PI * 2;
-      const wave = Math.sin(3 * a + (hash3(id, 7, 1) / 4294967296) * 6.28) * 0.6 + Math.sin(5 * a + (hash3(id, 7, 2) / 4294967296) * 6.28) * 0.4;
-      const rr = radius * (1 + VENT_RAGGED * wave);
-      if (q === 0) path.moveTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); else path.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
-    }
-    path.closePath();
+    path.arc(x, y, radius, 0, Math.PI * 2);
     const deep = mix(VENT_HOLE, VENT_ASH, ash);
     const core = mix(mix(MINERAL_COLOR, VENT_SPARK, hot), VENT_ASH, ash);
-    const g = ctx.createRadialGradient(x, y, 0, x, y, radius * (1 + VENT_RAGGED));
+    const g = ctx.createRadialGradient(x, y, 0, x, y, radius);
     g.addColorStop(0, rgb(mix(deep, core, Math.min(1, light + hot))));
     g.addColorStop(Math.max(0.05, 0.25 + 0.45 * light + 0.2 * hot) * 0.9, rgb(mix(deep, MINERAL_COLOR, 0.55 * light)));
     g.addColorStop(1, rgb(deep));
