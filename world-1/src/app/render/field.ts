@@ -9,7 +9,7 @@ import type { Frame } from './frame.ts';
 import { createProgram, Textures, type Program, type TextureSource } from './gl.ts';
 import { MINERAL_COLOR, MINERAL_DEEP, SHADE_COLOR, SUN_COLOR, smoothstep, type Rgb } from './palette.ts';
 import { SPOT_FS, SPOT_VS, type SpotShapes } from './light.ts';
-import { FLOW_GLSL, STREAK_FRESH, STREAK_FS, STREAK_PX } from './streaks.ts';
+import { STREAK_FRESH, STREAK_FS, STREAK_PX } from './streaks.ts';
 import type { StreamField, StreamView } from './water.ts';
 import { TERRAIN_GLSL, type Grid, type TerrainData } from './terrain.ts';
 
@@ -33,8 +33,8 @@ export interface FieldInputs {
   readonly terrain: TerrainData;
   /** Узор ряби (альфа, бесшовный). */
   readonly ripple: HTMLCanvasElement;
-  /** Скорость течений в видимой части: закодированные байты, границы в мире, масштаб; null — рябь без течений. */
-  readonly flow: { readonly data: Uint8Array; readonly cols: number; readonly rows: number; readonly bounds: readonly number[]; readonly scale: number; readonly version: number } | null;
+  /** Рябь по плиткам (см. WaterLayer.rippleTiles); null — при «Процессах» (равномерная рябь). */
+  readonly tiles: { readonly data: Float32Array; readonly cols: number; readonly rows: number; readonly size: number; readonly version: number } | null;
   /** Пена у берега (альфа), на всю чашку. */
   readonly foam: { readonly canvas: HTMLCanvasElement; readonly version: number };
   /** Сила света: тёплый оттенок, высветление, блик яркого солнца; полутень, px устройства. */
@@ -42,9 +42,8 @@ export interface FieldInputs {
   readonly glow: number;
   readonly glare: number;
   readonly penumbra: number;
-  /** Рябь: 0 — по течениям, 1 — две равномерные ряби (при «Процессах»); часы ряби, секунды модели. */
+  /** Рябь: 0 — по течениям, 1 — две равномерные ряби (при «Процессах»). */
   readonly rippleMode: 0 | 1;
-  readonly rippleTime: number;
   /** Доля штрихов вместо ряби (0…1); поле для них; доля усреднённого течения; что показывают. */
   readonly streakMix: number;
   readonly stream: StreamField | null;
@@ -134,7 +133,6 @@ precision highp float;
 precision highp int;
 ${COMMON}
 ${TERRAIN_GLSL}
-${FLOW_GLSL}
 uniform sampler2D u_spotMask;    // R — пятна с резким краем, G — с мягким
 uniform sampler2D u_mineral;
 uniform sampler2D u_ripple;
@@ -152,7 +150,8 @@ uniform float u_warmth;
 uniform float u_glow;
 uniform float u_glare;
 uniform int u_rippleMode;
-uniform float u_flowTime;   // часы ряби, секунды модели
+uniform sampler2D u_tiles;  // рябь по плиткам: cos, sin направления, сдвиг узора, сила
+uniform vec3 u_tileGrid;    // столбцы, строки, сторона плитки
 uniform float u_time;       // секунды анимации
 uniform vec3 u_shade;
 uniform vec3 u_sun;
@@ -162,13 +161,24 @@ out vec4 o;
 
 float rippleAt(vec2 uv) { return texture(u_ripple, uv).a; }
 
-/** Узор, переносимый течением: две фазы со сдвигом, чтобы перенос не прыгал. */
-float pattern(vec2 p, vec2 velocity, float phase, float size) {
-  float a = fract(phase), b = fract(phase + .5);
-  float blend = abs(a * 2. - 1.);
-  float first = rippleAt((p - velocity * (a - .5) * 8.) / size);
-  float second = rippleAt((p - velocity * (b - .5) * 8.) / size);
-  return mix(first, second, blend);
+/**
+ * Рябь направленным потоком: в каждой плитке узор повёрнут по течению
+ * (x — вдоль, y — поперёк), вытянут вдоль него и сдвинут на накопленный
+ * сдвиг; четыре ближайшие плитки смешиваются плавно, без швов.
+ */
+float tileRipple(vec2 w, ivec2 t) {
+  vec4 d = texelFetch(u_tiles, clamp(t, ivec2(0), ivec2(u_tileGrid.xy) - 1), 0);
+  vec2 p = vec2(dot(w, d.xy), dot(w, vec2(-d.y, d.x)));
+  float x = p.x - d.z;
+  float lines = rippleAt(vec2(x / 320., p.y / 160.)) * .7 + rippleAt(vec2((x + 37.) / 470., (p.y + 61.) / 235.)) * .3;
+  return lines * (.45 + .55 * d.w);
+}
+float directionalRipple(vec2 w) {
+  vec2 g = w / u_tileGrid.z - .5;
+  ivec2 i = ivec2(floor(g));
+  vec2 f = smoothstep(0., 1., fract(g));
+  return mix(mix(tileRipple(w, i), tileRipple(w, i + ivec2(1, 0)), f.x),
+             mix(tileRipple(w, i + ivec2(0, 1)), tileRipple(w, i + ivec2(1, 1)), f.x), f.y);
 }
 
 vec3 screenOver(vec3 c, vec3 s) { return c + s * (1. - c); }
@@ -195,11 +205,7 @@ void main() {
   float water = waterAt(w);
   float spots = sp.x * (1. - held);
   if (u_rippleMode == 0) {
-    vec2 velocity = flowAt(w);
-    float phase = u_flowTime / 8. + rippleAt(w / 512.) * .25;
-    float lines = pattern(w, velocity, phase, 160.) * .7 + pattern(w + vec2(37., 61.), velocity, phase + .27, 235.) * .3;
-    float speed = length(velocity);
-    float a = lines * (.45 + .55 * speed / (speed + 1.7));
+    float a = directionalRipple(w);
     c = screenOver(c, vec3(.78, .9, .89) * a * water * .5 * lit1 * (1. - u_streakMix));
     // Штрихи течений: светлые, ярче и плотнее на сильном течении; не зависят от света.
     if (u_streakMix > 0.) {
@@ -311,7 +317,7 @@ export class FieldRenderer implements GlowSink {
   private frame: Frame | null = null;
   /** Ключи текстур, которые не меняются между кадрами. */
   private readonly mineralKey = {};
-  private readonly flowKey = {};
+  private readonly tilesKey = {};
   private readonly streamKey = {};
   private readonly levelKey = {};
   private readonly depositKey = {};
@@ -328,7 +334,6 @@ export class FieldRenderer implements GlowSink {
   private streakTime: number | null = null;
   private streakCamera: { zoom: number; cx: number; cy: number; width: number; height: number } | null = null;
   private readonly foamKey = {};
-  private flowTexture: WebGLTexture | null = null;
   private mineralTexture: WebGLTexture | null = null;
   /** Маска пятен (вне экрана) и данные эллипсов для неё. */
   private spotMask: { framebuffer: WebGLFramebuffer; texture: WebGLTexture; width: number; height: number } | null = null;
@@ -379,7 +384,7 @@ export class FieldRenderer implements GlowSink {
     gl.enableVertexAttribArray(sprite); gl.vertexAttribPointer(sprite, 4, gl.FLOAT, false, 32, 0); gl.vertexAttribDivisor(sprite, 1);
     gl.enableVertexAttribArray(color); gl.vertexAttribPointer(color, 4, gl.FLOAT, false, 32, 16); gl.vertexAttribDivisor(color, 1);
     gl.bindVertexArray(null);
-    this.flowTexture = this.mineralTexture = null;
+    this.mineralTexture = null;
     this.spotProgram = createProgram(gl, SPOT_VS, SPOT_FS);
     this.streakProgram = createProgram(gl, FULL_VS, STREAK_FS);
     this.streakBuffers = [];
@@ -508,15 +513,6 @@ export class FieldRenderer implements GlowSink {
     this.gl!.uniform3f(p.uniform(`${name}Grid`), g.cols, g.rows, g.step);
   }
 
-  /** Поле течений вида (FLOW_GLSL). */
-  private bindFlow(p: Program, unit: number, flow: FieldInputs['flow']): void {
-    const gl = this.gl!;
-    this.bind(p, unit, 'u_flow', flow ? this.flowTexture : null);
-    gl.uniform4f(p.uniform('u_bounds'), flow?.bounds[0] ?? 0, flow?.bounds[1] ?? 0, flow?.bounds[2] ?? 1, flow?.bounds[3] ?? 1);
-    gl.uniform1f(p.uniform('u_flowScale'), flow?.scale ?? 0);
-    gl.uniform1f(p.uniform('u_hasFlow'), flow ? 1 : 0);
-  }
-
   /** Поле штрихов (сетка минерала, по 4 числа на клетку). */
   private bindStream(p: Program, unit: number, stream: StreamField): void {
     this.bind(p, unit, 'u_stream', this.textures.get(this.streamKey, { data: stream.data, width: stream.cols, height: stream.rows }, stream.version, { format: 'rgba16f' }));
@@ -613,8 +609,7 @@ export class FieldRenderer implements GlowSink {
     this.mineralTexture = this.textures.get(this.mineralKey, input.mineral.image, input.mineral.version);
     const ripple = this.textures.get(input.ripple, input.ripple, 0, { repeat: true });
     const foam = this.textures.get(this.foamKey, input.foam.canvas, input.foam.version);
-    const flow = input.flow;
-    if (flow) this.flowTexture = this.textures.get(this.flowKey, { data: flow.data, width: flow.cols, height: flow.rows }, flow.version);
+    const tiles = input.tiles;
     const streaks = input.streakMix > 0 && input.stream ? this.drawStreaks(input) : null;
     if (!streaks) this.streakTime = null;
     gl.useProgram(p.program);
@@ -623,7 +618,10 @@ export class FieldRenderer implements GlowSink {
     this.bind(p, 2, 'u_mineral', this.mineralTexture);
     this.bind(p, 3, 'u_streaks', streaks);
     this.bind(p, 4, 'u_ripple', ripple);
-    this.bindFlow(p, 5, flow);
+    if (tiles) {
+      this.bind(p, 5, 'u_tiles', this.textures.get(this.tilesKey, { data: tiles.data, width: tiles.cols, height: tiles.rows }, tiles.version, { format: 'rgba32f', nearest: true }));
+      gl.uniform3f(p.uniform('u_tileGrid'), tiles.cols, tiles.rows, tiles.size);
+    }
     if (input.stream) this.bindStream(p, 13, input.stream);
     this.bind(p, 6, 'u_foam', foam);
     this.bindGrid(p, 7, 'u_level', this.levelKey, t.level, 'r16f');
@@ -647,7 +645,6 @@ export class FieldRenderer implements GlowSink {
     const tone = input.view === 'water' ? [0.86, 0.95, 0.97] : [0.9, 0.72, 1];
     gl.uniform3f(p.uniform('u_streakColor'), tone[0], tone[1], tone[2]);
     gl.uniform1f(p.uniform('u_streakFloor'), input.view === 'water' ? 0.25 : 0);
-    gl.uniform1f(p.uniform('u_flowTime'), input.rippleTime % 4096);
     gl.uniform1f(p.uniform('u_time'), frame.animTime);
     const unit = (c: Rgb) => [c[0] / 255, c[1] / 255, c[2] / 255] as const;
     gl.uniform3f(p.uniform('u_shade'), ...unit(SHADE_COLOR));

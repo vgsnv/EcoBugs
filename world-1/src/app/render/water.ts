@@ -3,7 +3,7 @@
  * где течение бьёт в сушу, и блёстки кристаллов залежей в пятнах света.
  * Здесь — данные для шейдера полей (течения в виде, маска пены) и блёстки.
  */
-import { DRIFT_REFERENCE, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, flowAt, hash3, insideDish, isBlocked, multiplierForLevel, periodicFbm, sunAt, type World } from '../../core/index.ts';
+import { DRIFT_REFERENCE, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, flowAt, hash3, multiplierForLevel, periodicFbm, sunAt, type World } from '../../core/index.ts';
 import type { GlowSink } from './field.ts';
 import type { Frame } from './frame.ts';
 import { smoothstep } from './palette.ts';
@@ -30,6 +30,10 @@ const SPARKLE_THRESHOLD = 0.965;
  * реального: иначе на ускорении узор мелькает (на ×100 — десятки раз в секунду).
  */
 const RIPPLE_MAX_RATE = 3;
+/** Плитка ряби, единиц мира; во сколько раз узор движется быстрее течения; период узора вдоль течения. */
+const RIPPLE_TILE = 64;
+const RIPPLE_GAIN = 20;
+const RIPPLE_PERIOD = 320 * 470;
 /** Пересчёт маски пены не чаще, мс (её вид — фактура 60 единиц, ровная часть 0,35, сила 0,4 — в шейдере полей). */
 const FOAM_REBUILD_MS = 300;
 
@@ -73,15 +77,14 @@ export class WaterLayer {
   private foamBuiltAt = 0;
   private foamStep = -1;
   private foamVersion = 0;
-  /** Скорость течений в видимой части для ряби: выборка по сетке вида, закодированная в байты. */
-  private flowKey = '';
-  private flowStep = -1;
-  private flowBuiltAt = -Infinity;
-  private flowVersion = 0;
-  private flowScale = 1;
-  private flowBytes = new Uint8Array(0);
-  private flowSamples = new Float32Array(0);
-  private flowGrid: { cols: number; rows: number; bounds: number[] } = { cols: 0, rows: 0, bounds: [0, 0, 1, 1] };
+  /**
+   * Рябь направленным потоком: по плитке — направление течения (cos, sin),
+   * накопленный сдвиг узора вдоль течения и сила (для контраста).
+   */
+  private tiles = new Float32Array(0);
+  private tileCols = 0;
+  private tileRows = 0;
+  private tileVersion = 0;
   /** Часы ряби (секунды модели, с ограничением скорости) и по каким кадрам они шли. */
   private rippleClock = 0;
   private rippleFlowStep: number | null = null;
@@ -100,14 +103,22 @@ export class WaterLayer {
   private streamTime: number | null = null;
 
   resetFlow(): void {
-    this.flowKey = ''; this.flowStep = -1; this.flowBuiltAt = -Infinity;
     this.rippleFlowStep = null;
+    this.tileCols = this.tileRows = 0;
   }
 
-  /** Часы ряби этого кадра: шаги течений → секунды модели, но не быстрее RIPPLE_MAX_RATE × реального времени. */
-  rippleTime(frame: Frame): number {
+  /**
+   * Часы ряби этого кадра: шаги течений → секунды модели, но не быстрее
+   * RIPPLE_MAX_RATE × реального времени. Возвращает, сколько секунд модели
+   * прошло с прошлого кадра по этим часам.
+   */
+  private rippleTime(frame: Frame): number {
+    const before = this.rippleClock;
     if (this.rippleFlowStep === null || frame.flowStep < this.rippleFlowStep) {
       this.rippleClock = frame.flowStep / 10;
+      this.rippleFlowStep = frame.flowStep;
+      this.rippleAnimTime = frame.animTime;
+      return 0;
     } else {
       const model = (frame.flowStep - this.rippleFlowStep) / 10;
       const real = Math.max(0, frame.animTime - this.rippleAnimTime);
@@ -117,7 +128,49 @@ export class WaterLayer {
     }
     this.rippleFlowStep = frame.flowStep;
     this.rippleAnimTime = frame.animTime;
-    return this.rippleClock;
+    return this.rippleClock - before;
+  }
+
+  /**
+   * Рябь направленным потоком (как directional flow в играх): чашка поделена
+   * на плитки RIPPLE_TILE; в каждой узор повёрнут по течению в её центре и
+   * сдвигается вдоль него — сдвиг накапливается по кадрам, поэтому узор не
+   * пульсирует и не прыгает при смене силы течения. Скорость сдвига условная:
+   * течение × RIPPLE_GAIN (честное течение в несколько мм/с глазу не видно);
+   * соотношение «где быстрее» — честное. Соседние плитки шейдер смешивает.
+   */
+  rippleTiles(frame: Frame): { data: Float32Array; cols: number; rows: number; size: number; version: number } {
+    const w = frame.world;
+    const dt = this.rippleTime(frame);
+    const cols = Math.ceil(w.dish.width / RIPPLE_TILE) + 1, rows = Math.ceil(w.dish.height / RIPPLE_TILE) + 1;
+    if (cols !== this.tileCols || rows !== this.tileRows) {
+      this.tileCols = cols; this.tileRows = rows;
+      this.tiles = new Float32Array(cols * rows * 4);
+      for (let k = 0; k < cols * rows; k++) this.tiles[k * 4] = 1;
+    }
+    const v: [number, number] = [0, 0];
+    const t = this.tiles;
+    for (let j = 0; j < rows; j++) {
+      for (let i = 0; i < cols; i++) {
+        const o = (j * cols + i) * 4;
+        const x = (i + 0.5) * RIPPLE_TILE, y = (j + 0.5) * RIPPLE_TILE;
+        flowAt(w, Math.min(w.dish.width - 1, x), Math.min(w.dish.height - 1, y), v);
+        // Снос за шаг → единиц мира в секунду модели.
+        const speed = Math.hypot(v[0], v[1]) * 10;
+        if (speed > 1e-6) {
+          // Направление поворачивается плавно: течение меняется, а узор не должен дёргаться.
+          const blend = 1 - Math.exp(-Math.max(0, dt) * 2 - 0.05);
+          let cx = t[o] + (v[0] * 10 / speed - t[o]) * blend, cy = t[o + 1] + (v[1] * 10 / speed - t[o + 1]) * blend;
+          const l = Math.hypot(cx, cy) || 1;
+          cx /= l; cy /= l;
+          t[o] = cx; t[o + 1] = cy;
+        }
+        t[o + 2] = (t[o + 2] + speed * RIPPLE_GAIN * dt) % RIPPLE_PERIOD;
+        t[o + 3] = speed / (speed + 1.7);
+      }
+    }
+    this.tileVersion++;
+    return { data: t, cols, rows, size: RIPPLE_TILE, version: this.tileVersion };
   }
 
   resetFoam(): void {
@@ -213,46 +266,6 @@ export class WaterLayer {
   streakMix(): number {
     const x = Math.log(Math.max(1e-6, this.pace) / STREAKS_FROM) / Math.log(STREAKS_FULL / STREAKS_FROM);
     return smoothstep(0, 1, x);
-  }
-
-  /**
-   * Течения для ряби в видимой части: сетка вида не крупнее 128 × 128, на
-   * воде; пересобирается при смене вида или (не чаще раза в 100 мс) шага.
-   * Скорость ×10 кодируется двумя байтами на ось относительно наибольшей.
-   */
-  flow(frame: Frame): { data: Uint8Array; cols: number; rows: number; bounds: readonly number[]; scale: number; version: number } {
-    const { camera, world: w } = frame;
-    const bounds = camera.visible();
-    const cell = w.mineral.cell;
-    const cols = Math.max(2, Math.min(128, Math.ceil((bounds[2] - bounds[0]) / cell)));
-    const rows = Math.max(2, Math.min(128, Math.ceil((bounds[3] - bounds[1]) / cell)));
-    const key = `${bounds.join(':')}:${cols}:${rows}`;
-    const now = performance.now();
-    if (key !== this.flowKey || (w.step !== this.flowStep && now - this.flowBuiltAt >= 100)) {
-      this.flowKey = key; this.flowStep = w.step; this.flowBuiltAt = now;
-      this.flowVersion++;
-      this.flowGrid = { cols, rows, bounds };
-      if (this.flowBytes.length !== cols * rows * 4) { this.flowBytes = new Uint8Array(cols * rows * 4); this.flowSamples = new Float32Array(cols * rows * 2); }
-      const velocity: [number, number] = [0, 0];
-      let max = 0.1;
-      for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
-        const wx = bounds[0] + (bounds[2] - bounds[0]) * (x + .5) / cols;
-        const wy = bounds[1] + (bounds[3] - bounds[1]) * (y + .5) / rows;
-        const k = (y * cols + x) * 2;
-        const allowed = insideDish(w.dish, wx, wy) && !isBlocked(w.partitions, wx, wy);
-        flowAt(w, wx, wy, velocity);
-        this.flowSamples[k] = allowed ? velocity[0] * 10 : 0; this.flowSamples[k + 1] = allowed ? velocity[1] * 10 : 0;
-        max = Math.max(max, Math.abs(this.flowSamples[k]), Math.abs(this.flowSamples[k + 1]));
-      }
-      this.flowScale = max;
-      for (let k = 0, q = 0; k < this.flowBytes.length; k += 4, q += 2) {
-        const vx = Math.round(this.flowSamples[q] / max * 32767 + 32768);
-        const vy = Math.round(this.flowSamples[q + 1] / max * 32767 + 32768);
-        this.flowBytes[k] = vx >> 8; this.flowBytes[k + 1] = vx & 255;
-        this.flowBytes[k + 2] = vy >> 8; this.flowBytes[k + 3] = vy & 255;
-      }
-    }
-    return { data: this.flowBytes, ...this.flowGrid, scale: this.flowScale, version: this.flowVersion };
   }
 
   /**

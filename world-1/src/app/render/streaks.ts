@@ -36,21 +36,6 @@ export const AVERAGE_FROM = 300;
 export const AVERAGE_FULL = 1000;
 export const AVERAGE_SECONDS = 0.6;
 
-/** Общий кусок: течение в точке мира по сетке вида и сила течения 0…1 (логарифм от мерила). */
-export const FLOW_GLSL = `
-uniform sampler2D u_flow;
-uniform vec4 u_bounds;      // видимая часть мира для поля течений
-uniform float u_flowScale;
-uniform float u_hasFlow;
-/** Скорость течения, единиц мира в секунду модели. */
-vec2 flowAt(vec2 w) {
-  if (u_hasFlow < .5) return vec2(0.);
-  vec4 f = texture(u_flow, (w - u_bounds.xy) / (u_bounds.zw - u_bounds.xy));
-  vec2 encoded = vec2(f.r * 65280. + f.g * 255., f.b * 65280. + f.a * 255.);
-  return (encoded - 32768.) / 32767. * u_flowScale;
-}
-`;
-
 export const STREAK_FS = `#version 300 es
 precision highp float;
 precision highp int;

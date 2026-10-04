@@ -172,11 +172,10 @@ export class WorldRenderer {
       mineral,
       terrain: this.terrain.data(),
       ripple: this.water.ripple,
-      flow: this.showProcesses ? null : this.water.flow(frame),
+      tiles: this.showProcesses ? null : this.water.rippleTiles(frame),
       foam: this.water.foam(w),
       ...light.strength,
       rippleMode: this.showProcesses ? 1 : 0,
-      rippleTime: this.water.rippleTime(frame),
       ...this.streams(frame),
     });
     this.water.drawSparkles(frame, this.field);
