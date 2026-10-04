@@ -371,7 +371,7 @@ function frame(now: number): void {
 
 setWorld(world);
 // ?check — проверка отрисовки (см. render-check.ts): без расчёта и анимации.
-if (new URLSearchParams(location.search).has('check')) installRenderCheck(renderer, canvas);
+if (new URLSearchParams(location.search).has('check')) installRenderCheck(renderer);
 else {
   create(world.params);
   requestAnimationFrame(frame);

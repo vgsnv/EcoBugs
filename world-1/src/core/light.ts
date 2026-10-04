@@ -485,6 +485,42 @@ export function spotOutlines(map: LightMap, t: number, dishW: number, dishH: num
   return out;
 }
 
+/** Чисел на эллипс в `spotShapes`. */
+export const SPOT_SHAPE_SIZE = 12;
+
+/**
+ * Те же контуры, что `spotOutlines`, но параметрами — для отрисовки на GPU:
+ * по SPOT_SHAPE_SIZE чисел на каждый видимый в чашке эллипс (и копию у
+ * сомкнутых краёв): центр x, y; докуда заведомо не светит; полуоси r·k и r/k;
+ * cos и sin поворота; e3, e5 и фазы волн края; середина края (множитель границы).
+ */
+export function spotShapes(map: LightMap, t: number, dishW: number, dishH: number): Float32Array {
+  const [ox, oy] = lightOffset(map, t);
+  const W = map.mapWidth;
+  const H = map.mapHeight;
+  const out: number[] = [];
+  const middle = 1 + SPOT_EDGE / 2;
+  for (const s of map.spots) {
+    for (const b of s.blobs) {
+      const [mx, my] = blobCenter(s, b, t, W, H);
+      const reach = blobReach(b, t);
+      const cx0 = wrap(mx + ox, W);
+      const cy0 = wrap(my + oy, H);
+      const r = blobRadius(b, t);
+      const k = Math.sqrt(b.aspect);
+      const angle = b.a0 + b.wa * t;
+      for (const cx of [cx0, cx0 - W]) {
+        if (cx + reach < 0 || cx - reach > dishW) continue;
+        for (const cy of [cy0, cy0 - H]) {
+          if (cy + reach < 0 || cy - reach > dishH) continue;
+          out.push(cx, cy, reach, r * k, r / k, Math.cos(angle), Math.sin(angle), b.e3, b.e5, b.p3 + b.w3 * t, b.p5 + b.w5 * t, middle);
+        }
+      }
+    }
+  }
+  return Float32Array.from(out);
+}
+
 /**
  * Точки на внешнем краю пятен (где свет пятна сошёл до фона) — отсюда
  * начинаются течения. У каждого эллипса пятна их постоянное число, примерно

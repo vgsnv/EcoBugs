@@ -45,6 +45,8 @@ export const SUN_COLOR: Rgb = [255, 232, 185];
  * светом, ни будущей жизнью), но не главное на картинке. Цвет тонкого слоя.
  */
 export const MINERAL_COLOR: Rgb = [216, 165, 255];
+/** Цвет густой дымки минерала. */
+export const MINERAL_DEEP: Rgb = [185, 131, 237];
 
 export function mix(a: Rgb, b: Rgb, t: number): Rgb {
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];

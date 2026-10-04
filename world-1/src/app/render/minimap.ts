@@ -1,21 +1,26 @@
 /** Мини-карта в отдельной панели: вся чашка, пятна света, перегородки и рамка вида. */
-import type { World } from '../../core/index.ts';
+import { spotOutlines, type World } from '../../core/index.ts';
 import type { Camera } from './camera.ts';
 import { SHADE_COLOR, rgb, traceDish } from './palette.ts';
 
 export interface MinimapSources {
   readonly world: World;
   readonly camera: Camera;
-  /** Местность целиком (подложка), контуры пятен последнего кадра, перегородки. */
-  readonly base: HTMLCanvasElement;
-  readonly spots: Path2D;
+  /** Местность целиком (подложка; пока не готова — null) и перегородки. */
+  readonly base: HTMLCanvasElement | null;
   readonly parts: Path2D;
-  /** Сколько блоков местности ждут перерисовки: изменилась подложка — перерисовать карту. */
-  readonly queued: number;
 }
 
 export class Minimap {
   private key = '';
+  /** Номер подложки: новая подложка — перерисовать карту. */
+  private readonly bases = new WeakMap<HTMLCanvasElement, number>();
+  private counter = 0;
+
+  private remember(base: HTMLCanvasElement): number {
+    this.bases.set(base, ++this.counter);
+    return this.counter;
+  }
 
   reset(): void {
     this.key = '';
@@ -26,7 +31,8 @@ export class Minimap {
     if (!world || !mini.clientWidth || !mini.clientHeight) return;
     const { width, height } = world.dish;
     const dpr = camera.dpr;
-    const key = `${world.step}:${world.viscosity.version}:${camera.zoom}:${camera.cx}:${camera.cy}:${mini.clientWidth}:${mini.clientHeight}:${dpr}:${s.queued}`;
+    if (!s.base) return;
+    const key = `${world.step}:${world.viscosity.version}:${camera.zoom}:${camera.cx}:${camera.cy}:${mini.clientWidth}:${mini.clientHeight}:${dpr}:${this.bases.get(s.base) ?? this.remember(s.base)}`;
     if (key === this.key) return;
     this.key = key;
     const w = Math.round(mini.clientWidth * dpr);
@@ -44,8 +50,15 @@ export class Minimap {
     m.fillStyle = rgb(SHADE_COLOR);
     m.fillRect(0, 0, width, height);
     m.globalCompositeOperation = 'source-over';
+    // Пятна света — контурами по модели.
+    const spots = new Path2D();
+    for (const poly of spotOutlines(world.light, world.step, width, height, 48)) {
+      spots.moveTo(poly[0], poly[1]);
+      for (let i = 2; i < poly.length; i += 2) spots.lineTo(poly[i], poly[i + 1]);
+      spots.closePath();
+    }
     m.save();
-    m.clip(s.spots);
+    m.clip(spots);
     m.drawImage(s.base, 0, 0, width, height);
     m.restore();
     m.fillStyle = 'rgba(214, 230, 245, 0.9)';

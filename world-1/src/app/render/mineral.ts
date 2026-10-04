@@ -4,16 +4,14 @@
  */
 import { DRIFT_REFERENCE, MINERAL_LAYER, MINERAL_MOBILITY, MINERAL_PERIOD, flowAt, isBlocked, multiplierForLevel, sunAt, transparencyForDensity, type World } from '../../core/index.ts';
 import type { Frame } from './frame.ts';
-import type { LightMurk } from './light.ts';
-import { MINERAL_COLOR, rgb, smoothstep, traceDish, type Rgb } from './palette.ts';
+import { rgb, smoothstep, traceDish, type Rgb } from './palette.ts';
 
 /**
  * Дымка: фон около средней плотности не виден, тонкий слой — едва заметный
  * налёт, густой — плотнее, но полупрозрачный и светлее залежей. С какой
  * плотности (от средней) виден, при какой — полный; наибольшая
- * непрозрачность; цвет густого.
+ * непрозрачность (цвета — в палитре).
  */
-const MINERAL_DEEP: Rgb = [185, 131, 237];
 const MINERAL_FROM = 0.15;
 const MINERAL_FULL = 6;
 const MINERAL_ALPHA = 0.46;
@@ -50,24 +48,20 @@ const HAZE_REDRAW_ERUPTING_MS = 60;
 export const SINK_S = 1.5;
 
 export class MineralLayer {
-  /** Дымка минерала (клетка поля — пиксель) и версия поля, по которой она построена. */
-  private readonly mineralCanvas = document.createElement('canvas');
-  /** Затемнение от мутности (серый для умножения), той же сетки. */
-  private readonly murkCanvas = document.createElement('canvas');
-  /** Сколько света задерживает минерал (альфа = 1 − прозрачность), той же сетки — гасит маску пятен. */
-  private readonly lightMurkCanvas = document.createElement('canvas');
+  /**
+   * Минерал на сетке поля для шейдера: R — затемнение дна от мутности,
+   * G — сколько света задерживает минерал, B — густота цвета дымки, A — её
+   * непрозрачность. Пересобирается не чаще HAZE_REDRAW_MS; версия — для текстуры.
+   */
+  private packed: ImageData | null = null;
+  private scratch: { smooth: Float32Array; tmp: Float32Array } | null = null;
   private mineralVersion = -1;
   private hazeDrawnAt = 0;
-  private hazeScratch: { smooth: Float32Array; tmp: Float32Array; image: ImageData; dark: ImageData; held: ImageData } | null = null;
+  version = 0;
   /** Зёрна минерала: x, y, возраст, жизнь (по 4 числа); время анимации и шаг мира прошлого кадра. */
   private readonly grains = new Float32Array(GRAIN_COUNT * 4);
   private grainTime = -1;
   private grainStep = 0;
-
-  /** Задержка света минералом — для слоя света. */
-  get lightMurk(): LightMurk {
-    return { canvas: this.lightMurkCanvas, drawnAt: this.hazeDrawnAt };
-  }
 
   setWorld(world: World): void {
     this.mineralVersion = -1;
@@ -77,24 +71,23 @@ export class MineralLayer {
     this.grainStep = world.step;
   }
 
-  /** Дымка минерала (сначала пересобрать, если поле изменилось) и зёрна. */
-  draw(frame: Frame): void {
-    const { ctx, world } = frame;
+  /** Поле минерала для шейдера (пересобирается, если изменилось). */
+  field(world: World): { image: ImageData; version: number; width: number; height: number } {
     const m = world.mineral;
     const stock = world.params.mineralStock;
     const nowMs = performance.now();
     const hazeEvery = m.volcanoes.some((v) => v.stage === 'erupting') ? HAZE_REDRAW_ERUPTING_MS : HAZE_REDRAW_MS;
-    if ((m.version !== this.mineralVersion && nowMs - this.hazeDrawnAt >= hazeEvery) || this.mineralCanvas.width !== m.cols) {
+    if (!this.packed || this.packed.width !== m.cols || this.packed.height !== m.rows) {
+      this.packed = new ImageData(m.cols, m.rows);
+      this.scratch = { smooth: new Float32Array(m.field.length), tmp: new Float32Array(m.field.length) };
+      this.mineralVersion = -1;
+    }
+    if (m.version !== this.mineralVersion && nowMs - this.hazeDrawnAt >= hazeEvery) {
       this.hazeDrawnAt = nowMs;
       this.mineralVersion = m.version;
-      const c = this.mineralCanvas;
-      if (c.width !== m.cols || c.height !== m.rows) { c.width = m.cols; c.height = m.rows; }
-      const mctx = c.getContext('2d')!;
-      if (!this.hazeScratch || this.hazeScratch.image.width !== m.cols || this.hazeScratch.image.height !== m.rows) {
-        this.hazeScratch = { smooth: new Float32Array(m.field.length), tmp: new Float32Array(m.field.length),
-          image: mctx.createImageData(m.cols, m.rows), dark: mctx.createImageData(m.cols, m.rows), held: mctx.createImageData(m.cols, m.rows) };
-      }
-      const { image: img, smooth, tmp, dark, held } = this.hazeScratch;
+      this.version++;
+      const { smooth, tmp } = this.scratch!;
+      const data = this.packed.data;
       const area = m.cell * m.cell;
       // Размытие (два прохода [1 2 1] по каждой оси) — скопления выглядят
       // округлыми, а не квадратами клеток, но край различим. Только для показа.
@@ -115,48 +108,30 @@ export class MineralLayer {
           }
         }
       }
-      const murk = this.murkCanvas;
-      if (murk.width !== m.cols || murk.height !== m.rows) { murk.width = m.cols; murk.height = m.rows; }
-      const kctx = murk.getContext('2d')!;
       const meanT = transparencyForDensity(stock);
       for (let k = 0; k < m.field.length; k++) {
+        const transparency = transparencyForDensity(smooth[k] / area);
         // Мутность: темнее там, где прозрачность ниже, чем при средней плотности.
-        const shade = Math.min(1, transparencyForDensity(smooth[k] / area) / meanT);
-        const g = 255 * (1 - (1 - shade) * MURK_STRENGTH);
-        dark.data[k * 4] = dark.data[k * 4 + 1] = dark.data[k * 4 + 2] = g;
-        dark.data[k * 4 + 3] = 255;
-      }
-      kctx.putImageData(dark, 0, 0);
-      const lm = this.lightMurkCanvas;
-      if (lm.width !== m.cols || lm.height !== m.rows) { lm.width = m.cols; lm.height = m.rows; }
-      const lctx = lm.getContext('2d')!;
-      for (let k = 0; k < m.field.length; k++) {
-        held.data[k * 4 + 3] = 255 * Math.min(1, (1 - transparencyForDensity(smooth[k] / area)) * MURK_LIGHT);
-      }
-      lctx.putImageData(held, 0, 0);
-      for (let k = 0; k < m.field.length; k++) {
+        const shade = Math.min(1, transparency / meanT);
+        data[k * 4] = 255 * (1 - (1 - shade) * MURK_STRENGTH);
+        data[k * 4 + 1] = 255 * Math.min(1, (1 - transparency) * MURK_LIGHT);
         // Градации: по логарифму плотности — видно и тонкий налёт, и густое ядро.
         const d = smooth[k] / area / stock;
         const t = d <= MINERAL_FROM ? 0 : Math.min(1, Math.log(d / MINERAL_FROM) / Math.log(MINERAL_FULL / MINERAL_FROM));
-        const a = t ** MINERAL_GAMMA * MINERAL_ALPHA;
-        const blend = smoothstep(0.4, 1, t);
-        img.data[k * 4] = MINERAL_COLOR[0] + (MINERAL_DEEP[0] - MINERAL_COLOR[0]) * blend;
-        img.data[k * 4 + 1] = MINERAL_COLOR[1] + (MINERAL_DEEP[1] - MINERAL_COLOR[1]) * blend;
-        img.data[k * 4 + 2] = MINERAL_COLOR[2] + (MINERAL_DEEP[2] - MINERAL_COLOR[2]) * blend;
-        img.data[k * 4 + 3] = a * 255;
+        data[k * 4 + 2] = 255 * smoothstep(0.4, 1, t);
+        data[k * 4 + 3] = 255 * t ** MINERAL_GAMMA * MINERAL_ALPHA;
       }
-      mctx.putImageData(img, 0, 0);
     }
+    return { image: this.packed, version: this.version, width: m.cols, height: m.rows };
+  }
+
+  /** Зёрна минерала — внутри чашки. */
+  draw(frame: Frame): void {
+    const { ctx, world } = frame;
     ctx.save();
     ctx.beginPath();
     traceDish(ctx, world.dish);
     ctx.clip();
-    ctx.imageSmoothingEnabled = true;
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'multiply';
-    ctx.drawImage(this.murkCanvas, 0, 0, m.cols * m.cell, m.rows * m.cell);
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.drawImage(this.mineralCanvas, 0, 0, m.cols * m.cell, m.rows * m.cell);
     this.drawGrains(frame);
     ctx.restore();
   }

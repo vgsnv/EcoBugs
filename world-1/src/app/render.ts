@@ -1,17 +1,19 @@
 /**
- * Отрисовка мира на холсте в разрешении экрана — как освещённая местность,
- * с камерой: масштаб и перемещение. Кадр собирается из слоёв (render/*.ts)
- * снизу вверх: тень чашки, местность, свет, вода, минерал, вулканы и
- * воронки, процессы, стекло стен и перегородок, проба, линейки.
+ * Отрисовка мира в разрешении экрана — как освещённая местность, с камерой:
+ * масштаб и перемещение. Два холста одного размера. Нижний (WebGL2, render/field.ts)
+ * — тень чашки, местность, свет, вода, минерал, свечения и отверстия воронок.
+ * Верхний (Canvas 2D, прозрачный) — объекты: зёрна, жерла, крупинки, процессы,
+ * стекло стен и перегородок, проба, линейки. Слои — в render/*.ts.
  */
 import { CoordinateRulers } from './rulers.ts';
 import { insideDish, sunAt, type MineralProcesses, type World } from '../core/index.ts';
 import { Camera } from './render/camera.ts';
+import { FieldRenderer } from './render/field.ts';
 import type { Frame } from './render/frame.ts';
 import { LightLayer } from './render/light.ts';
 import { MineralLayer } from './render/mineral.ts';
 import { Minimap } from './render/minimap.ts';
-import { lightTone, smoothstep, traceDish } from './render/palette.ts';
+import { lightTone, smoothstep } from './render/palette.ts';
 import { ProcessesLayer } from './render/processes.ts';
 import { SourcesLayer } from './render/sources.ts';
 import { TerrainLayer } from './render/terrain.ts';
@@ -36,6 +38,7 @@ export class WorldRenderer {
   private readonly walls = new WallsLayer();
   private readonly processLayer = new ProcessesLayer();
   private readonly minimap = new Minimap();
+  private readonly field = new FieldRenderer();
   private probePoint: { x: number; y: number } | null = null;
   private world!: World;
   private frameKey = '';
@@ -45,6 +48,8 @@ export class WorldRenderer {
     this.camera = new Camera(canvas, (relative) => this.onZoomChange(relative));
     this.rulers = new CoordinateRulers(canvas);
     this.ctx = canvas.getContext('2d')!;
+    // Нижний холст — под верхним: тот же размер и место, события мыши — верхнему.
+    canvas.before(this.field.canvas);
     new ResizeObserver(() => this.resize()).observe(canvas);
   }
 
@@ -71,7 +76,8 @@ export class WorldRenderer {
     this.camera.setWorld(world);
     this.terrain.setWorld(world);
     this.walls.setWorld(world);
-    this.water.buildSparkles(world, this.terrain.drawnLevel, this.terrain.drawnDeposit);
+    const fresh = this.terrain.refresh();
+    if (fresh) this.water.buildSparkles(world, fresh.level, fresh.deposits);
     this.water.resetFoam();
     this.resize();
     this.fit();
@@ -88,12 +94,9 @@ export class WorldRenderer {
     const changed = w !== this.canvas.width || h !== this.canvas.height;
     if (changed) {
       this.canvas.width = w; this.canvas.height = h;
-      // Мягкие световые эффекты — один пиксель на CSS-пиксель;
-      // карта, линейки и штрихи остаются в полном разрешении устройства.
-      const effectScale = Math.min(1, 1 / dpr);
-      const ew = Math.max(1, Math.round(w * effectScale)), eh = Math.max(1, Math.round(h * effectScale));
-      this.light.resize(ew, eh);
-      this.water.resize(ew, eh);
+      const style = this.field.canvas.style;
+      style.left = `${this.canvas.offsetLeft}px`; style.top = `${this.canvas.offsetTop}px`;
+      style.width = `${this.canvas.clientWidth}px`; style.height = `${this.canvas.clientHeight}px`;
     }
     if (!this.world || !changed) return;
     if (this.camera.fitted) this.fit();
@@ -112,9 +115,9 @@ export class WorldRenderer {
     this.camera.setView(this.camera.fitZoom() * relative, x, y);
   }
 
-  /** Остались недостроенные плитки или блоки местности — следующий кадр продолжит. */
+  /** Подложка мини-карты ещё строится — следующие вызовы drawMinimap её доделают. */
   pendingWork(): boolean {
-    return this.terrain.unfinished;
+    return this.terrain.minimapPending;
   }
 
   /** Приблизить (factor > 1) или отдалить так, чтобы точка экрана осталась на месте; без точки — центр. */
@@ -139,7 +142,7 @@ export class WorldRenderer {
   draw(animTime = 0, flowStep = this.world.step): void {
     const camera = this.camera;
     const key = `${animTime}:${flowStep}:${this.world.step}:${this.world.mineral.version}:${this.world.viscosity.version}:${camera.zoom}:${camera.cx}:${camera.cy}:${this.canvas.width}:${this.canvas.height}:${this.showProcesses}`;
-    if (key === this.frameKey && !this.terrain.unfinished) return;
+    if (key === this.frameKey) return;
     this.frameKey = key;
     const w = this.world;
     const frame: Frame = {
@@ -147,30 +150,39 @@ export class WorldRenderer {
       detail: smoothstep(1, 4, camera.zoom / camera.fitZoom()),
       lit: lightTone(sunAt(w.light, w.step)) / lightTone(1),
     };
-    if (this.terrain.begin()) this.water.buildSparkles(w, this.terrain.drawnLevel, this.terrain.drawnDeposit);
     const ctx = this.ctx;
-    const view = camera.view();
-
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    this.walls.drawShadow(frame);
-    ctx.save();
-    ctx.beginPath();
-    ctx.setTransform(...view);
-    traceDish(ctx, w.dish);
-    ctx.clip();
-    this.terrain.draw(frame);
-    this.light.draw(frame, this.mineral.lightMurk);
-    this.water.drawGlints(frame, this.light.spots, this.terrain.waterMask, this.showProcesses);
-    this.water.drawSparkles(frame, this.light.spots);
-    this.water.drawFoam(frame);
-    ctx.restore();
+    if (!this.field.ready) {
+      this.frameKey = '';
+      this.unsupported(this.field.supported ? 'Изображение мира восстанавливается…' : 'Для показа мира нужен браузер с WebGL2.');
+      return;
+    }
+    const fresh = this.terrain.refresh();
+    if (fresh) this.water.buildSparkles(w, fresh.level, fresh.deposits);
 
-    ctx.setTransform(...view);
+    // Нижний холст: поля.
+    const light = this.light.update(frame);
+    this.field.begin(frame, w.partitions.thickness);
+    const mineral = this.mineral.field(w);
+    this.field.fields({
+      spots: light.spots,
+      mineral,
+      terrain: this.terrain.data(),
+      ripple: this.water.ripple,
+      flow: this.showProcesses ? null : this.water.flow(frame),
+      foam: this.water.foam(w),
+      ...light.strength,
+      rippleMode: this.showProcesses ? 1 : 0,
+    });
+    this.water.drawSparkles(frame, this.field);
+
+    // Верхний холст: объекты; свечения и отверстия воронок копятся для нижнего.
+    ctx.setTransform(...camera.view());
     this.mineral.draw(frame);
-    this.sources.drawEruptions(frame);
+    this.sources.drawEruptions(frame, this.field);
     // Жерла — отверстия в недра: поверх течений, ничто не проходит сквозь них.
-    this.sources.drawVents(frame);
+    this.sources.drawVents(frame, this.field);
     if (this.showProcesses) this.processLayer.draw(frame, this.processes);
     this.walls.draw(frame);
     if (this.probePoint) {
@@ -183,13 +195,40 @@ export class WorldRenderer {
       ctx.restore();
     }
     this.rulers.draw(ctx, w.dish, camera.zoom, camera.cx, camera.cy, camera.dpr);
+    this.field.finish();
+  }
+
+  /** Сообщение вместо мира, когда WebGL2 нет или контекст потерян. */
+  private unsupported(text: string): void {
+    const ctx = this.ctx;
+    ctx.fillStyle = '#41505a';
+    ctx.font = `${14 * this.camera.dpr}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(text, this.canvas.width / 2, this.canvas.height / 2);
+    ctx.textAlign = 'start';
+  }
+
+  /** Дождаться, пока видеокарта дорисует кадр (для замеров). */
+  syncGpu(): void {
+    this.field.sync();
+  }
+
+  /** Кадр целиком (оба холста) — для проверки отрисовки; вызывать сразу после draw. */
+  snapshot(): HTMLCanvasElement {
+    const out = document.createElement('canvas');
+    out.width = this.canvas.width; out.height = this.canvas.height;
+    const c = out.getContext('2d')!;
+    if (this.field.ready) c.drawImage(this.field.canvas, 0, 0);
+    c.drawImage(this.canvas, 0, 0);
+    return out;
   }
 
   /** Мини-карта в отдельной панели: вся чашка, пятна света, перегородки и рамка вида. */
   drawMinimap(mini: HTMLCanvasElement): void {
-    if (!this.world) return;
+    // Скрытая карта не рисуется — и подложка для неё не строится.
+    if (!this.world || !mini.clientWidth || !mini.clientHeight) return;
     this.minimap.draw(mini, {
-      world: this.world, camera: this.camera, base: this.terrain.base, spots: this.light.lastSpots, parts: this.walls.parts, queued: this.terrain.queued,
+      world: this.world, camera: this.camera, base: this.terrain.minimapBase(), parts: this.walls.parts,
     });
   }
 

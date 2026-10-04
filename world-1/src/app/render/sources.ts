@@ -2,11 +2,13 @@
  * Вулканы и воронки — отверстия в недра: жерла по стадиям, вспышки залпов и
  * свечение по темпу выброса, приток вещества из жерла; отверстия воронок,
  * свечение недр, крупинки, стекающие в отверстие, и искры ушедших вниз.
+ * Свечения, искры и отверстия воронок — на нижнем холсте (GlowSink), остальное — на верхнем.
  */
 import { BURST_WIDTH, DRIFT_REFERENCE, ERUPTION_RADIUS, VOLCANO_BIRTH, VOLCANO_POWER, eruptionBursts, eruptionRate, flowAt, hash3, insideDish, isBlocked, ventPush, type Volcano, type World } from '../../core/index.ts';
+import type { GlowSink } from './field.ts';
 import type { Frame } from './frame.ts';
 import { SINK_S } from './mineral.ts';
-import { MINERAL_COLOR, mix, rgb, smoothstep, traceDish, type Rgb } from './palette.ts';
+import { MINERAL_COLOR, mix, rgb, smoothstep, type Rgb } from './palette.ts';
 
 /**
  * Извержение — показывается только то, что есть в модели: вспышка света у
@@ -85,31 +87,12 @@ const VENT_ERUPT_CSS: readonly [number, number] = [5, 11];
 const VENT_VOLUME_FROM = 0.35;
 const BAR_OUT: Rgb = [226, 200, 255];
 
-/** Мягкое круглое пятно цвета `c` — спрайт свечения и фронта (кеш по цвету). */
-const puffSprites = new Map<string, HTMLCanvasElement>();
-function puffSprite(c: Rgb): HTMLCanvasElement {
-  const key = c.join(',');
-  let sprite = puffSprites.get(key);
-  if (sprite) return sprite;
-  const size = 64;
-  sprite = document.createElement('canvas');
-  sprite.width = sprite.height = size;
-  const g = sprite.getContext('2d')!;
-  const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  grad.addColorStop(0, rgb(c, 1));
-  grad.addColorStop(0.4, rgb(c, 0.55));
-  grad.addColorStop(1, rgb(c, 0));
-  g.fillStyle = grad;
-  g.fillRect(0, 0, size, size);
-  puffSprites.set(key, sprite);
-  return sprite;
-}
-
 export class SourcesLayer {
   /** Крупинки притока из жерла по вулканам: угол, расстояние от центра, жива ли (−1 — нет); шаг мира прошлого кадра. */
   private springs = new Map<number, { p: Float32Array; step: number }>();
-  /** Отверстия воронок (клетка поля — пиксель). */
-  private readonly funnelCanvas = document.createElement('canvas');
+  /** Отверстия воронок: пиксели (в FUNNEL_RES раз детальнее клеток поля, цвет умножен на альфу) и версия для текстуры. */
+  private funnelPixels = { data: new Uint8Array(0), width: 0, height: 0 };
+  private funnelVersion = 0;
   /** Показанные воронки: место ядра, отверстие, ареол, проявленность 0…1, жива ли, крупинки (x, y, возраст; −1 — нет). */
   private funnelViews: { id: number; x: number; y: number; cells: Int32Array; reach: number; alpha: number; alive: boolean; grains: Float32Array }[] = [];
   private funnelTime = -1;
@@ -141,10 +124,9 @@ export class SourcesLayer {
    * Извержения: вспышка каждого залпа (во времени анимации — залп, прошедший
    * между кадрами, тоже её даёт) и свечение жерла по темпу выброса.
    */
-  drawEruptions(frame: Frame): void {
-    const { ctx, camera, world: w, animTime } = frame;
+  drawEruptions(frame: Frame, glows: GlowSink): void {
+    const { camera, world: w, animTime } = frame;
     const m = w.mineral;
-    const light = puffSprite(ERUPTION_LIGHT);
 
     // Залпы, прошедшие с прошлого кадра, — вспышки (слабые залпы — меньше).
     const live = new Set<string>();
@@ -163,29 +145,20 @@ export class SourcesLayer {
     for (const key of this.seenBursts.keys()) if (!live.has(key)) this.seenBursts.delete(key);
     this.shocks = this.shocks.filter((s) => animTime - s.t < ERUPTION_FLASH_S);
 
-    ctx.save();
-    ctx.beginPath();
-    traceDish(ctx, w.dish);
-    ctx.clip();
-    ctx.globalCompositeOperation = 'screen';
-
     // Свечение жерла — по темпу выброса; между залпами слабее.
     for (const v of m.volcanoes) {
       if (v.stage !== 'erupting') continue;
       const flicker = 0.8 + 0.12 * Math.sin(animTime * 11 + v.id * 1.7) + 0.08 * Math.sin(animTime * 23.3 + v.id);
       const r = Math.max(camera.px(VENT_GLOW_MIN_CSS), v.radius * VENT_GLOW) * (0.85 + 0.15 * flicker);
-      ctx.globalAlpha = Math.min(1, (0.15 + 0.85 * this.ventStrength(v)) * flicker);
-      ctx.drawImage(light, v.x - r, v.y - r, r * 2, r * 2);
+      glows.glow(ERUPTION_LIGHT, v.x, v.y, r, Math.min(1, (0.15 + 0.85 * this.ventStrength(v)) * flicker), true);
     }
 
     // Вспышки залпов.
     for (const s of this.shocks) {
       const f = (animTime - s.t) / ERUPTION_FLASH_S;
       const r = Math.max(camera.px(VENT_GLOW_MIN_CSS * 2), ERUPTION_RADIUS * 0.4 * s.scale) * (0.6 + 0.6 * f);
-      ctx.globalAlpha = (1 - f) ** 2;
-      ctx.drawImage(light, s.x - r, s.y - r, r * 2, r * 2);
+      glows.glow(ERUPTION_LIGHT, s.x, s.y, r, (1 - f) ** 2, true);
     }
-    ctx.restore();
   }
 
   /**
@@ -202,7 +175,7 @@ export class SourcesLayer {
    * - потух — отверстие сереет и затягивается до исчезновения.
    * Затем воронки.
    */
-  drawVents(frame: Frame): void {
+  drawVents(frame: Frame, glows: GlowSink): void {
     const { ctx, camera, world, animTime } = frame;
     const m = world.mineral;
     const step = world.step;
@@ -262,7 +235,7 @@ export class SourcesLayer {
       }
     }
     for (const id of this.springs.keys()) if (!m.volcanoes.some((v) => v.id === id && v.stage === 'erupting')) this.springs.delete(id);
-    this.drawFunnels(frame);
+    this.drawFunnels(frame, glows);
     ctx.globalAlpha = 1;
   }
 
@@ -324,7 +297,7 @@ export class SourcesLayer {
    * течений — прямо или по спирали, если рядом течение; дойдя до отверстия,
    * зависают и тают (у жерла наоборот: рождаются точкой и растут).
    */
-  private drawFunnels(frame: Frame): void {
+  private drawFunnels(frame: Frame, glows: GlowSink): void {
     const { ctx, camera, world: w, animTime, detail } = frame;
     const m = w.mineral;
     const dt = this.funnelTime < 0 ? 0 : Math.min(0.1, Math.max(0, animTime - this.funnelTime));
@@ -357,11 +330,15 @@ export class SourcesLayer {
     const n = m.field.length;
     const holes = new Uint8Array(n);
     for (const e of this.funnelViews) if (e.alpha > 0) for (const k of e.cells) holes[k] = 1;
-    const c = this.funnelCanvas;
     const S = FUNNEL_RES;
-    if (c.width !== m.cols * S) { c.width = m.cols * S; c.height = m.rows * S; this.funnelDrawn = -1; }
+    if (this.funnelPixels.width !== m.cols * S || this.funnelPixels.height !== m.rows * S) {
+      this.funnelPixels = { data: new Uint8Array(m.cols * S * m.rows * S * 4), width: m.cols * S, height: m.rows * S };
+      this.funnelDrawn = -1;
+    }
+    const pixels = this.funnelPixels;
     if (this.funnelDrawn !== m.version) {
       this.funnelDrawn = m.version;
+      this.funnelVersion++;
       const shape = new Float32Array(n), power = new Float32Array(n), depth = new Float32Array(n);
       for (const e of this.funnelViews) {
         // Глубина клетки отверстия — расстояние от её центра до края отверстия (в клетках), к центру — 1.
@@ -401,9 +378,7 @@ export class SourcesLayer {
       blur(shape, 1);
       blur(power, 2);
       blur(depth, 1);
-      const W = m.cols * S, H = m.rows * S;
-      const fctx = c.getContext('2d')!;
-      fctx.clearRect(0, 0, W, H);
+      pixels.data.fill(0);
       const at = (a: Float32Array, fx: number, fy: number) => {
         const x = Math.min(m.cols - 1, Math.max(0, fx)), y = Math.min(m.rows - 1, Math.max(0, fy));
         const i0 = Math.floor(x), j0 = Math.floor(y), i1 = Math.min(m.cols - 1, i0 + 1), j1 = Math.min(m.rows - 1, j0 + 1);
@@ -416,7 +391,6 @@ export class SourcesLayer {
         for (const k of e.cells) { const i = k % m.cols, j = (k - i) / m.cols; i0 = Math.min(i0, i); i1 = Math.max(i1, i); j0 = Math.min(j0, j); j1 = Math.max(j1, j); }
         i0 = Math.max(0, i0 - 2); j0 = Math.max(0, j0 - 2); i1 = Math.min(m.cols - 1, i1 + 2); j1 = Math.min(m.rows - 1, j1 + 2);
         const bw = (i1 - i0 + 1) * S, bh = (j1 - j0 + 1) * S;
-        const img = fctx.getImageData(i0 * S, j0 * S, bw, bh);
         for (let py = 0; py < bh; py++) {
           for (let px = 0; px < bw; px++) {
             const fx = i0 + (px + 0.5) / S - 0.5, fy = j0 + (py + 0.5) / S - 0.5;
@@ -430,33 +404,26 @@ export class SourcesLayer {
             let col = mix(FUNNEL_COLOR, FUNNEL_DEEP, smoothstep(0, 1, d));
             col = mix(col, FUNNEL_RIM_COLOR, rim * 0.65);
             const a = Math.max(inside * FUNNEL_ALPHA, rim * FUNNEL_RIM_ALPHA) * smoothstep(0, FUNNEL_SHOWN, st);
-            const o = (py * bw + px) * 4;
-            img.data[o] = col[0];
-            img.data[o + 1] = col[1];
-            img.data[o + 2] = col[2];
-            img.data[o + 3] = Math.max(img.data[o + 3], 255 * a);
+            const o = ((j0 * S + py) * pixels.width + i0 * S + px) * 4;
+            const alpha = Math.max(pixels.data[o + 3] / 255, a);
+            pixels.data[o] = col[0] * alpha;
+            pixels.data[o + 1] = col[1] * alpha;
+            pixels.data[o + 2] = col[2] * alpha;
+            pixels.data[o + 3] = 255 * alpha;
           }
         }
-        fctx.putImageData(img, i0 * S, j0 * S);
       }
     }
-    ctx.globalAlpha = 0.6 + 0.4 * detail;
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(c, 0, 0, m.cols * m.cell, m.rows * m.cell);
-    ctx.globalAlpha = 1;
+    glows.image(pixels, this.funnelVersion, 0, 0, m.cols * m.cell, m.rows * m.cell, 0.6 + 0.4 * detail);
     // Свечение недр из отверстия — по силе воронки: рождающаяся тлеет, полная светится, тающая гаснет.
-    const glow = puffSprite(FUNNEL_GLOW);
-    ctx.globalCompositeOperation = 'screen';
     for (const e of this.funnelViews) {
       if (e.alpha <= 0) continue;
       let cx = 0, cy = 0;
       for (const k of e.cells) { const i = k % m.cols; cx += (i + 0.5) * m.cell; cy += ((k - i) / m.cols + 0.5) * m.cell; }
       cx /= e.cells.length; cy /= e.cells.length;
       const r = Math.max(camera.px(FUNNEL_GLOW_MIN_CSS), Math.sqrt((e.cells.length * m.cell * m.cell) / Math.PI) * FUNNEL_GLOW_SIZE);
-      ctx.globalAlpha = FUNNEL_GLOW_ALPHA * e.alpha;
-      ctx.drawImage(glow, cx - r, cy - r, r * 2, r * 2);
+      glows.glow(FUNNEL_GLOW, cx, cy, r, FUNNEL_GLOW_ALPHA * e.alpha, false);
     }
-    ctx.globalCompositeOperation = 'source-over';
     // Крупинки стекают в отверстие по сумме течений.
     const v: [number, number] = [0, 0];
     const size = camera.px(FUNNEL_GRAIN_CSS);
@@ -523,15 +490,11 @@ export class SourcesLayer {
     }
     // Искры — крупинки, ушедшие в недра: короткая вспышка, расширяется и гаснет.
     this.funnelSparks = this.funnelSparks.filter((sp) => animTime - sp.t < SPARK_S);
-    ctx.globalCompositeOperation = 'screen';
-    const spark = puffSprite(FUNNEL_PARTICLE);
     for (const sp of this.funnelSparks) {
       const f = (animTime - sp.t) / SPARK_S;
       const r = camera.px(SPARK_CSS) * (0.6 + 0.8 * f);
-      ctx.globalAlpha = 0.35 * (1 - f) ** 2 * (0.5 + 0.5 * detail);
-      ctx.drawImage(spark, sp.x - r, sp.y - r, r * 2, r * 2);
+      glows.glow(FUNNEL_PARTICLE, sp.x, sp.y, r, 0.35 * (1 - f) ** 2 * (0.5 + 0.5 * detail), false);
     }
-    ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
   }
 

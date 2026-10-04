@@ -1,26 +1,18 @@
 /**
  * Вода: рябь, переносимая течениями (на освещённой воде), пена у берега там,
  * где течение бьёт в сушу, и блёстки кристаллов залежей в пятнах света.
+ * Здесь — данные для шейдера полей (течения в виде, маска пены) и блёстки.
  */
 import { DRIFT_REFERENCE, flowAt, hash3, insideDish, isBlocked, periodicFbm, sunAt, type World } from '../../core/index.ts';
-import { WaterFlowShader } from '../water-flow-shader.ts';
+import type { GlowSink } from './field.ts';
 import type { Frame } from './frame.ts';
 import { smoothstep } from './palette.ts';
 
-/** Блики на освещённой воде: сила, размер узора ряби в единицах мира, скорость, единиц в секунду. */
-const GLINT_ALPHA = 0.15;
-const GLINT_LAYERS = [
-  { size: 130, vx: 5, vy: 2.5 },
-  { size: 210, vx: -3.5, vy: 4 },
-] as const;
 /** Блёстки кристаллов: с какой густоты залежей, скорость мерцания, порог вспышки (доля времени ярко — малая). */
 const SPARKLE_DEPOSIT = 2;
 const SPARKLE_SPEED = 1.3;
 const SPARKLE_THRESHOLD = 0.965;
-/** Пена у берега: насколько видна, фактура (размер ряби, единиц мира), ровная часть, пересчёт маски не чаще, мс. */
-const FOAM_ALPHA = 0.4;
-const FOAM_RIPPLE_SIZE = 60;
-const FOAM_BASE = 0.35;
+/** Пересчёт маски пены не чаще, мс (её вид — фактура 60 единиц, ровная часть 0,35, сила 0,4 — в шейдере полей). */
 const FOAM_REBUILD_MS = 300;
 
 /** Бесшовная текстура ряби: тонкая светлая сетка там, где шум близок к нулю. */
@@ -55,33 +47,30 @@ function ripple(): HTMLCanvasElement {
 }
 
 export class WaterLayer {
-  /** Рабочий слой бликов, пены и блёсток — того же размера, что маска пятен. */
-  private readonly glint = document.createElement('canvas');
-  private readonly gctx: CanvasRenderingContext2D;
-  private readonly ripplePattern: CanvasPattern;
-  private readonly waterFlow = new WaterFlowShader(ripple());
+  /** Узор ряби — общий для течений, пены и равномерной ряби. */
+  readonly ripple = ripple();
   /** Блёстки (x, y, фаза), маска пены и когда она построена. */
   private sparkles = new Float32Array(0);
   private readonly foamCanvas = document.createElement('canvas');
   private foamBuiltAt = 0;
   private foamStep = -1;
-
-  constructor() {
-    this.gctx = this.glint.getContext('2d')!;
-    this.ripplePattern = this.gctx.createPattern(ripple(), 'repeat')!;
-  }
+  private foamVersion = 0;
+  /** Скорость течений в видимой части для ряби: выборка по сетке вида, закодированная в байты. */
+  private flowKey = '';
+  private flowStep = -1;
+  private flowBuiltAt = -Infinity;
+  private flowVersion = 0;
+  private flowScale = 1;
+  private flowBytes = new Uint8Array(0);
+  private flowSamples = new Float32Array(0);
+  private flowGrid: { cols: number; rows: number; bounds: number[] } = { cols: 0, rows: 0, bounds: [0, 0, 1, 1] };
 
   resetFlow(): void {
-    this.waterFlow.reset();
+    this.flowKey = ''; this.flowStep = -1; this.flowBuiltAt = -Infinity;
   }
 
   resetFoam(): void {
     this.foamStep = -1;
-  }
-
-  resize(width: number, height: number): void {
-    this.glint.width = width;
-    this.glint.height = height;
   }
 
   /** Точки блёсток: на плотных залежах неглубоко — по нескольку на клетку, место и фаза из хеша. */
@@ -103,136 +92,80 @@ export class WaterLayer {
     this.sparkles = Float32Array.from(out);
   }
 
-  /** Блики: две сдвигающиеся ряби, оставленные только на воде и в пятнах света. */
-  drawGlints(frame: Frame, spots: HTMLCanvasElement, waterMask: HTMLCanvasElement, showProcesses: boolean): void {
-    const { ctx, canvas, camera, world: w, animTime: time, flowStep, lit } = frame;
-    const g = this.gctx;
-    const [x0, y0, x1, y1] = camera.visible();
-    g.setTransform(1, 0, 0, 1, 0, 0);
-    g.globalAlpha = 1;
-    g.globalCompositeOperation = 'source-over';
-    g.clearRect(0, 0, this.glint.width, this.glint.height);
-    const velocity: [number, number] = [0, 0];
-    const shader = !showProcesses && this.waterFlow.draw(this.glint.width, this.glint.height, [x0, y0, x1, y1], flowStep, w.step, w.mineral.cell,
-      (x, y, out, k) => {
-        const allowed = insideDish(w.dish, x, y) && !isBlocked(w.partitions, x, y);
-        flowAt(w, x, y, velocity);
-        out[k] = allowed ? velocity[0] * 10 : 0; out[k + 1] = allowed ? velocity[1] * 10 : 0;
-      });
-    const renderer = shader ? 'webgl' : 'canvas2d';
-    if (canvas.dataset.flowRenderer !== renderer) canvas.dataset.flowRenderer = renderer;
-    if (shader) {
-      g.drawImage(this.waterFlow.canvas, 0, 0, this.glint.width, this.glint.height);
-    } else {
-      g.setTransform(...camera.viewOn(this.glint));
-      GLINT_LAYERS.forEach((layer, n) => {
-        const k = layer.size / 256;
-        const t = showProcesses ? time : 0;
-        this.ripplePattern.setTransform(new DOMMatrix([k, 0, 0, k, layer.vx * t, layer.vy * t]));
-        g.fillStyle = this.ripplePattern;
-        g.globalCompositeOperation = n === 0 ? 'source-over' : 'lighter';
-        g.fillRect(x0, y0, x1 - x0, y1 - y0);
-      });
+  /**
+   * Течения для ряби в видимой части: сетка вида не крупнее 128 × 128, на
+   * воде; пересобирается при смене вида или (не чаще раза в 100 мс) шага.
+   * Скорость ×10 кодируется двумя байтами на ось относительно наибольшей.
+   */
+  flow(frame: Frame): { data: Uint8Array; cols: number; rows: number; bounds: readonly number[]; scale: number; version: number } {
+    const { camera, world: w } = frame;
+    const bounds = camera.visible();
+    const cell = w.mineral.cell;
+    const cols = Math.max(2, Math.min(128, Math.ceil((bounds[2] - bounds[0]) / cell)));
+    const rows = Math.max(2, Math.min(128, Math.ceil((bounds[3] - bounds[1]) / cell)));
+    const key = `${bounds.join(':')}:${cols}:${rows}`;
+    const now = performance.now();
+    if (key !== this.flowKey || (w.step !== this.flowStep && now - this.flowBuiltAt >= 100)) {
+      this.flowKey = key; this.flowStep = w.step; this.flowBuiltAt = now;
+      this.flowVersion++;
+      this.flowGrid = { cols, rows, bounds };
+      if (this.flowBytes.length !== cols * rows * 4) { this.flowBytes = new Uint8Array(cols * rows * 4); this.flowSamples = new Float32Array(cols * rows * 2); }
+      const velocity: [number, number] = [0, 0];
+      let max = 0.1;
+      for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+        const wx = bounds[0] + (bounds[2] - bounds[0]) * (x + .5) / cols;
+        const wy = bounds[1] + (bounds[3] - bounds[1]) * (y + .5) / rows;
+        const k = (y * cols + x) * 2;
+        const allowed = insideDish(w.dish, wx, wy) && !isBlocked(w.partitions, wx, wy);
+        flowAt(w, wx, wy, velocity);
+        this.flowSamples[k] = allowed ? velocity[0] * 10 : 0; this.flowSamples[k + 1] = allowed ? velocity[1] * 10 : 0;
+        max = Math.max(max, Math.abs(this.flowSamples[k]), Math.abs(this.flowSamples[k + 1]));
+      }
+      this.flowScale = max;
+      for (let k = 0, q = 0; k < this.flowBytes.length; k += 4, q += 2) {
+        const vx = Math.round(this.flowSamples[q] / max * 32767 + 32768);
+        const vy = Math.round(this.flowSamples[q + 1] / max * 32767 + 32768);
+        this.flowBytes[k] = vx >> 8; this.flowBytes[k + 1] = vx & 255;
+        this.flowBytes[k + 2] = vy >> 8; this.flowBytes[k + 3] = vy & 255;
+      }
     }
-    g.setTransform(...camera.viewOn(this.glint));
-    g.globalCompositeOperation = 'destination-in';
-    g.imageSmoothingEnabled = true;
-    g.drawImage(waterMask, 0, 0, w.dish.width, w.dish.height);
-    g.setTransform(1, 0, 0, 1, 0, 0);
-    if (!shader) g.drawImage(spots, 0, 0);
-    g.globalCompositeOperation = 'source-over';
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalCompositeOperation = 'screen';
-    ctx.globalAlpha = (shader ? 0.5 : GLINT_ALPHA) * Math.min(1, lit);
-    ctx.drawImage(this.glint, 0, 0, canvas.width, canvas.height);
+    return { data: this.flowBytes, ...this.flowGrid, scale: this.flowScale, version: this.flowVersion };
   }
 
   /**
    * Блёстки кристаллов залежей: точки на плотных неглубоких залежах коротко
    * вспыхивают каждая в своё время; видны только в пятнах света.
    */
-  drawSparkles(frame: Frame, spots: HTMLCanvasElement): void {
+  drawSparkles(frame: Frame, sink: GlowSink): void {
     const pts = this.sparkles;
     if (pts.length === 0) return;
-    const { ctx, canvas, camera, animTime: time, lit, detail } = frame;
-    const g = this.gctx;
-    g.setTransform(1, 0, 0, 1, 0, 0);
-    g.globalAlpha = 1;
-    g.globalCompositeOperation = 'source-over';
-    g.clearRect(0, 0, this.glint.width, this.glint.height);
-    g.setTransform(...camera.viewOn(this.glint));
+    const { camera, animTime: time, lit, detail } = frame;
+    const strength = Math.min(1, lit) * (0.15 + 0.85 * detail);
     const [x0, y0, x1, y1] = camera.visible();
-    const buckets = [new Path2D(), new Path2D(), new Path2D()];
     for (let n = 0; n < pts.length; n += 3) {
       const x = pts[n], y = pts[n + 1];
       if (x < x0 || x > x1 || y < y0 || y > y1) continue;
       const tw = Math.sin(time * SPARKLE_SPEED + pts[n + 2]);
       if (tw < SPARKLE_THRESHOLD) continue;
       const b = (tw - SPARKLE_THRESHOLD) / (1 - SPARKLE_THRESHOLD);
-      const r = camera.px(0.8 + 2.2 * b);
-      const p = buckets[Math.min(2, Math.floor(b * 3))];
-      // Четырёхлучевая звёздочка.
-      p.moveTo(x - r, y);
-      p.lineTo(x, y - r * 0.3);
-      p.lineTo(x + r, y);
-      p.lineTo(x, y + r * 0.3);
-      p.closePath();
-      p.moveTo(x, y - r);
-      p.lineTo(x + r * 0.3, y);
-      p.lineTo(x, y + r);
-      p.lineTo(x - r * 0.3, y);
-      p.closePath();
+      // Четырёхлучевая звёздочка; три ступени яркости.
+      sink.star(x, y, camera.px(0.8 + 2.2 * b), (0.35 + 0.3 * Math.min(2, Math.floor(b * 3))) * strength);
     }
-    buckets.forEach((p, i) => {
-      g.fillStyle = `rgba(245, 230, 255, ${(0.35 + 0.3 * i).toFixed(2)})`;
-      g.fill(p);
-    });
-    g.setTransform(1, 0, 0, 1, 0, 0);
-    g.globalCompositeOperation = 'destination-in';
-    g.drawImage(spots, 0, 0);
-    g.globalCompositeOperation = 'source-over';
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalCompositeOperation = 'screen';
-    ctx.globalAlpha = Math.min(1, lit) * (0.15 + 0.85 * detail);
-    ctx.drawImage(this.glint, 0, 0, canvas.width, canvas.height);
   }
 
   /**
    * Пена у берега: на мелководье у суши, где течение направлено в берег, —
-   * гуще при сильном потоке. Маска строится по полю течений, фактура — бегущая рябь.
+   * гуще при сильном потоке. Маска строится по полю течений, фактура — бегущая рябь (в шейдере).
    */
-  drawFoam(frame: Frame): void {
-    const { ctx, canvas, camera, world, animTime: time } = frame;
+  foam(world: World): { canvas: HTMLCanvasElement; version: number } {
     const now = performance.now();
     if (now - this.foamBuiltAt >= FOAM_REBUILD_MS || this.foamStep < 0) {
       this.foamBuiltAt = now;
       this.foamStep = world.step;
+      this.foamVersion++;
       this.buildFoam(world);
     }
-    const g = this.gctx;
-    const view = camera.viewOn(this.glint);
-    const [x0, y0, x1, y1] = camera.visible();
-    g.setTransform(1, 0, 0, 1, 0, 0);
-    g.globalAlpha = 1;
-    g.globalCompositeOperation = 'source-over';
-    g.clearRect(0, 0, this.glint.width, this.glint.height);
-    g.setTransform(...view);
-    const k = FOAM_RIPPLE_SIZE / 256;
-    this.ripplePattern.setTransform(new DOMMatrix([k, 0, 0, k, -time * 6, time * 3]));
-    g.fillStyle = this.ripplePattern;
-    g.fillRect(x0, y0, x1 - x0, y1 - y0);
-    g.globalAlpha = FOAM_BASE;
-    g.fillStyle = 'rgba(255, 255, 255, 1)';
-    g.fillRect(x0, y0, x1 - x0, y1 - y0);
-    g.globalAlpha = 1;
-    g.globalCompositeOperation = 'destination-in';
-    g.imageSmoothingEnabled = true;
-    g.drawImage(this.foamCanvas, 0, 0, world.dish.width, world.dish.height);
-    g.globalCompositeOperation = 'source-over';
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalCompositeOperation = 'screen';
-    ctx.globalAlpha = FOAM_ALPHA;
-    ctx.drawImage(this.glint, 0, 0, canvas.width, canvas.height);
+    return { canvas: this.foamCanvas, version: this.foamVersion };
   }
 
   private buildFoam(w: World): void {

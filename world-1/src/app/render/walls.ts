@@ -1,4 +1,4 @@
-/** Стеклянный обод чашки и перегородки тем же стеклом; тень чашки на столе. */
+/** Стеклянный обод чашки и перегородки тем же стеклом (тень чашки на столе — в шейдере нижнего холста). */
 import { cellInsideDish, type World } from '../../core/index.ts';
 import type { Frame } from './frame.ts';
 import { traceDish } from './palette.ts';
@@ -11,8 +11,6 @@ const GLASS_EDGE = 'rgba(255, 255, 255, 0.9)';
 const GLASS_SHADOW = 'rgba(30, 55, 80, 0.65)';
 
 export class WallsLayer {
-  private readonly dishShadow = document.createElement('canvas');
-  private dishShadowKey = '';
   /** Перегородки одним путём (в единицах мира). */
   parts = new Path2D();
   /** Кромка стекла (в единицах мира) — строится один раз на мир. */
@@ -23,30 +21,6 @@ export class WallsLayer {
     this.world = world;
     this.edges = this.buildEdges();
     this.parts = this.buildParts();
-  }
-
-  /** Тень чашки на столе кешируется до изменения камеры или формы чашки. */
-  drawShadow(frame: Frame): void {
-    const { ctx, canvas, camera } = frame;
-    const { width, height } = this.world.dish;
-    const wall = this.world.partitions.thickness;
-    const key = `${this.world.dish.shape}:${width}:${height}:${wall}:${camera.view()}:${canvas.width}:${canvas.height}:${camera.dpr}`;
-    if (key !== this.dishShadowKey) {
-      this.dishShadowKey = key;
-      this.dishShadow.width = canvas.width; this.dishShadow.height = canvas.height;
-      const sctx = this.dishShadow.getContext('2d')!;
-      sctx.setTransform(...camera.view());
-      sctx.beginPath();
-      if (this.world.dish.shape === 'circle') sctx.arc(width / 2, height / 2, width / 2 + wall, 0, Math.PI * 2);
-      else sctx.rect(-wall, -wall, width + 2 * wall, height + 2 * wall);
-      sctx.fillStyle = '#bcced2';
-      sctx.shadowColor = 'rgba(31, 53, 47, 0.32)';
-      sctx.shadowBlur = 12 * camera.dpr; sctx.shadowOffsetY = 5 * camera.dpr;
-      sctx.fill();
-      sctx.shadowBlur = 3 * camera.dpr; sctx.shadowOffsetY = 2 * camera.dpr;
-      sctx.shadowColor = 'rgba(31, 53, 47, 0.25)'; sctx.fill();
-    }
-    ctx.drawImage(this.dishShadow, 0, 0);
   }
 
   /** Стеклянный обод чашки и перегородки (в единицах мира). */
