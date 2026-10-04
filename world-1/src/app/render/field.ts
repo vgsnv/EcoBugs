@@ -290,7 +290,7 @@ void main() {
   c = screenOver(c, vec3(max(0., t - 1.) * u_glareStrength * sp.y));
   // Каустика: в пятнах света на воде — светлая колышущаяся сетка, которую несёт течение.
   float litWater = sp.y * (1. - held) * waterAt(w);
-  if (litWater > .01 && u_detail > .05) {
+  if (litWater > .01 && u_detail > 0.) {
     float cs = mix(caustic(pb / CAUSTIC_CELL, u_flowClock), caustic(pa / CAUSTIC_CELL, u_flowClock), wa);
     c = screenOver(c, u_sun * cs * litWater * min(1.2, u_sunNow) * .16 * u_detail);
   }
