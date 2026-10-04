@@ -8,8 +8,7 @@ import type { Dish } from '../../core/index.ts';
 import type { Frame } from './frame.ts';
 import { createProgram, Textures, type Program, type TextureSource } from './gl.ts';
 import { GLARE_STRENGTH, LIGHT_SHADE_GLSL, MINERAL_COLOR, MINERAL_DEEP, SHADE_COLOR, SUN_COLOR, smoothstep, type Rgb } from './palette.ts';
-import { SPOT_FS, SPOT_VS, type SpotShapes } from './light.ts';
-import { SPOT_SHAPE_SIZE } from '../../core/index.ts';
+import { LIGHT_MASK_FS, LIGHT_MASK_SCALE, type LightField } from './light.ts';
 import { TRAIL_DASH_FS, TRAIL_FADE_FS, TRAIL_SECONDS } from './trails.ts';
 import type { StreamField, StreamView } from './water.ts';
 import { TERRAIN_GLSL, type Grid, type TerrainData } from './terrain.ts';
@@ -29,8 +28,8 @@ export interface GlowSink {
 
 /** Всё, что нужно проходу полей: источники текстур и их версии. */
 export interface FieldInputs {
-  /** Эллипсы пятен света. */
-  readonly spots: SpotShapes;
+  /** Световое поле этого шага (маска считается на GPU). */
+  readonly light: LightField;
   /** Минерал на сетке поля: R — затемнение дна, G — задержка света, B — густота цвета, A — непрозрачность дымки. */
   readonly mineral: { readonly image: TextureSource; readonly version: number; readonly width: number; readonly height: number };
   /** Местность: сетки для шейдера. */
@@ -44,12 +43,11 @@ export interface FieldInputs {
   readonly ripple: HTMLCanvasElement;
   /** Пена у берега (альфа), на всю чашку. */
   readonly foam: { readonly canvas: HTMLCanvasElement; readonly version: number };
-  /** Сила света: тёплый оттенок, высветление, блик яркого солнца; полутень, px устройства. */
+  /** Сила света: тёплый оттенок, высветление. */
   readonly warmth: number;
   readonly glow: number;
   readonly sunNow: number;
   readonly background: number;
-  readonly penumbra: number;
   /** Рябь: 0 — по течениям, 1 — две равномерные ряби (при «Процессах»). */
   readonly rippleMode: 0 | 1;
   /** Длина следов взвеси (0 — без следов, 1 — полные); частицы взвеси (SPRITE_FLOATS чисел на штуку); поле течений; доля усреднённого течения; что показывают. */
@@ -400,11 +398,7 @@ export class FieldRenderer implements GlowSink {
   private mineralTexture: WebGLTexture | null = null;
   /** Маска пятен (вне экрана) и данные эллипсов для неё. */
   private spotMask: { framebuffer: WebGLFramebuffer; texture: WebGLTexture; width: number; height: number } | null = null;
-  private spotProgram!: Program;
-  private spotVao!: WebGLVertexArrayObject;
-  private spotBuffer!: WebGLBuffer;
-  private spotVersion = -1;
-  private spotCount = 0;
+  private lightProgram!: Program;
   /** Есть ли WebGL2; потеря контекста временно выключает рисование. */
   readonly supported: boolean;
   private lost = false;
@@ -453,25 +447,13 @@ export class FieldRenderer implements GlowSink {
     this.mineralTexture = null;
     this.mineralPrev = null;
     this.mineralShown = -1;
-    this.spotProgram = createProgram(gl, SPOT_VS, SPOT_FS);
+    this.lightProgram = createProgram(gl, FULL_VS, LIGHT_MASK_FS(COMMON));
     this.trailFade = createProgram(gl, FULL_VS, TRAIL_FADE_FS);
     this.trailDash = createProgram(gl, SPRITE_VS, TRAIL_DASH_FS);
     this.trailBuffers = [];
     this.trailSize = [0, 0];
     this.trailTime = null;
-    this.spotBuffer = gl.createBuffer()!;
-    this.spotVao = gl.createVertexArray()!;
-    gl.bindVertexArray(this.spotVao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
-    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.spotBuffer);
-    for (let n = 0; n < 2; n++) {
-      const at = gl.getAttribLocation(this.spotProgram.program, `a_s${n}`);
-      gl.enableVertexAttribArray(at); gl.vertexAttribPointer(at, 4, gl.FLOAT, false, SPOT_SHAPE_SIZE * 4, n * 16); gl.vertexAttribDivisor(at, 1);
-    }
-    gl.bindVertexArray(null);
     this.spotMask = null;
-    this.spotVersion = -1;
     return true;
   }
 
@@ -526,47 +508,39 @@ export class FieldRenderer implements GlowSink {
     gl.uniform3f(p.uniform('u_dish'), dish.width, dish.height, dish.shape === 'circle' ? 1 : 0);
   }
 
-  /** Маска пятен: эллипсы прямоугольниками в текстуру, наложение «максимум». */
-  private drawSpotMask(spots: SpotShapes, penumbra: number): void {
+  /** Маска света: то же поле, что в модели (LIGHT_MASK_FS), — в текстуру размером с холст. */
+  private drawLightMask(light: LightField): void {
     const gl = this.gl!;
     const frame = this.frame!;
-    const { width, height } = this.canvas;
+    const width = Math.ceil(this.canvas.width / LIGHT_MASK_SCALE), height = Math.ceil(this.canvas.height / LIGHT_MASK_SCALE);
     let mask = this.spotMask;
     if (!mask || mask.width !== width || mask.height !== height) {
       if (mask) { gl.deleteFramebuffer(mask.framebuffer); gl.deleteTexture(mask.texture); }
       const texture = gl.createTexture()!;
       gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-      for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+      for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
       const framebuffer = gl.createFramebuffer()!;
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
       mask = this.spotMask = { framebuffer, texture, width, height };
     }
-    if (spots.version !== this.spotVersion) {
-      this.spotVersion = spots.version;
-      this.spotCount = spots.count;
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.spotBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, spots.data, gl.DYNAMIC_DRAW);
-    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, mask.framebuffer);
     gl.viewport(0, 0, width, height);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    if (this.spotCount > 0) {
-      const p = this.spotProgram;
-      gl.useProgram(p.program);
-      const view = frame.camera.view();
-      gl.uniform3f(p.uniform('u_view'), view[0], view[4], view[5]);
-      gl.uniform2f(p.uniform('u_size'), width, height);
-      gl.uniform1f(p.uniform('u_pad'), 3 * penumbra / frame.camera.zoom);
-      gl.uniform1f(p.uniform('u_zoom'), frame.camera.zoom);
-      gl.uniform1f(p.uniform('u_sigma'), penumbra);
-      gl.blendEquation(gl.MAX);
-      gl.bindVertexArray(this.spotVao);
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.spotCount);
-      gl.blendEquation(gl.FUNC_ADD);
-    }
+    gl.disable(gl.BLEND);
+    const p = this.lightProgram;
+    gl.useProgram(p.program);
+    this.common(p, frame.world.dish);
+    gl.uniform2f(p.uniform('u_lightOffset'), light.offset[0], light.offset[1]);
+    gl.uniform1f(p.uniform('u_lightScale'), light.scale);
+    gl.uniform1f(p.uniform('u_lightTime'), light.time);
+    gl.uniform1f(p.uniform('u_lightThreshold'), light.threshold);
+    gl.uniform1f(p.uniform('u_lightEdge'), light.edge);
+    gl.uniform2f(p.uniform('u_maskSize'), width, height);
+    gl.uniform1f(p.uniform('u_maskScale'), this.canvas.width / width);
+    gl.bindVertexArray(this.quadVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.enable(gl.BLEND);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
@@ -689,7 +663,7 @@ export class FieldRenderer implements GlowSink {
       this.terrainWorld = t.world;
     }
     // Загрузка текстур и проходы вне экрана — до выбора программы полей.
-    this.drawSpotMask(input.spots, input.penumbra);
+    this.drawLightMask(input.light);
     // Новое состояние дымки — в другой из двух текстур; прошлое остаётся для перехода.
     const now = performance.now();
     if (input.mineral.version !== this.mineralShown) {

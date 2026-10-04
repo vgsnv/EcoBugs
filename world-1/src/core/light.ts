@@ -1,202 +1,169 @@
 import { finishCalculation, type Calculation } from './task.ts';
 import { dishOf } from './dish.ts';
 /**
- * Свет (спецификация, раздел «Свет»): светлые пятна на тёмном фоне, запертые в чашке.
+ * Свет (спецификация, раздел «Свет»): общее световое поле, запертое в чашке.
  *
- * Пятно — мягкий эллипс постоянного размера, вытянутости и поворота. Его
- * середина ходит по чашке: по каждой оси — «пила» со скруглёнными зубцами
- * (asin(k·sin τ)), поэтому пятно летит почти по прямой и у стенки плавно
- * разворачивается, а всю чашку обходит равномерно. В круглой чашке путь
- * из квадрата плавно отображается в круг. Свет пятен в точке — максимум по
- * пятнам: перекрывающиеся пятна свет не складывают.
+ * Пятна — где поле шума выше порога. Координаты поля искажает другое, медленно
+ * меняющееся поле (domain warping): очертания перетекают, сливаются и
+ * расходятся, каждый участок смещается в свою сторону; общего кружения нет,
+ * всё поле очень медленно сносится в одну сторону. Порог — по распределению
+ * в самой чашке: формы крупные и в чашку их попадает немного, поэтому порог
+ * подбирается по чашке (thresholdAt) так, чтобы доля её площади под пятнами
+ * была равна освещённости, — это тоже формула от шага (пересчёт раз в
+ * THRESHOLD_STEP шагов, между ними — плавно). Крупность форм — «Размер пятен» × LIGHT_FORM_SCALE, темп — «Дрейф света».
  *
- * Всё движение — формулы от номера шага: свет на любом шаге считается сразу.
+ * Всё — формула от номера шага: свет на любом шаге считается сразу. Шейдер
+ * показа считает то же поле тем же шумом (LIGHT_FIELD_GLSL) — модель и картинка совпадают.
  */
-import {
-  LIGHT_DRIFT_SPEED, SPOT_ASPECT_MAX, SPOT_EDGE, SPOT_SIZE_MAX, SPOT_SIZE_MIN, SPOT_SIZE_SPREAD, SPOT_SPEED_RANGE, SPOT_TURN,
-} from './constants.ts';
-import { Rng, deriveSeed } from './prng.ts';
+import { LIGHT_EDGE, LIGHT_FORM_SCALE, LIGHT_TEMPO, LIGHT_WARP } from './constants.ts';
+import { deriveSeed } from './prng.ts';
 import type { WorldParams } from './params.ts';
 
 const TAU = Math.PI * 2;
-const TURN_NORM = Math.asin(SPOT_TURN);
-/** Моменты, по которым при сотворении подбирается число пятен (средняя освещённость). */
-const COVERAGE_TIMES = [0, 150_000, 300_000, 450_000, 600_000, 750_000];
-/** Шаг (в шагах модели) для скорости пятна разностью положений. */
-const VELOCITY_STEP = 25;
-
-interface Spot {
-  /** Полуоси (вдоль и поперёк) и поворот — постоянные. */
-  ru: number; rv: number;
-  c: number; sn: number;
-  /** Путь: частоты и фазы «пилы» по осям (в долях оборота за шаг и радианах). */
-  wx: number; px: number;
-  wy: number; py: number;
-  /** Ход середины по осям: от центра чашки на ± эти величины (в круге — доли радиуса, см. pathPoint). */
-  hx: number; hy: number;
-}
 
 export interface LightMap {
   readonly width: number;
   readonly height: number;
   readonly circle: boolean;
-  readonly spots: readonly Spot[];
+  /** Сдвиг поля по сиду (единицы шума) и крупность форм (единиц мира на единицу шума). */
+  readonly offsetX: number;
+  readonly offsetY: number;
+  readonly scale: number;
+  /** Темп перетекания: единиц времени поля за шаг (0 — свет стоит). */
+  readonly pace: number;
+  /** Освещённость — доля чашки под пятнами. */
+  readonly share: number;
   readonly sun: number;
   readonly background: number;
   /** Ритм солнца: размах, период (шагов) и фаза из сида. */
   readonly rhythm: { readonly amp: number; readonly period: number; readonly phase: number };
 }
 
-function sampleRadius(rng: Rng, mean: number): number {
-  // Логнормальное: мелких много, крупных мало.
-  const u1 = Math.max(rng.next(), 1e-12);
-  const u2 = rng.next();
-  const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(TAU * u2);
-  const k = Math.exp(SPOT_SIZE_SPREAD * z - (SPOT_SIZE_SPREAD * SPOT_SIZE_SPREAD) / 2);
-  return mean * Math.min(SPOT_SIZE_MAX, Math.max(SPOT_SIZE_MIN, k));
+/* Шум — тот же, что в LIGHT_FIELD_GLSL: целочисленный хеш, значения в узлах, сглаживание пятой степени. */
+function mixh(x: number): number {
+  x = (x + 0x9e3779b9) >>> 0;
+  x = Math.imul(x ^ (x >>> 16), 0x85ebca6b) >>> 0;
+  x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35) >>> 0;
+  return (x ^ (x >>> 16)) >>> 0;
+}
+function h2(x: number, y: number, s: number): number {
+  return mixh((Math.imul(x, 0x27d4eb2d) ^ mixh((Math.imul(y, 0x165667b1) ^ s) >>> 0)) >>> 0) / 4294967296;
+}
+const fade = (f: number) => f * f * f * (f * (f * 6 - 15) + 10);
+function vnoise(x: number, y: number, s: number): number {
+  const i = Math.floor(x), j = Math.floor(y), fx = fade(x - i), fy = fade(y - j);
+  const a = h2(i, j, s), b = h2(i + 1, j, s), c = h2(i, j + 1, s), d = h2(i + 1, j + 1, s);
+  return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
+}
+function fbm(x: number, y: number, s: number): number {
+  return 0.55 * vnoise(x, y, s) + 0.3 * vnoise(x * 2.03 + 17.1, y * 2.03 + 17.1, s + 1) + 0.15 * vnoise(x * 4.1 - 9.3, y * 4.1 - 9.3, s + 2);
 }
 
-/** «Пила» со скруглёнными зубцами: −1…1, почти прямой ход и плавный разворот. */
-function saw(tau: number): number {
-  return Math.asin(SPOT_TURN * Math.sin(tau)) / TURN_NORM;
+/** Смещение координат поля в точке шума (x, y) во время s: искажение плюс общий медленный снос. */
+function displacement(x: number, y: number, s: number, out: [number, number]): void {
+  const qx = fbm(x * 0.7 + s * 0.6, y * 0.7 - s * 0.35, 20) - 0.5;
+  const qy = fbm(x * 0.7 + 5.2 - s * 0.45, y * 0.7 + 1.3 + s * 0.55, 30) - 0.5;
+  out[0] = LIGHT_WARP * qx - s * 0.2;
+  out[1] = LIGHT_WARP * qy + s * 0.15;
 }
 
-function makeSpot(rng: Rng, width: number, height: number, circle: boolean, meanRadius: number, drift: number): Spot {
-  const r = sampleRadius(rng, meanRadius);
-  const aspect = rng.range(1, SPOT_ASPECT_MAX);
-  const k = Math.sqrt(aspect);
-  const angle = rng.range(0, Math.PI);
-  // Середина не ближе к стенке, чем размер пятна (но не больше 40% чашки).
-  const margin = Math.min(r, 0.4 * Math.min(width, height));
-  const hx = circle ? width / 2 - margin : width / 2 - margin;
-  const hy = circle ? hx : height / 2 - margin;
-  // Скорость и её направление; ход по каждой оси — не медленнее четверти скорости.
-  const speed = LIGHT_DRIFT_SPEED * drift * rng.range(SPOT_SPEED_RANGE[0], SPOT_SPEED_RANGE[1]);
-  const heading = rng.range(0, TAU);
-  const sx = speed * Math.max(0.25, Math.abs(Math.cos(heading)));
-  const sy = speed * Math.max(0.25, Math.abs(Math.sin(heading)));
-  // На прямом участке saw' = k / asin(k) · ω: ω подобрана под скорость хода.
-  const omega = (s: number, h: number) => (h > 0 ? (s * TURN_NORM) / (SPOT_TURN * h) : 0);
-  return {
-    ru: r * k, rv: r / k, c: Math.cos(angle), sn: Math.sin(angle),
-    wx: omega(sx, hx), px: rng.range(0, TAU), wy: omega(sy, hy), py: rng.range(0, TAU), hx, hy,
-  };
+const scratch: [number, number] = [0, 0];
+
+/** Значение поля в точке мира (x, y) во время поля s. */
+function fieldAt(map: LightMap, x: number, y: number, s: number): number {
+  const px = x / map.scale + map.offsetX, py = y / map.scale + map.offsetY;
+  displacement(px, py, s, scratch);
+  return fbm(px + scratch[0], py + scratch[1], 60);
 }
 
-/** Середина пятна в шаге t, в координатах чашки. */
-function pathPoint(map: LightMap, s: Spot, t: number): [number, number] {
-  const u = saw(s.wx * t + s.px), v = saw(s.wy * t + s.py);
-  if (!map.circle) return [map.width / 2 + s.hx * u, map.height / 2 + s.hy * v];
-  // Квадрат → круг: плавное отображение, стороны квадрата ложатся на окружность.
-  return [map.width / 2 + s.hx * u * Math.sqrt(1 - (v * v) / 2), map.height / 2 + s.hy * v * Math.sqrt(1 - (u * u) / 2)];
+/** Свет пятен по значению поля: 0 — фон, 1 — пятно; край — плавный. */
+function lightOfField(threshold: number, f: number): number {
+  const lo = threshold - LIGHT_EDGE, hi = threshold + LIGHT_EDGE;
+  const u = Math.min(1, Math.max(0, (f - lo) / (hi - lo)));
+  return u * u * (3 - 2 * u);
 }
 
-/** Скорость пятна в шаге t, единиц мира за шаг. */
-function pathVelocity(map: LightMap, s: Spot, t: number): [number, number] {
-  const [ax, ay] = pathPoint(map, s, t - VELOCITY_STEP), [bx, by] = pathPoint(map, s, t + VELOCITY_STEP);
-  return [(bx - ax) / (2 * VELOCITY_STEP), (by - ay) / (2 * VELOCITY_STEP)];
+/** Порог пересчитывается раз в столько шагов поля; сетка выборки по чашке. */
+const THRESHOLD_STEP = 4000;
+const SAMPLE_COLS = 48;
+const SAMPLE_ROWS = 36;
+const thresholds = new WeakMap<LightMap, Map<number, number>>();
+
+/** Порог, при котором под пятнами доля освещённости чашки, в узле времени `key` (× THRESHOLD_STEP шагов). */
+function thresholdKey(map: LightMap, key: number): number {
+  let cache = thresholds.get(map);
+  if (!cache) { cache = new Map(); thresholds.set(map, cache); }
+  const hit = cache.get(key);
+  if (hit !== undefined) return hit;
+  const s = key * THRESHOLD_STEP * map.pace;
+  const values: number[] = [];
+  for (let j = 0; j < SAMPLE_ROWS; j++) for (let i = 0; i < SAMPLE_COLS; i++) {
+    const x = ((i + 0.5) / SAMPLE_COLS) * map.width, y = ((j + 0.5) / SAMPLE_ROWS) * map.height;
+    if (map.circle && (x - map.width / 2) ** 2 + (y - map.height / 2) ** 2 > (map.width / 2) ** 2) continue;
+    values.push(fieldAt(map, x, y, s));
+  }
+  values.sort((a, b) => a - b);
+  const at = Math.min(values.length - 1, Math.max(0, Math.floor((1 - map.share) * values.length)));
+  const value = values[at];
+  if (cache.size > 64) cache.delete(cache.keys().next().value!);
+  cache.set(key, value);
+  return value;
 }
 
-/** Докуда пятно заведомо не светит — от середины. */
-function spotReach(s: Spot): number {
-  return Math.max(s.ru, s.rv) * (1 + SPOT_EDGE);
-}
-
-/** Свет пятна в точке со смещением (dx, dy) от его середины: 1 внутри, плавно до 0 на краю. */
-function spotLight(s: Spot, dx: number, dy: number): number {
-  const u = (dx * s.c + dy * s.sn) / s.ru;
-  const v = (-dx * s.sn + dy * s.c) / s.rv;
-  const d2 = u * u + v * v;
-  if (d2 <= 1) return 1;
-  const outer = 1 + SPOT_EDGE;
-  if (d2 >= outer * outer) return 0;
-  const w = 1 - (Math.sqrt(d2) - 1) / SPOT_EDGE;
-  return w * w * (3 - 2 * w);
+/** Порог в шаге t — плавно между узлами времени. */
+export function thresholdAt(map: LightMap, t: number): number {
+  if (map.pace === 0) return thresholdKey(map, 0);
+  const u = t / THRESHOLD_STEP, k = Math.floor(u);
+  const a = thresholdKey(map, k), b = thresholdKey(map, k + 1);
+  return a + (b - a) * (u - k);
 }
 
 export function createLightMap(params: WorldParams): LightMap {
   const { width, height, shape } = dishOf(params);
-  const circle = shape === 'circle';
-  const rng = new Rng(deriveSeed(params.seed, 'light'));
-  const base = {
-    width, height, circle, sun: params.sun, background: params.backgroundLevel,
+  const h = deriveSeed(params.seed, 'light');
+  return {
+    width, height, circle: shape === 'circle',
+    // Сдвиг по сиду — большой и положительный: координаты шума не уходят в минус.
+    offsetX: 500 + (h % 100000) / 100, offsetY: 500 + (Math.floor(h / 100000) % 100000) / 100,
+    scale: params.spotSize * LIGHT_FORM_SCALE,
+    pace: params.lightDrift / LIGHT_TEMPO,
+    share: params.illumination,
+    sun: params.sun, background: params.backgroundLevel,
     rhythm: { amp: params.sunRhythm, period: params.sunPeriod, phase: (deriveSeed(params.seed, 'sun') / 4294967296) * TAU },
   };
-  // Пятна добавляются, пока средняя доля чашки под ними (по нескольким
-  // моментам на протяжении обхода чашки) не достигнет освещённости.
-  const spots: Spot[] = [];
-  const map: LightMap = { ...base, spots };
-  const cell = 8, cols = Math.ceil(width / cell), rows = Math.ceil(height / cell);
-  const fields = COVERAGE_TIMES.map(() => new Float32Array(cols * rows));
-  let inside = 0, lit = 0;
-  const free = new Uint8Array(cols * rows);
-  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
-    const x = (i + 0.5) * cell - width / 2, y = (j + 0.5) * cell - height / 2;
-    if (!circle || x * x + y * y <= (width / 2) * (width / 2)) { free[j * cols + i] = 1; inside++; }
-  }
-  const target = params.illumination * inside * COVERAGE_TIMES.length;
-  let before = 0;
-  for (let guard = 0; guard < 400 && lit < target; guard++) {
-    const s = makeSpot(rng, width, height, circle, params.spotSize, params.lightDrift);
-    spots.push(s);
-    before = lit;
-    COVERAGE_TIMES.forEach((t, n) => { lit += addSpot(fields[n], free, map, s, t, cols, rows, cell); });
-  }
-  // Последнее (возможно, крупное) пятно оставить, только если с ним ближе к цели.
-  if (spots.length > 1 && lit - target > target - before) spots.pop();
-  return map;
 }
 
-/** Нанести пятно на сетку (максимумом); вернуть, сколько свободных клеток впервые стало светлыми. */
-function addSpot(field: Float32Array, free: Uint8Array, map: LightMap, s: Spot, t: number, cols: number, rows: number, cell: number): number {
-  const [cx, cy] = pathPoint(map, s, t);
-  const reach = spotReach(s);
-  let added = 0;
-  const i0 = Math.max(0, Math.floor((cx - reach) / cell)), i1 = Math.min(cols - 1, Math.floor((cx + reach) / cell));
-  const j0 = Math.max(0, Math.floor((cy - reach) / cell)), j1 = Math.min(rows - 1, Math.floor((cy + reach) / cell));
-  for (let j = j0; j <= j1; j++) {
-    for (let i = i0; i <= i1; i++) {
-      const k = j * cols + i;
-      const v = spotLight(s, (i + 0.5) * cell - cx, (j + 0.5) * cell - cy);
-      if (v <= field[k]) continue;
-      if (free[k] && field[k] < 0.5 && v >= 0.5) added++;
-      field[k] = v;
-    }
-  }
-  return added;
+/** Время поля в шаге t. */
+export function lightTime(map: LightMap, t: number): number {
+  return t * map.pace;
 }
 
 /** Интенсивность пятен в точке чашки (0 — фон, 1 — пятно). */
 export function spotIntensityAt(map: LightMap, x: number, y: number, t: number): number {
-  let best = 0;
-  for (const s of map.spots) {
-    const [cx, cy] = pathPoint(map, s, t);
-    const dx = x - cx, dy = y - cy, reach = spotReach(s);
-    if (Math.abs(dx) > reach || Math.abs(dy) > reach) continue;
-    const v = spotLight(s, dx, dy);
-    if (v > best) {
-      best = v;
-      if (best === 1) return 1;
-    }
-  }
-  return best;
+  return lightOfField(thresholdAt(map, t), fieldAt(map, x, y, lightTime(map, t)));
 }
 
-/** Интенсивность пятен сразу во многих точках (x, y подряд в `points`) — середины пятен считаются один раз. */
+/** Интенсивность пятен сразу во многих точках (x, y подряд в `points`). */
 export function spotIntensityAtPoints(map: LightMap, points: Float64Array, t: number, out: Float32Array): Float32Array {
-  out.fill(0);
-  for (const s of map.spots) {
-    const [cx, cy] = pathPoint(map, s, t);
-    const reach = spotReach(s);
-    for (let i = 0; i < out.length; i++) {
-      if (out[i] === 1) continue;
-      const dx = points[2 * i] - cx, dy = points[2 * i + 1] - cy;
-      if (Math.abs(dx) > reach || Math.abs(dy) > reach) continue;
-      const v = spotLight(s, dx, dy);
-      if (v > out[i]) out[i] = v;
-    }
-  }
+  const s = lightTime(map, t), th = thresholdAt(map, t);
+  for (let i = 0; i < out.length; i++) out[i] = lightOfField(th, fieldAt(map, points[2 * i], points[2 * i + 1], s));
   return out;
+}
+
+/**
+ * Скорость перетекания в точке, единиц мира за шаг: куда смещаются очертания
+ * поля — против изменения смещения координат.
+ */
+function flowVelocity(map: LightMap, x: number, y: number, s: number, out: [number, number]): void {
+  if (map.pace === 0) { out[0] = 0; out[1] = 0; return; }
+  const px = x / map.scale + map.offsetX, py = y / map.scale + map.offsetY;
+  const ds = 0.01;
+  displacement(px, py, s + ds, scratch);
+  const ax = scratch[0], ay = scratch[1];
+  displacement(px, py, s - ds, scratch);
+  const k = -map.scale * map.pace / (2 * ds);
+  out[0] = (ax - scratch[0]) * k;
+  out[1] = (ay - scratch[1]) * k;
 }
 
 /** Множитель ритма солнца в шаге t: плавная волна вокруг 1. */
@@ -219,16 +186,15 @@ export function lightAt(map: LightMap, x: number, y: number, t: number): number 
   return lightFromIntensity(map, spotIntensityAt(map, x, y, t), t);
 }
 
-/** Скорость пятен в клетках: у каждой — скорость того пятна, что светит в ней ярче всех (для увлечения). */
+/** Скорость перетекания света в клетках (для увлечения). */
 export interface SpotVelocity {
   readonly vx: Float32Array;
   readonly vy: Float32Array;
 }
 
 /**
- * Интенсивность пятен на сетке чашки: `cols × rows` ячеек размером `cell`.
- * Растеризует каждое пятно только в его окрестности. С `velocity` — ещё и
- * скорость самого яркого в клетке пятна.
+ * Интенсивность пятен на сетке чашки: `cols × rows` ячеек размером `cell`
+ * (по центрам). С `velocity` — ещё и скорость перетекания там, где светло.
  */
 export function rasterizeSpotIntensity(map: LightMap, t: number, cols: number, rows: number, cell: number, out?: Float32Array, velocity?: SpotVelocity): Float32Array {
   return finishCalculation(rasterizeSpotIntensityTask(map, t, cols, rows, cell, out, velocity));
@@ -236,25 +202,17 @@ export function rasterizeSpotIntensity(map: LightMap, t: number, cols: number, r
 
 export function* rasterizeSpotIntensityTask(map: LightMap, t: number, cols: number, rows: number, cell: number, out?: Float32Array, velocity?: SpotVelocity): Calculation<Float32Array> {
   const field = out && out.length === cols * rows ? out : new Float32Array(cols * rows);
-  field.fill(0);
-  if (velocity) { velocity.vx.fill(0); velocity.vy.fill(0); }
-  for (const s of map.spots) {
-    yield;
-    const [cx, cy] = pathPoint(map, s, t);
-    const [svx, svy] = velocity ? pathVelocity(map, s, t) : [0, 0];
-    const reach = spotReach(s);
-    const i0 = Math.max(0, Math.floor((cx - reach) / cell)), i1 = Math.min(cols - 1, Math.floor((cx + reach) / cell));
-    const j0 = Math.max(0, Math.floor((cy - reach) / cell)), j1 = Math.min(rows - 1, Math.floor((cy + reach) / cell));
-    for (let j = j0; j <= j1; j++) {
-      const py = (j + 0.5) * cell - cy;
-      for (let i = i0; i <= i1; i++) {
-        const v = spotLight(s, (i + 0.5) * cell - cx, py);
-        const k = j * cols + i;
-        if (v > field[k]) {
-          field[k] = v;
-          if (velocity) { velocity.vx[k] = svx; velocity.vy[k] = svy; }
-        }
-      }
+  const s = lightTime(map, t), th = thresholdAt(map, t);
+  const v: [number, number] = [0, 0];
+  for (let j = 0; j < rows; j++) {
+    if ((j & 3) === 0) yield;
+    for (let i = 0; i < cols; i++) {
+      const x = (i + 0.5) * cell, y = (j + 0.5) * cell, k = j * cols + i;
+      const light = lightOfField(th, fieldAt(map, x, y, s));
+      field[k] = light;
+      if (!velocity) continue;
+      if (light > 0) flowVelocity(map, x, y, s, v); else { v[0] = 0; v[1] = 0; }
+      velocity.vx[k] = v[0]; velocity.vy[k] = v[1];
     }
   }
   return field;
@@ -275,48 +233,47 @@ export function dishCoverage(map: LightMap, width: number, height: number, t: nu
   return lit / inside;
 }
 
-/** Средняя скорость пятен в шаге t (для подписи в сводке), единиц за шаг. */
+/** Средняя скорость перетекания там, где светло (для подписи в сводке), единиц за шаг. */
 export function meanSpotSpeed(map: LightMap, t: number): number {
-  if (map.spots.length === 0) return 0;
-  let sum = 0;
-  for (const s of map.spots) sum += Math.hypot(...pathVelocity(map, s, t));
-  return sum / map.spots.length;
+  const s = lightTime(map, t), th = thresholdAt(map, t);
+  const v: [number, number] = [0, 0];
+  let sum = 0, weight = 0;
+  for (let j = 0; j < 12; j++) for (let i = 0; i < 16; i++) {
+    const x = ((i + 0.5) / 16) * map.width, y = ((j + 0.5) / 12) * map.height;
+    const light = lightOfField(th, fieldAt(map, x, y, s));
+    if (light <= 0) continue;
+    flowVelocity(map, x, y, s, v);
+    sum += Math.hypot(v[0], v[1]) * light; weight += light;
+  }
+  return weight > 0 ? sum / weight : 0;
+}
+
+/** Параметры поля для шейдера (LIGHT_FIELD_GLSL) в шаге t. */
+export function lightFieldUniforms(map: LightMap, t: number): { offset: [number, number]; scale: number; time: number; threshold: number; edge: number } {
+  return { offset: [map.offsetX, map.offsetY], scale: map.scale, time: lightTime(map, t), threshold: thresholdAt(map, t), edge: LIGHT_EDGE };
 }
 
 /**
- * Контуры пятен для векторной отрисовки: для каждого пятна — замкнутый
- * многоугольник по середине размытого края, в координатах чашки, плоским
- * массивом [x0, y0, x1, y1, …].
+ * То же поле в GLSL (для маски света на GPU): `lightField(w)` — 0…1 в точке мира.
+ * Униформы: u_lightOffset, u_lightScale, u_lightTime, u_lightThreshold, u_lightEdge.
  */
-export function spotOutlines(map: LightMap, t: number, _dishW: number, _dishH: number, segments = 48): Float64Array[] {
-  const middle = 1 + SPOT_EDGE / 2;
-  return map.spots.map((s) => {
-    const [cx, cy] = pathPoint(map, s, t);
-    const poly = new Float64Array(segments * 2);
-    for (let i = 0; i < segments; i++) {
-      const phi = (i / segments) * TAU;
-      const u = middle * Math.cos(phi) * s.ru, v = middle * Math.sin(phi) * s.rv;
-      poly[i * 2] = cx + u * s.c - v * s.sn;
-      poly[i * 2 + 1] = cy + u * s.sn + v * s.c;
-    }
-    return poly;
-  });
+export const LIGHT_FIELD_GLSL = `
+uniform vec2 u_lightOffset;
+uniform float u_lightScale;
+uniform float u_lightTime;
+uniform float u_lightThreshold;
+uniform float u_lightEdge;
+uint lightMix(uint x) { x += 0x9e3779b9u; x = (x ^ (x >> 16u)) * 0x85ebca6bu; x = (x ^ (x >> 13u)) * 0xc2b2ae35u; return x ^ (x >> 16u); }
+float lightHash(ivec2 p, int s) { return float(lightMix(uint(p.x) * 0x27d4eb2du ^ lightMix(uint(p.y) * 0x165667b1u ^ uint(s)))) / 4294967296.; }
+float lightNoise(vec2 p, int s) {
+  ivec2 i = ivec2(floor(p)); vec2 f = fract(p); f = f * f * f * (f * (f * 6. - 15.) + 10.);
+  return mix(mix(lightHash(i, s), lightHash(i + ivec2(1, 0), s), f.x), mix(lightHash(i + ivec2(0, 1), s), lightHash(i + ivec2(1, 1), s), f.x), f.y);
 }
-
-/** Чисел на пятно в `spotShapes`. */
-export const SPOT_SHAPE_SIZE = 8;
-
-/**
- * Пятна параметрами — для отрисовки на GPU: по SPOT_SHAPE_SIZE чисел на
- * пятно: середина x, y; докуда заведомо не светит; полуоси; cos и sin
- * поворота; середина края (множитель границы).
- */
-export function spotShapes(map: LightMap, t: number, _dishW: number, _dishH: number): Float32Array {
-  const out = new Float32Array(map.spots.length * SPOT_SHAPE_SIZE);
-  const middle = 1 + SPOT_EDGE / 2;
-  map.spots.forEach((s, n) => {
-    const [cx, cy] = pathPoint(map, s, t);
-    out.set([cx, cy, spotReach(s), s.ru, s.rv, s.c, s.sn, middle], n * SPOT_SHAPE_SIZE);
-  });
-  return out;
-}
+float lightFbm(vec2 p, int s) { return .55 * lightNoise(p, s) + .3 * lightNoise(p * 2.03 + 17.1, s + 1) + .15 * lightNoise(p * 4.1 - 9.3, s + 2); }
+float lightField(vec2 w) {
+  vec2 p = w / u_lightScale + u_lightOffset;
+  float s = u_lightTime;
+  vec2 q = vec2(lightFbm(p * .7 + vec2(s * .6, -s * .35), 20), lightFbm(p * .7 + vec2(5.2 - s * .45, 1.3 + s * .55), 30)) - .5;
+  float f = lightFbm(p + ${LIGHT_WARP.toFixed(3)} * q + vec2(-s * .2, s * .15), 60);
+  return smoothstep(u_lightThreshold - u_lightEdge, u_lightThreshold + u_lightEdge, f);
+}`;

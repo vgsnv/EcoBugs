@@ -3,11 +3,10 @@
  * реально доходит: солнце × (пятно, фон или переход) × прозрачность среды,
  * по постоянной шкале (lightShade в palette.ts): пятно при солнце 1 — обычная
  * яркость, тень — по доле фона, но не темнее SHADE_COLOR. Освещённые места
- * теплеют (нагрев усиливает) и чуть высветляются; ярче солнца 1 — блик. Здесь — эллипсы пятен
- * (параметрами, из модели) и сила света; маску (форма края и мягкость)
- * строит GPU (SPOT_VS / SPOT_FS), смешивание — шейдер полей.
+ * теплеют (нагрев усиливает) и чуть высветляются; ярче солнца 1 — блик.
+ * Маску света считает GPU тем же полем, что и модель (LIGHT_MASK_FS). Здесь — эллипсы пятен
  */
-import { SPOT_EDGE, SPOT_SHAPE_SIZE, spotShapes, sunAt } from '../../core/index.ts';
+import { LIGHT_FIELD_GLSL, lightFieldUniforms, sunAt } from '../../core/index.ts';
 import type { Frame } from './frame.ts';
 
 /** Сила солнечного оттенка при солнце 1 и добавка от нагрева (при нагреве 2). */
@@ -22,36 +21,20 @@ export interface LightStrength {
   /** Сила солнца сейчас и доля фона — для яркости места в шейдере полей. */
   readonly sunNow: number;
   readonly background: number;
-  /** Полутень: σ мягкого края, пикселей устройства. */
-  readonly penumbra: number;
 }
 
-/** Эллипсы пятен для шейдера: по SPOT_SHAPE_SIZE чисел (см. spotShapes), их число и версия. */
-export interface SpotShapes {
-  readonly data: Float32Array;
-  readonly count: number;
-  readonly version: number;
-}
+/** Параметры светового поля для шейдера маски (LIGHT_FIELD_GLSL ядра). */
+export type LightField = ReturnType<typeof lightFieldUniforms>;
 
 export class LightLayer {
-  private step = -1;
-  private shapes: SpotShapes = { data: new Float32Array(0), count: 0, version: 0 };
+  reset(): void {}
 
-  reset(): void {
-    this.step = -1;
-  }
-
-  /** Эллипсы пятен этого шага (пересчёт — при смене шага) и сила света кадра. */
-  update(frame: Frame): { spots: SpotShapes; strength: LightStrength } {
-    const { camera, world: w } = frame;
+  /** Поле света этого шага и сила света кадра. */
+  update(frame: Frame): { field: LightField; strength: LightStrength } {
+    const { world: w } = frame;
     const p = w.params;
-    if (w.step !== this.step) {
-      this.step = w.step;
-      const data = spotShapes(w.light, w.step, w.dish.width, w.dish.height);
-      this.shapes = { data, count: data.length / SPOT_SHAPE_SIZE, version: this.shapes.version + 1 };
-    }
     return {
-      spots: this.shapes,
+      field: lightFieldUniforms(w.light, w.step),
       strength: {
         // Свет — солнечный тёплый оттенок освещённых мест; нагрев его усиливает
         // (в шейдере — ещё по тому, сколько света дошло).
@@ -60,58 +43,30 @@ export class LightLayer {
         glow: SUN_GLOW,
         sunNow: sunAt(w.light, w.step),
         background: p.backgroundLevel,
-        penumbra: Math.min(3 * camera.dpr, Math.max(0.5, (p.spotSize * SPOT_EDGE * camera.zoom) / 6)),
       },
     };
   }
 }
 
 /**
- * Маска пятен на GPU: каждый эллипс рисуется своим прямоугольником (до
- * «докуда светит» плюс запас на размытие) в текстуру с наложением «максимум» —
- * пиксель считает только покрывающие его пятна. R — резкий край (сглажен в
- * пиксель), G — край, размытый гауссом σ (px). Точка внутри эллипса, если её
- * радиус в его осях меньше середины края; расстояние до границы — вдоль
- * луча из центра, в пикселях экрана.
+ * Маска света на GPU — то же поле, что в модели: G — свет пятен 0…1 (плавный
+ * край), R — то же, но с краем в пару пикселей (для бликов ряби и блёсток).
  */
-export const SPOT_VS = `#version 300 es
-in vec2 a_pos;
-in vec4 a_s0;   // центр x, y; докуда светит; полуось вдоль
-in vec4 a_s1;   // полуось поперёк; cos, sin поворота; середина края
-uniform vec3 u_view;
-uniform vec2 u_size;
-uniform float u_pad;   // запас на размытие, единиц мира
-out vec2 v_d;
-flat out vec4 v_s0;
-flat out vec4 v_s1;
-void main() {
-  float reach = a_s0.z + u_pad;
-  vec2 d = (a_pos * 2. - 1.) * reach;
-  vec2 p = (a_s0.xy + d) * u_view.x + u_view.yz;
-  gl_Position = vec4(p.x / u_size.x * 2. - 1., 1. - p.y / u_size.y * 2., 0., 1.);
-  v_d = d; v_s0 = a_s0; v_s1 = a_s1;
-}`;
+/** Во сколько раз маска света грубее холста по каждой оси. */
+export const LIGHT_MASK_SCALE = 2;
 
-export const SPOT_FS = `#version 300 es
+export const LIGHT_MASK_FS = (common: string) => `#version 300 es
 precision highp float;
-in vec2 v_d;
-flat in vec4 v_s0;
-flat in vec4 v_s1;
-uniform float u_zoom;
-uniform float u_sigma;
+precision highp int;
+${common}
+${LIGHT_FIELD_GLSL}
+uniform vec2 u_maskSize;   // размер маски, px (меньше холста в LIGHT_MASK_SCALE раз)
+uniform float u_maskScale;
 out vec4 o;
-float erfApprox(float x) {
-  float s = sign(x), a = abs(x);
-  float t = 1. / (1. + .3275911 * a);
-  return s * (1. - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - .284496736) * t + .254829592) * t * exp(-a * a));
-}
 void main() {
-  vec2 d = v_d;
-  float u = (d.x * v_s1.y + d.y * v_s1.z) / v_s0.w;
-  float v = (-d.x * v_s1.z + d.y * v_s1.y) / v_s1.x;
-  float rho = max(length(vec2(u, v)), 1e-6);
-  float dist = length(d) * (1. - v_s1.w / rho) * u_zoom;
-  float hard = clamp(.5 - dist, 0., 1.);
-  float soft = u_sigma < .35 ? hard : .5 - .5 * erfApprox(dist / (u_sigma * 1.41421356));
-  o = vec4(hard, soft, 0., 1.);
+  // Поле плавное — маска в пониженном разрешении, на холст растягивается со сглаживанием.
+  vec2 px = vec2(gl_FragCoord.x, u_maskSize.y - gl_FragCoord.y) * u_maskScale;
+  float l = lightField(worldAt(px));
+  float sharp = smoothstep(.35, .65, l);
+  o = vec4(sharp, l, 0., 1.);
 }`;

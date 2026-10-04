@@ -7,28 +7,21 @@
 /** Площадь чашки в единицах мира² — одинакова для всех форм и пропорций. */
 export const DISH_AREA = 1600 * 1200;
 
-/** Скорость пятен света, единиц мира за шаг (при «Дрейфе света» 1 — в среднем). Очень медленно. */
-export const LIGHT_DRIFT_SPEED = 0.02;
-
-/** Разброс скоростей пятен — доли от LIGHT_DRIFT_SPEED, от и до. */
-export const SPOT_SPEED_RANGE: readonly [number, number] = [0.5, 1.2];
-
 /**
- * Скругление разворота у стенки: путь пятна по каждой оси — «пила»
- * asin(k·sin τ) / asin(k); чем k ближе к 1, тем прямее путь и круче разворот.
+ * Световое поле (light.ts): крупность форм — «Размер пятен» × LIGHT_FORM_SCALE
+ * единиц мира на единицу шума; сила искажения координат; за сколько шагов
+ * (при «Дрейфе света» 1) время поля проходит единицу; полуширина плавного
+ * края — в единицах значения поля.
  */
-export const SPOT_TURN = 0.96;
-
-/** Ширина размытого края пятна — доля от полуоси эллипса. */
-export const SPOT_EDGE = 0.35;
-
-/** Наибольшая вытянутость эллипса (отношение полуосей). */
-export const SPOT_ASPECT_MAX = 2.2;
-
-/** Разброс размеров пятен (σ логнормального распределения) и пределы в средних размерах. */
-export const SPOT_SIZE_SPREAD = 0.45;
-export const SPOT_SIZE_MIN = 0.35;
-export const SPOT_SIZE_MAX = 3;
+export const LIGHT_FORM_SCALE = 10.5;
+export const LIGHT_WARP = 0.25;
+export const LIGHT_TEMPO = 720_000;
+export const LIGHT_EDGE = 0.0144;
+/**
+ * Обычная скорость перетекания света при «Дрейфе света» 1, единиц мира за шаг —
+ * мерило увлечения (drift.ts): быстрее — тянет сильнее.
+ */
+export const LIGHT_DRIFT_SPEED = 2.2e-4;
 
 /** Размер ячейки карты вязкости, единиц мира. */
 export const VISCOSITY_CELL = 4;
@@ -61,7 +54,7 @@ export const DRIFT_PERIOD = 2000;
  * воде при солнце 1: мерило «заметного» и «спокойного» для размыва, оседания
  * и показа.
  */
-export const DRIFT_SPEED = 0.0435;
+export const DRIFT_SPEED = 0.029;
 export const DRIFT_MAX = 1.5;
 export const DRIFT_REFERENCE = 0.3;
 /**

@@ -187,7 +187,7 @@ export class WorldRenderer {
     this.field.begin(frame, w.partitions.thickness);
     const mineral = this.mineral.field(w);
     this.field.fields({
-      spots: light.spots,
+      light: light.field,
       mineral,
       terrain: this.terrain.data(),
       fresh: this.ground.freshGrid(),

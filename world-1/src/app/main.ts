@@ -336,7 +336,7 @@ function frame(now: number): void {
   }
   renderer.drawMinimap(minimap);
   const spotSpeed = millimetresPerSecond(meanSpotSpeed(world.light, world.step)) * 60;
-  const speedText = spotSpeed > 0 ? `пятна ≈ ${spotSpeed.toFixed(0)} мм/мин` : 'пятна стоят';
+  const speedText = spotSpeed > 0 ? `свет перетекает ≈ ${(spotSpeed * 60 * 24).toFixed(0)} мм/сут` : 'свет стоит';
   if (lightSpeed.textContent !== speedText) lightSpeed.textContent = speedText;
   const rhythm = sunRhythmAt(world.light, world.step);
   const rising = sunRhythmAt(world.light, world.step + 100) >= rhythm;
