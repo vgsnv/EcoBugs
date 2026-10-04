@@ -47,6 +47,8 @@ export class WorldRenderer {
   private readonly suspension = new SuspensionLayer();
   private readonly ground = new GroundLayer();
   private readonly glassLight = new GlassLightLayer();
+  /** Часы узоров, которые несёт течение (тушь, каустика): секунды модели, не быстрее ×3 реального. */
+  private flowClock = 0;
   private probePoint: { x: number; y: number } | null = null;
   private world!: World;
   private frameKey = '';
@@ -232,10 +234,11 @@ export class WorldRenderer {
    * больших скоростях — усреднённое), взвесь и длина её следов. При
    * «Процессах» взвеси нет — течение показывают стрелки.
    */
-  private flows(frame: Frame): { trailMix: number; particles: Float32Array; stream: StreamField | null; averageMix: number; view: StreamView } {
+  private flows(frame: Frame): { trailMix: number; particles: Float32Array; stream: StreamField | null; averageMix: number; view: StreamView; flowClock: number } {
     const dt = this.water.clock(frame);
+    this.flowClock += dt;
     const w = frame.world;
-    if (this.showProcesses) return { trailMix: 0, particles: new Float32Array(0), stream: null, averageMix: 0, view: this.streamView };
+    if (this.showProcesses) return { trailMix: 0, particles: new Float32Array(0), stream: null, averageMix: 0, view: this.streamView, flowClock: this.flowClock };
     // Мерило силы — сильное течение при текущем солнце, единиц мира в секунду модели.
     const ref = DRIFT_REFERENCE * 10 * Math.max(0.05, sunAt(w.light, w.step));
     const stream = this.water.streamField(frame, this.streamView, ref);
@@ -245,6 +248,7 @@ export class WorldRenderer {
       stream,
       averageMix: this.water.averageMix(),
       view: this.streamView,
+      flowClock: this.flowClock,
     };
   }
 
