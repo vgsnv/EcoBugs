@@ -9,6 +9,7 @@ import type { Frame } from './frame.ts';
 import { createProgram, Textures, type Program, type TextureSource } from './gl.ts';
 import { GLARE_STRENGTH, LIGHT_SHADE_GLSL, MINERAL_COLOR, MINERAL_DEEP, SHADE_COLOR, SUN_COLOR, smoothstep, type Rgb } from './palette.ts';
 import { SPOT_FS, SPOT_VS, type SpotShapes } from './light.ts';
+import { SPOT_SHAPE_SIZE } from '../../core/index.ts';
 import { TRAIL_DASH_FS, TRAIL_FADE_FS, TRAIL_SECONDS } from './trails.ts';
 import type { StreamField, StreamView } from './water.ts';
 import { TERRAIN_GLSL, type Grid, type TerrainData } from './terrain.ts';
@@ -192,6 +193,9 @@ void main() {
   c *= mix(vec3(1.), u_sun, u_warmth * mb);
   c = screenOver(c, u_sun * u_glow * mb);
   c = screenOver(c, vec3(max(0., t - 1.) * u_glareStrength * sp.y));
+  // Голое стеклянное дно в пятне светится: свет проходит до освещённого стола.
+  float bareLit = (1. - smoothstep(.02, .12, levelAt(w))) * mb;
+  if (bareLit > 0.) c = screenOver(c, vec3(1., .95, .84) * bareLit * .24);
 
   // Подвижки и толчки — тонко, поверх света.
   c = tectonics(c, w, u_time);
@@ -400,9 +404,9 @@ export class FieldRenderer implements GlowSink {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.spotBuffer);
-    for (let n = 0; n < 3; n++) {
+    for (let n = 0; n < 2; n++) {
       const at = gl.getAttribLocation(this.spotProgram.program, `a_s${n}`);
-      gl.enableVertexAttribArray(at); gl.vertexAttribPointer(at, 4, gl.FLOAT, false, 48, n * 16); gl.vertexAttribDivisor(at, 1);
+      gl.enableVertexAttribArray(at); gl.vertexAttribPointer(at, 4, gl.FLOAT, false, SPOT_SHAPE_SIZE * 4, n * 16); gl.vertexAttribDivisor(at, 1);
     }
     gl.bindVertexArray(null);
     this.spotMask = null;

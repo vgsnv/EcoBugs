@@ -11,7 +11,7 @@ import { funnelFromNumbers, funnelNumbers, volcanoFromNumbers, volcanoNumbers } 
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 19;
+export const WORLD_FORMAT_VERSION = 20;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -32,6 +32,8 @@ const OLD_FORMATS: Record<number, string> = {
   15: 'тогда течения были лучами от пятен, с параметрами силы и длины',
   16: 'тогда минерал уходил в недра без воронок, а вулкан выбрасывал одним залпом',
   17: 'тогда размыв и оседание учитывали только солнечное течение, а растекание и стекание могли выносить минерал из отверстий воронок',
+  18: 'тогда пятна света вращались, меняли форму и уходили за край чашки',
+  19: 'тогда пятна света вращались, меняли форму и уходили за край чашки',
 };
 
 export interface MineralFile {

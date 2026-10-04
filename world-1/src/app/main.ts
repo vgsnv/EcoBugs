@@ -3,7 +3,7 @@
  * Скорость показа — дело приложения; мир знает только номер шага.
  */
 import {
-  Drift, flowAt, lightDriftVelocity, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInDeposits, mineralInMedium, smoothLevelAt, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
+  Drift, flowAt, meanSpotSpeed, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInDeposits, mineralInMedium, smoothLevelAt, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
   resistanceAt, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
 import { WorldSummary } from './world-summary.ts';
@@ -23,7 +23,7 @@ const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
 const renderer = new WorldRenderer(canvas);
 const minimap = document.querySelector<HTMLCanvasElement>('.minimap')!;
 minimap.addEventListener('click', event => renderer.centerFromMinimap(minimap, event.clientX, event.clientY));
-const driftArrow = document.querySelector<SVGElement>('.light-drift svg')!;
+const lightSpeed = document.querySelector<HTMLElement>('.light-speed')!;
 const mineralStats = document.querySelector<HTMLElement>('.mineral-stats')!;
 mineralStats.innerHTML = '<details class="mineral-details"><summary><b>Минерал</b><span class="mineral-scale"><span class="mineral-bar" role="img"><i class="depths"></i><i class="out"></i><i class="deposits"></i><i class="medium"></i><i class="threshold"></i></span><span class="mineral-ticks"><span class="mass-zero"></span><span class="mass-half"></span><span class="mass-total"></span></span></span></summary>'
   + '<div class="mineral-keys"><span class="key"><i class="depths"></i>недра <span class="amount-depths"></span></span><span class="key"><i class="deposits"></i>залежи <span class="amount-deposits"></span></span><span class="key"><i class="medium"></i>в среде <span class="amount-medium"></span></span><span class="key"><i class="out"></i>извергается <span class="amount-out"></span></span><span class="volcanoes"></span></div></details>';
@@ -335,8 +335,9 @@ function frame(now: number): void {
     }
   }
   renderer.drawMinimap(minimap);
-  const [dvx, dvy] = lightDriftVelocity(world.light, world.step);
-  driftArrow.style.transform = `rotate(${Math.atan2(dvy, dvx)}rad)`;
+  const spotSpeed = millimetresPerSecond(meanSpotSpeed(world.light, world.step)) * 60;
+  const speedText = spotSpeed > 0 ? `пятна ≈ ${spotSpeed.toFixed(0)} мм/мин` : 'пятна стоят';
+  if (lightSpeed.textContent !== speedText) lightSpeed.textContent = speedText;
   const rhythm = sunRhythmAt(world.light, world.step);
   const rising = sunRhythmAt(world.light, world.step + 100) >= rhythm;
   const sunText = world.params.sunRhythm > 0 ? `солнце ×${rhythm.toFixed(2)} ${rising ? '↑' : '↓'}` : 'солнце ровное';

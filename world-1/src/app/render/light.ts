@@ -71,27 +71,25 @@ export class LightLayer {
  * «докуда светит» плюс запас на размытие) в текстуру с наложением «максимум» —
  * пиксель считает только покрывающие его пятна. R — резкий край (сглажен в
  * пиксель), G — край, размытый гауссом σ (px). Точка внутри эллипса, если её
- * радиус в его осях меньше волнистой границы; расстояние до границы — вдоль
+ * радиус в его осях меньше середины края; расстояние до границы — вдоль
  * луча из центра, в пикселях экрана.
  */
 export const SPOT_VS = `#version 300 es
 in vec2 a_pos;
-in vec4 a_s0;   // центр x, y; докуда светит; r·k
-in vec4 a_s1;   // r/k; cos, sin поворота; e3
-in vec4 a_s2;   // e5; фазы волн 3 и 5; середина края
+in vec4 a_s0;   // центр x, y; докуда светит; полуось вдоль
+in vec4 a_s1;   // полуось поперёк; cos, sin поворота; середина края
 uniform vec3 u_view;
 uniform vec2 u_size;
 uniform float u_pad;   // запас на размытие, единиц мира
 out vec2 v_d;
 flat out vec4 v_s0;
 flat out vec4 v_s1;
-flat out vec4 v_s2;
 void main() {
   float reach = a_s0.z + u_pad;
   vec2 d = (a_pos * 2. - 1.) * reach;
   vec2 p = (a_s0.xy + d) * u_view.x + u_view.yz;
   gl_Position = vec4(p.x / u_size.x * 2. - 1., 1. - p.y / u_size.y * 2., 0., 1.);
-  v_d = d; v_s0 = a_s0; v_s1 = a_s1; v_s2 = a_s2;
+  v_d = d; v_s0 = a_s0; v_s1 = a_s1;
 }`;
 
 export const SPOT_FS = `#version 300 es
@@ -99,7 +97,6 @@ precision highp float;
 in vec2 v_d;
 flat in vec4 v_s0;
 flat in vec4 v_s1;
-flat in vec4 v_s2;
 uniform float u_zoom;
 uniform float u_sigma;
 out vec4 o;
@@ -113,9 +110,7 @@ void main() {
   float u = (d.x * v_s1.y + d.y * v_s1.z) / v_s0.w;
   float v = (-d.x * v_s1.z + d.y * v_s1.y) / v_s1.x;
   float rho = max(length(vec2(u, v)), 1e-6);
-  float phi = atan(v, u);
-  float bound = (1. + v_s1.w * sin(3. * phi + v_s2.y) + v_s2.x * sin(5. * phi + v_s2.z)) * v_s2.w;
-  float dist = length(d) * (1. - bound / rho) * u_zoom;
+  float dist = length(d) * (1. - v_s1.w / rho) * u_zoom;
   float hard = clamp(.5 - dist, 0., 1.);
   float soft = u_sigma < .35 ? hard : .5 - .5 * erfApprox(dist / (u_sigma * 1.41421356));
   o = vec4(hard, soft, 0., 1.);

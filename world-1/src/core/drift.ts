@@ -16,7 +16,7 @@
  */
 import { finishCalculation, type Calculation } from './task.ts';
 import { DRIFT_CELL, DRIFT_DRAG, DRIFT_MAX, DRIFT_PERIOD, DRIFT_SPEED, LIGHT_DRIFT_SPEED } from './constants.ts';
-import { lightDriftVelocity, rasterizeSpotIntensityTask, sunAt, type LightMap } from './light.ts';
+import { rasterizeSpotIntensityTask, sunAt, type LightMap } from './light.ts';
 import type { WorldParams } from './params.ts';
 import { cellInsideDish } from './dish.ts';
 import { isBlocked, type PartitionLayout } from './partitions.ts';
@@ -283,7 +283,8 @@ function* computeDriftFieldTask(world: Sources, t: number, ground?: Ground): Cal
   if (sun <= 0) return { cols, rows, cell, vx, vy };
   // Свет места: фон + пятна; источник — отклонение от среднего по отсеку.
   const bg = world.params.backgroundLevel;
-  const intensity = yield* rasterizeSpotIntensityTask(world.light, t, cols, rows, cell);
+  const spotV = { vx: new Float32Array(n), vy: new Float32Array(n) };
+  const intensity = yield* rasterizeSpotIntensityTask(world.light, t, cols, rows, cell, undefined, spotV);
   const { blocked, cond, region, regions } = ground;
   const sum = new Float64Array(regions), count = new Float64Array(regions);
   const light = new Float64Array(n);
@@ -294,16 +295,15 @@ function* computeDriftFieldTask(world: Sources, t: number, ground?: Ground): Cal
     sum[region[k]] += light[k];
     count[region[k]]++;
   }
-  // Увлечение: дрейфующие пятна тянут среду за собой — сила по направлению
-  // дрейфа света, тем больше, чем ярче место и быстрее дрейф (на гранях — среднее).
-  const [dvx, dvy] = lightDriftVelocity(world.light, t);
+  // Увлечение: движущиеся пятна тянут среду за собой — каждое по своему
+  // направлению, тем сильнее, чем ярче место и быстрее пятно (на гранях — среднее).
   const fx = new Float64Array(n), fy = new Float64Array(n);
   for (let k = 0; k < n; k++) {
     if ((k & 2047) === 0) yield;
     if (blocked[k]) continue;
     const pull = DRIFT_DRAG * sun * intensity[k] / LIGHT_DRIFT_SPEED;
-    fx[k] = pull * dvx;
-    fy[k] = pull * dvy;
+    fx[k] = pull * spotV.vx[k];
+    fy[k] = pull * spotV.vy[k];
   }
   const fine = levelOf(cols, rows, cond);
   const { east, south } = fine;

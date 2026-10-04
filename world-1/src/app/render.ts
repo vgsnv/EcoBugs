@@ -10,6 +10,7 @@ import { DRIFT_REFERENCE, insideDish, sunAt, type GroundChanges, type MineralPro
 import { Camera } from './render/camera.ts';
 import { FieldRenderer } from './render/field.ts';
 import { GroundLayer } from './render/ground.ts';
+import { GlassLightLayer } from './render/glass-light.ts';
 import type { Frame } from './render/frame.ts';
 import { LightLayer } from './render/light.ts';
 import { MineralLayer } from './render/mineral.ts';
@@ -45,6 +46,7 @@ export class WorldRenderer {
   private readonly field = new FieldRenderer();
   private readonly suspension = new SuspensionLayer();
   private readonly ground = new GroundLayer();
+  private readonly glassLight = new GlassLightLayer();
   private probePoint: { x: number; y: number } | null = null;
   private world!: World;
   private frameKey = '';
@@ -83,6 +85,7 @@ export class WorldRenderer {
     this.terrain.setWorld(world);
     this.ground.setWorld(world);
     this.walls.setWorld(world);
+    this.glassLight.setWorld(world);
     const fresh = this.terrain.refresh();
     if (fresh) this.water.buildSparkles(world, fresh.level, fresh.deposits);
     this.water.resetFoam();
@@ -209,6 +212,7 @@ export class WorldRenderer {
       });
     }
     this.walls.draw(frame);
+    this.glassLight.draw(frame, this.field);
     if (this.probePoint) {
       const { x, y } = this.probePoint;
       ctx.save();
