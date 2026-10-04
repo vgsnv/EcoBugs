@@ -7,6 +7,7 @@ import { DRIFT_REFERENCE, flowAt, hash3, insideDish, isBlocked, periodicFbm, sun
 import type { GlowSink } from './field.ts';
 import type { Frame } from './frame.ts';
 import { smoothstep } from './palette.ts';
+import { STREAKS_FROM, STREAKS_FULL } from './streaks.ts';
 
 /** Блёстки кристаллов: с какой густоты залежей, скорость мерцания, порог вспышки (доля времени ярко — малая). */
 const SPARKLE_DEPOSIT = 2;
@@ -73,6 +74,8 @@ export class WaterLayer {
   private rippleClock = 0;
   private rippleFlowStep: number | null = null;
   private rippleAnimTime = 0;
+  /** Скорость показа — секунд модели за секунду наблюдения, сглаженная (на паузе не меняется). */
+  private pace = 1;
 
   resetFlow(): void {
     this.flowKey = ''; this.flowStep = -1; this.flowBuiltAt = -Infinity;
@@ -87,6 +90,8 @@ export class WaterLayer {
       const model = (frame.flowStep - this.rippleFlowStep) / 10;
       const real = Math.max(0, frame.animTime - this.rippleAnimTime);
       this.rippleClock += Math.min(model, real * RIPPLE_MAX_RATE);
+      // Сглаживание за ~0,5 с: смена вида течений при смене скорости — плавная.
+      if (real > 0) this.pace += (model / real - this.pace) * Math.min(1, real * 2);
     }
     this.rippleFlowStep = frame.flowStep;
     this.rippleAnimTime = frame.animTime;
@@ -114,6 +119,12 @@ export class WaterLayer {
       }
     }
     this.sparkles = Float32Array.from(out);
+  }
+
+  /** Доля штрихов вместо ряби: 0 до ×STREAKS_FROM, 1 от ×STREAKS_FULL, между — по логарифму скорости. */
+  streakMix(): number {
+    const x = Math.log(Math.max(1e-6, this.pace) / STREAKS_FROM) / Math.log(STREAKS_FULL / STREAKS_FROM);
+    return smoothstep(0, 1, x);
   }
 
   /**

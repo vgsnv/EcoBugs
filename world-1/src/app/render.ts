@@ -6,7 +6,7 @@
  * стекло стен и перегородок, проба, линейки. Слои — в render/*.ts.
  */
 import { CoordinateRulers } from './rulers.ts';
-import { insideDish, sunAt, type MineralProcesses, type World } from '../core/index.ts';
+import { DRIFT_REFERENCE, insideDish, sunAt, type MineralProcesses, type World } from '../core/index.ts';
 import { Camera } from './render/camera.ts';
 import { FieldRenderer } from './render/field.ts';
 import type { Frame } from './render/frame.ts';
@@ -175,6 +175,8 @@ export class WorldRenderer {
       ...light.strength,
       rippleMode: this.showProcesses ? 1 : 0,
       rippleTime: this.water.rippleTime(frame),
+      streakMix: this.showProcesses ? 0 : this.water.streakMix(),
+      flowRef: DRIFT_REFERENCE * 10 * Math.max(0.05, sunAt(w.light, w.step)),
     });
     this.water.drawSparkles(frame, this.field);
 
