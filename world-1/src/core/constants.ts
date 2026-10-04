@@ -269,6 +269,14 @@ export const BURST_FROM = 0.15;
 export const BURST_WIDTH = 0.04;
 export const THROW_RAYS = 96;
 export const THROW_SAMPLES = 6;
+/**
+ * Порция залпа (throw.ts): собственная скорость, единиц мира за шаг (по ней —
+ * снос течением за время полёта); при ударе о стенку — какая доля поперечной
+ * составляющей отражается и какая доля продольной остаётся.
+ */
+export const THROW_SPEED = 5;
+export const THROW_BOUNCE = 0.25;
+export const THROW_FRICTION = 0.6;
 /** Толчок истечения — как от круга такой доли радиуса выброса за всё извержение (залпы — на весь радиус). */
 export const ERUPTION_TAIL_AREA = 0.5;
 /**

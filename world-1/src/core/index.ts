@@ -15,6 +15,7 @@ export * from './partitions.ts';
 export * from './drift.ts';
 export * from './mineral.ts';
 export * from './terrain.ts';
+export * from './throw.ts';
 export * from './save.ts';
 export * from './world.ts';
 export * from './profile.ts';

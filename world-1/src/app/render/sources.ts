@@ -4,7 +4,7 @@
  * свечение недр, крупинки, стекающие в отверстие, и искры ушедших вниз.
  * Свечения, искры и отверстия воронок — на нижнем холсте (GlowSink), остальное — на верхнем.
  */
-import { BURST_WIDTH, DRIFT_REFERENCE, ERUPTION_RADIUS, VOLCANO_BIRTH, VOLCANO_POWER, eruptionBursts, eruptionRate, flowAt, hash3, insideDish, isBlocked, ventPush, type Volcano, type World } from '../../core/index.ts';
+import { BURST_WIDTH, DRIFT_REFERENCE, ERUPTION_RADIUS, VOLCANO_BIRTH, VOLCANO_POWER, eruptionBursts, eruptionRate, flowAt, hash3, insideDish, isBlocked, traceThrow, ventPush, type ThrowWorld, type Volcano, type World } from '../../core/index.ts';
 import type { GlowSink } from './field.ts';
 import type { Frame } from './frame.ts';
 import { SINK_S } from './mineral.ts';
@@ -86,6 +86,10 @@ const SPARK_CSS = 2.5;
 const FUNNEL_GRAIN_CSS = 2.4;
 const VENT_ERUPT_CSS: readonly [number, number] = [5, 11];
 const VENT_VOLUME_FROM = 0.35;
+/** Крупинки залпа: сколько на залп, сколько летят (с реального времени), сколько всего на экране. */
+const THROWN_GRAINS = 48;
+const THROWN_S = 1.6;
+const THROWN_MAX = 400;
 /** Показанное жерло догоняет модель за столько секунд (до e⁻¹). */
 const VENT_EASE_S = 0.35;
 /** Отверстие жерла: тёмная глубина. */
@@ -114,6 +118,8 @@ export class SourcesLayer {
   /** Искры крупинок, ушедших в недра: где и когда (время анимации). */
   private funnelSparks: { x: number; y: number; t: number }[] = [];
   private funnelStep = 0;
+  /** Крупинки залпов: путь (x, y подряд, тот же, что у вещества в модели), когда брошена, длина пути. */
+  private thrown: { path: Float32Array; t: number; length: number }[] = [];
   /** Вспышки начала извержений: где, когда (время анимации), размах. */
   private shocks: { x: number; y: number; t: number; scale: number }[] = [];
   /** Сколько раз извергался каждый вулкан на прошлом кадре. */
@@ -127,6 +133,7 @@ export class SourcesLayer {
     this.world = world;
     this.funnelDrawn = -1;
     this.shocks = [];
+    this.thrown = [];
     this.seenBursts = new Map(world.mineral.volcanoes.filter((v) => v.stage === 'erupting')
       .map((v) => [`${v.id}:${v.k}`, eruptionBursts(world.params, v).filter((b) => b.at <= Math.max(0, (world.step - v.begin) / Math.max(1, v.until - v.begin))).length]));
     this.springs.clear();
@@ -156,7 +163,9 @@ export class SourcesLayer {
       const phase = this.eruptionPhase(v);
       const passed = bursts.filter((b) => b.at <= phase).length;
       for (let q = this.seenBursts.get(key) ?? 0; q < passed; q++) {
-        this.shocks.push({ x: v.x, y: v.y, t: animTime, scale: (v.radius / ERUPTION_RADIUS) * Math.sqrt(bursts[q].share / bursts[0].share) });
+        const scale = (v.radius / ERUPTION_RADIUS) * Math.sqrt(bursts[q].share / bursts[0].share);
+        this.shocks.push({ x: v.x, y: v.y, t: animTime, scale });
+        this.throwGrains(w, v, q, ERUPTION_RADIUS * scale, animTime);
       }
       this.seenBursts.set(key, passed);
     }
@@ -218,6 +227,7 @@ export class SourcesLayer {
       ctx.beginPath(); ctx.arc(s.x, s.y, radius, 0, Math.PI * 2); ctx.stroke();
     }
     ctx.globalAlpha = 1;
+    this.drawThrown(frame);
     const dt = this.ventTime < 0 ? 0 : Math.min(0.25, Math.max(0, animTime - this.ventTime));
     this.ventTime = animTime;
     const seen = new Set<number>();
@@ -270,6 +280,61 @@ export class SourcesLayer {
     for (const id of this.springs.keys()) if (!m.volcanoes.some((v) => v.id === id && v.stage === 'erupting')) this.springs.delete(id);
     this.drawFunnels(frame, glows);
     ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Крупинки залпа: по лучам из жерла, с разным запасом дальности, — пути
+   * считает traceThrow, как для вещества в модели (вязкость, снос течением,
+   * отскок и скольжение у стенок).
+   */
+  private throwGrains(w: World, v: Volcano, burst: number, range: number, t: number): void {
+    const m = w.mineral;
+    const flow: [number, number] = [0, 0];
+    const world: ThrowWorld = {
+      cols: m.cols, rows: m.rows, cell: m.cell, level: w.terrain.applied,
+      blocked: (x, y) => !insideDish(w.dish, x, y) || isBlocked(w.partitions, x, y),
+      flow: (x, y, out) => { flowAt(w, x, y, flow); out[0] = flow[0]; out[1] = flow[1]; },
+    };
+    for (let n = 0; n < THROWN_GRAINS; n++) {
+      const h = (k: number) => hash3(v.id * 64 + burst, v.k, n, k) / 4294967296;
+      const path: number[] = [];
+      traceThrow(world, v.x, v.y, h(1) * Math.PI * 2, range * (0.15 + 0.85 * Math.sqrt(h(2))), path);
+      let length = 0;
+      for (let i = 2; i < path.length; i += 2) length += Math.hypot(path[i] - path[i - 2], path[i + 1] - path[i - 1]);
+      if (length > 0) this.thrown.push({ path: Float32Array.from(path), t: t + h(3) * 0.08, length });
+    }
+    if (this.thrown.length > THROWN_MAX) this.thrown.splice(0, this.thrown.length - THROWN_MAX);
+  }
+
+  /** Крупинки залпов летят по своим путям (быстро, затем тормозят) и тают; за ними — короткий след. */
+  private drawThrown(frame: Frame): void {
+    const { ctx, camera, animTime } = frame;
+    this.thrown = this.thrown.filter((g) => animTime - g.t < THROWN_S);
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = rgb(VENT_SPARK);
+    ctx.lineWidth = camera.px(1.4);
+    for (const g of this.thrown) {
+      const f = (animTime - g.t) / THROWN_S;
+      if (f < 0) continue;
+      const head = g.length * (1 - (1 - f) ** 3), tail = Math.max(0, head - camera.px(10) - g.length * 0.12 * (1 - f));
+      ctx.globalAlpha = 0.85 * (1 - f) ** 1.5;
+      ctx.beginPath();
+      let walked = 0, started = false;
+      const p = g.path;
+      for (let i = 2; i < p.length; i += 2) {
+        const seg = Math.hypot(p[i] - p[i - 2], p[i + 1] - p[i - 1]);
+        const a = walked, b = walked + seg;
+        walked = b;
+        if (b < tail || seg === 0) continue;
+        const u0 = Math.max(0, (tail - a) / seg), u1 = Math.min(1, (head - a) / seg);
+        if (!started) { ctx.moveTo(p[i - 2] + (p[i] - p[i - 2]) * u0, p[i - 1] + (p[i + 1] - p[i - 1]) * u0); started = true; }
+        ctx.lineTo(p[i - 2] + (p[i] - p[i - 2]) * u1, p[i - 1] + (p[i + 1] - p[i - 1]) * u1);
+        if (b >= head) break;
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   /**

@@ -11,6 +11,7 @@
  * сохраняет количество: минерал клетки делится между клетками вокруг точки
  * назначения; в перегородки не попадает.
  */
+import { traceThrow, type ThrowWorld } from './throw.ts';
 import { finishCalculation, type Calculation } from './task.ts';
 import {
   ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_BURST, ERUPTION_TAIL_AREA, ERUPTION_BURSTS_MAX, BURST_WIDTH, BURST_FROM, THROW_RAYS, THROW_SAMPLES, MINERAL_SPREAD,
@@ -633,7 +634,7 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
       const part = vol.total * ERUPTION_BURST * b.share * (ease((u1 - b.at) / BURST_WIDTH) - ease((a0 - b.at) / BURST_WIDTH));
       if (part <= 0) continue;
       const g = Math.min(left, part);
-      yield* throwMass(m, terrain, partitions, vol, g, vol.radius * Math.sqrt(b.share / bursts[0].share));
+      yield* throwMass(m, terrain, partitions, work, vol, g, vol.radius * Math.sqrt(b.share / bursts[0].share));
       left -= g;
     }
     const mouth = mouthCells(m, terrain, vol);
@@ -930,13 +931,12 @@ export function viscousDistancesFrom(m: MineralState, terrain: TerrainState, see
 }
 
 /**
- * Бросок вещества залпом: от жерла по лучам, почти по прямой; у каждой
- * порции свой запас дальности (до `range`, гуще у жерла). Полёт тратит запас
- * тем быстрее, чем вязче то, над чем летит (× множитель вязкости); где запас
- * кончился — порция падает. Перегородки и стенки не перелетает.
+ * Бросок вещества залпом: от жерла по THROW_RAYS лучам, у каждой порции свой
+ * запас дальности (до `range`, гуще у жерла); путь порции — traceThrow
+ * (вязкость, снос течением этого обновления, отскок и скольжение у стенок,
+ * остановка в отверстии воронки). Масса сразу ложится там, где порция
+ * остановилась (бросок мгновенный — см. throw.ts).
  */
-/** Геометрия залпа зависит от снимка местности, жерла и дальности; масса её не меняет. */
-const throwMaps = new WeakMap<Float32Array, Map<string, Float64Array>>();
 const mouths = new WeakMap<Float32Array, Map<string, Int32Array>>();
 
 function mouthCells(m: MineralState, terrain: TerrainState, vol: Volcano): Int32Array {
@@ -948,58 +948,30 @@ function mouthCells(m: MineralState, terrain: TerrainState, vol: Volcano): Int32
   return cells;
 }
 
-function* throwMass(m: MineralState, terrain: TerrainState, partitions: PartitionLayout, vol: Volcano, amount: number, range: number): Calculation {
+function* throwMass(m: MineralState, terrain: TerrainState, partitions: PartitionLayout, work: MineralWork, vol: Volcano, amount: number, range: number): Calculation {
   if (amount <= 0) return;
-  let maps = throwMaps.get(terrain.applied);
-  if (!maps) { maps = new Map(); throwMaps.set(terrain.applied, maps); }
-  const key = `${vol.x}:${vol.y}:${range}`;
-  let points = maps.get(key);
-  if (!points) { points = yield* throwLandings(m, terrain, partitions, vol, range); maps.set(key, points); }
+  const { cols, rows, cell } = m;
+  const at = (x: number, y: number) => Math.min(rows - 1, Math.max(0, Math.floor(y / cell))) * cols + Math.min(cols - 1, Math.max(0, Math.floor(x / cell)));
+  const world: ThrowWorld = {
+    cols, rows, cell, level: terrain.applied,
+    blocked: (x, y) => x < 0 || y < 0 || x >= cols * cell || y >= rows * cell || isBlocked(partitions, x, y),
+    hole: (x, y) => work.holes[at(x, y)] === 1,
+    flow: (x, y, out) => { const k = at(x, y); out[0] = work.flowX[k]; out[1] = work.flowY[k]; },
+  };
   const weights: number[] = [];
   let wsum = 0;
   for (let q = 0; q < THROW_SAMPLES; q++) { const w = 1 - (q + 0.5) / THROW_SAMPLES; weights.push(w); wsum += w; }
-  const home = Math.floor(vol.y / m.cell) * m.cols + Math.floor(vol.x / m.cell);
-  for (let r = 0; r < THROW_RAYS; r++) for (let q = 0; q < THROW_SAMPLES; q++) {
-    const o = (r * THROW_SAMPLES + q) * 2;
-    spill(m.field, m.blocked, m.cols, m.rows, m.cell, points[o], points[o + 1], (amount * weights[q]) / wsum / THROW_RAYS, home);
+  const home = Math.floor(vol.y / cell) * cols + Math.floor(vol.x / cell);
+  for (let r = 0; r < THROW_RAYS; r++) {
+    yield;
+    const angle = ((r + 0.5) / THROW_RAYS) * Math.PI * 2;
+    for (let q = 0; q < THROW_SAMPLES; q++) {
+      const [x, y] = traceThrow(world, vol.x, vol.y, angle, (range * (q + 0.5)) / THROW_SAMPLES);
+      spill(m.field, m.blocked, cols, rows, cell, x, y, (amount * weights[q]) / wsum / THROW_RAYS, home);
+    }
   }
 }
 
-function* throwLandings(m: MineralState, terrain: TerrainState, partitions: PartitionLayout, vol: Volcano, range: number): Calculation<Float64Array> {
-  const { cols, rows, cell } = m;
-  const rays = THROW_RAYS, samples = THROW_SAMPLES;
-  // Доли запасов: линейно спадают к краю — гуще у жерла.
-  const landings = new Float64Array(rays * samples * 2);
-  const step = cell * 0.5;
-  for (let r = 0; r < rays; r++) {
-    yield;
-    const a = ((r + 0.5) / rays) * Math.PI * 2;
-    const dx = Math.cos(a), dy = Math.sin(a);
-    let x = vol.x, y = vol.y, spent = 0;
-    let q = 0;
-    let landX = x, landY = y;
-    // Идём по лучу; порции падают, когда их запас исчерпан.
-    while (q < samples) {
-      const budget = (range * (q + 0.5)) / samples;
-      if (spent >= budget) {
-        landings[(r * samples + q) * 2] = landX; landings[(r * samples + q) * 2 + 1] = landY;
-        q++;
-        continue;
-      }
-      const nx = x + dx * step, ny = y + dy * step;
-      if (nx < 0 || ny < 0 || nx >= cols * cell || ny >= rows * cell || isBlocked(partitions, nx, ny)) {
-        // Преграда — все оставшиеся порции падают перед ней.
-        for (; q < samples; q++) { landings[(r * samples + q) * 2] = landX; landings[(r * samples + q) * 2 + 1] = landY; }
-        break;
-      }
-      const k = Math.floor(ny / cell) * cols + Math.floor(nx / cell);
-      spent += step * multiplierForLevel(terrain.applied[k]);
-      x = nx; y = ny;
-      landX = x; landY = y;
-    }
-  }
-  return landings;
-}
 /** Положить `mass` в точку (x, y): доли четырёх соседних клеток, в занятые — не кладём (остаток — в `home`). */
 function spill(out: Float64Array, blocked: Uint8Array, cols: number, rows: number, cell: number, x: number, y: number, mass: number, home: number): void {
   const fx = x / cell - 0.5, fy = y / cell - 0.5;
