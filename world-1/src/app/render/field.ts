@@ -57,6 +57,10 @@ export interface FieldInputs {
   readonly view: StreamView;
 }
 
+/** Переход дымки минерала к новому состоянию — за средний промежуток между состояниями, в этих пределах, мс. */
+const MINERAL_FADE_MIN_MS = 60;
+const MINERAL_FADE_MAX_MS = 12_000;
+
 const QUAD_VS = `#version 300 es
 in vec2 a_pos;
 uniform vec4 u_dst;
@@ -147,6 +151,8 @@ ${TECTONICS_GLSL}
 ${LIGHT_SHADE_GLSL}
 uniform sampler2D u_spotMask;    // R — пятна с резким краем, G — с мягким
 uniform sampler2D u_mineral;
+uniform sampler2D u_mineralPrev;  // прошлое состояние дымки — к нынешнему переходим плавно
+uniform float u_mineralMix;
 uniform sampler2D u_ripple;
 uniform sampler2D u_foam;
 uniform sampler2D u_trails;       // R — взвесь и её следы, G — песочная взвесь
@@ -180,7 +186,7 @@ void main() {
   float inside = insideDish(w);
   if (inside <= 0.) { o = vec4(0.); return; }
   vec3 c = terrainAt(w);
-  vec4 mineral = texture(u_mineral, w / u_grid);
+  vec4 mineral = mix(texture(u_mineralPrev, w / u_grid), texture(u_mineral, w / u_grid), u_mineralMix);
   float held = mineral.g;
   float lit1 = min(1., u_lit);
 
@@ -319,7 +325,14 @@ export class FieldRenderer implements GlowSink {
   private commands: Command[] = [];
   private frame: Frame | null = null;
   /** Ключи текстур, которые не меняются между кадрами. */
-  private readonly mineralKey = {};
+  /** Дымка минерала: два состояния по очереди (прошлое и нынешнее) и плавный переход между ними. */
+  private readonly mineralKeys = [{}, {}];
+  private mineralFront = 0;
+  private mineralShown = -1;
+  private mineralChangedAt = 0;
+  /** Сколько в среднем проходит между новыми состояниями дымки, мс (длина перехода). */
+  private mineralInterval = 250;
+  private mineralPrev: WebGLTexture | null = null;
   private readonly streamKey = {};
   private readonly levelKey = {};
   private readonly depositKey = {};
@@ -392,6 +405,8 @@ export class FieldRenderer implements GlowSink {
     gl.enableVertexAttribArray(shape); gl.vertexAttribPointer(shape, 4, gl.FLOAT, false, stride, 32); gl.vertexAttribDivisor(shape, 1);
     gl.bindVertexArray(null);
     this.mineralTexture = null;
+    this.mineralPrev = null;
+    this.mineralShown = -1;
     this.spotProgram = createProgram(gl, SPOT_VS, SPOT_FS);
     this.trailFade = createProgram(gl, FULL_VS, TRAIL_FADE_FS);
     this.trailDash = createProgram(gl, SPRITE_VS, TRAIL_DASH_FS);
@@ -629,7 +644,21 @@ export class FieldRenderer implements GlowSink {
     }
     // Загрузка текстур и проходы вне экрана — до выбора программы полей.
     this.drawSpotMask(input.spots, input.penumbra);
-    this.mineralTexture = this.textures.get(this.mineralKey, input.mineral.image, input.mineral.version);
+    // Новое состояние дымки — в другой из двух текстур; прошлое остаётся для перехода.
+    const now = performance.now();
+    if (input.mineral.version !== this.mineralShown) {
+      const first = this.mineralShown < 0;
+      if (!first) {
+        const gap = Math.min(MINERAL_FADE_MAX_MS, Math.max(MINERAL_FADE_MIN_MS, now - this.mineralChangedAt));
+        this.mineralInterval += (gap - this.mineralInterval) * 0.3;
+        this.mineralFront = 1 - this.mineralFront;
+      }
+      this.mineralShown = input.mineral.version;
+      this.mineralChangedAt = first ? now - this.mineralInterval : now;
+      this.mineralTexture = this.textures.get(this.mineralKeys[this.mineralFront], input.mineral.image, input.mineral.version);
+      this.mineralPrev = first ? this.mineralTexture : this.textures.peek(this.mineralKeys[1 - this.mineralFront]) ?? this.mineralTexture;
+    }
+    const mineralMix = Math.min(1, (now - this.mineralChangedAt) / this.mineralInterval);
     const ripple = this.textures.get(input.ripple, input.ripple, 0, { repeat: true });
     const foam = this.textures.get(this.foamKey, input.foam.canvas, input.foam.version);
     const trails = this.drawTrails(input);
@@ -637,6 +666,8 @@ export class FieldRenderer implements GlowSink {
     this.common(p, world.dish);
     this.bind(p, 1, 'u_spotMask', this.spotMask!.texture);
     this.bind(p, 2, 'u_mineral', this.mineralTexture);
+    this.bind(p, 5, 'u_mineralPrev', this.mineralPrev);
+    gl.uniform1f(p.uniform('u_mineralMix'), mineralMix);
     this.bind(p, 3, 'u_trails', trails);
     this.bind(p, 4, 'u_ripple', ripple);
     if (input.stream) this.bindStream(p, 13, input.stream);

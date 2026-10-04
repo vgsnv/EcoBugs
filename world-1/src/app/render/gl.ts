@@ -104,6 +104,11 @@ export class Textures {
     return entry.texture;
   }
 
+  /** Уже загруженная текстура по ключу (без загрузки); нет — null. */
+  peek(key: object): WebGLTexture | null {
+    return this.entries.get(key)?.texture ?? null;
+  }
+
   release(key: object): void {
     const entry = this.entries.get(key);
     if (!entry) return;

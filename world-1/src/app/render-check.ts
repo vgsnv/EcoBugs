@@ -173,7 +173,7 @@ export function installRenderCheck(renderer: WorldRenderer): void {
       /**
        * Мир с показом грунта: идёт до шага `step` (или продолжает прошлый, если
        * `step` больше его шага), отдавая показу изменения грунта; вид — на точку
-       * (x, y) при масштабе `zoom` (без точки — вся чашка). Возвращает идущие подвижки.
+       * (x, y) при масштабе `zoom` (без точки — вся чашка). Возвращает подвижки, вулканы и воронки.
        */
       look: (params: Partial<WorldParams>, step: number, x?: number, y?: number, zoom = 1, time = 0) => {
         const key = JSON.stringify(params);
@@ -191,7 +191,11 @@ export function installRenderCheck(renderer: WorldRenderer): void {
         w.drift.nodes(w.step);
         if (x === undefined || y === undefined) renderer.fit(); else renderer.lookAt(x, y, zoom);
         renderer.draw(time, w.step);
-        return w.terrain.active.map((m) => ({ n: m.n, quake: m.quake, band: m.band, x: Math.round(m.x), y: Math.round(m.y), size: Math.round(m.size), amp: +m.amp.toFixed(2), done: +((w.step - m.start) / m.duration).toFixed(2) }));
+        return {
+          moves: w.terrain.active.map((m) => ({ n: m.n, quake: m.quake, band: m.band, x: Math.round(m.x), y: Math.round(m.y), size: Math.round(m.size), amp: +m.amp.toFixed(2), done: +((w.step - m.start) / m.duration).toFixed(2) })),
+          volcanoes: w.mineral.volcanoes.map((v) => ({ x: Math.round(v.x), y: Math.round(v.y), stage: v.stage })),
+          funnels: w.mineral.funnels.map((f) => ({ x: Math.round(f.x), y: Math.round(f.y), strength: +f.strength.toFixed(2) })),
+        };
       },
       run: (index: number) => run(CHECK_SCENES[index]),
       all: () => CHECK_SCENES.map(run),
