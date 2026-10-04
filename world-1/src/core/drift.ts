@@ -8,9 +8,9 @@
  * собой — отсюда круговороты. Смещение за шаг — плотность потока.
  *
  * Расчёт: давление p из баланса потоков в каждой клетке — Σ проводимость
- * грани × (p − p соседа + увлечение вдоль грани) = источник. Решается каскадом от грубой сетки к
- * тонкой (Гаусс — Зейдель с верхней релаксацией), всегда с одного и того же
- * начального приближения — поэтому снос — функция номера шага. Поле
+ * грани × (p − p соседа + увлечение вдоль грани) = источник. Решается
+ * сопряжёнными градиентами с многосеточным ускорением (см. solve), всегда с
+ * нуля — поэтому снос — функция номера шага. Поле
  * пересчитывается раз в DRIFT_PERIOD шагов, между пересчётами — плавный
  * переход.
  */
@@ -38,22 +38,27 @@ interface Sources {
   readonly partitions: PartitionLayout;
 }
 
-/** Один уровень сетки для решения: проводимость клеток, проводимость граней (вправо и вниз), источник. */
+/**
+ * Уровень сетки для решения: проводимость граней (вправо, вниз и те же грани
+ * со стороны соседа), сумма граней клетки и обратная к ней (0 — клетка вне
+ * потока: преграда или без соседей). Векторы на уровне — с рамкой в строку
+ * сверху и снизу (клетка k хранится в k + cols), чтобы соседи читались без
+ * проверок: у краёв и преград проводимость грани — 0.
+ */
 interface Level {
   readonly cols: number;
   readonly rows: number;
-  readonly cond: Float64Array;
   readonly east: Float64Array;
   readonly south: Float64Array;
-  readonly source: Float64Array;
   readonly west: Float64Array;
   readonly north: Float64Array;
+  readonly diag: Float64Array;
   readonly inverse: Float64Array;
 }
 
-/** Коэффициенты не меняются до пересборки местности; источники меняются со светом. */
-const geometries = new WeakMap<Float64Array, Omit<Level, 'source'>>();
-const coarseConditions = new WeakMap<Float64Array, Float64Array>();
+/** Уровни не меняются до пересборки местности; источники меняются со светом. */
+const fineLevels = new WeakMap<Float64Array, Level>();
+const coarseLevels = new WeakMap<Level, Level>();
 
 /** Неизменное на сетке течений: преграды, проводимость, отсек каждой клетки (−1 — преграда). */
 interface Ground {
@@ -102,99 +107,167 @@ function* groundOf(world: Sources, cols: number, rows: number, cell: number): Ca
 /** Проводимость грани между клетками — среднее гармоническое (0, если хоть одна — преграда). */
 const face = (a: number, b: number) => (a > 0 && b > 0 ? (2 * a * b) / (a + b) : 0);
 
-function levelOf(cols: number, rows: number, cond: Float64Array, source: Float64Array): Level {
-  const cached = geometries.get(cond);
-  if (cached) return { ...cached, source };
-  const east = new Float64Array(cols * rows);
-  const south = new Float64Array(cols * rows);
-  for (let j = 0; j < rows; j++) {
-    for (let i = 0; i < cols; i++) {
-      const k = j * cols + i;
-      if (i < cols - 1) east[k] = face(cond[k], cond[k + 1]);
-      if (j < rows - 1) south[k] = face(cond[k], cond[k + cols]);
-    }
-  }
+function levelFromFaces(cols: number, rows: number, east: Float64Array, south: Float64Array): Level {
   const n = cols * rows;
-  const west = new Float64Array(n), north = new Float64Array(n), inverse = new Float64Array(n);
+  const west = new Float64Array(n), north = new Float64Array(n), diag = new Float64Array(n), inverse = new Float64Array(n);
   for (let k = 0; k < n; k++) {
     west[k] = k % cols > 0 ? east[k - 1] : 0;
     north[k] = k >= cols ? south[k - cols] : 0;
-    const sum = west[k] + east[k] + north[k] + south[k];
-    inverse[k] = sum > 0 ? 1 / sum : 0;
+    diag[k] = west[k] + east[k] + north[k] + south[k];
+    inverse[k] = diag[k] > 0 ? 1 / diag[k] : 0;
   }
-  const geometry = { cols, rows, cond, east, south, west, north, inverse };
-  geometries.set(cond, geometry);
-  return { ...geometry, source };
+  return { cols, rows, east, south, west, north, diag, inverse };
 }
 
-/** Вдвое грубее: проводимость — средняя по четырём клеткам, источник — сумма. */
-function coarsen(l: Level): Level {
-  const cols = Math.ceil(l.cols / 2), rows = Math.ceil(l.rows / 2);
-  let cond = coarseConditions.get(l.cond);
-  if (!cond) {
-    cond = new Float64Array(cols * rows);
-    for (let j = 0; j < l.rows; j++) for (let i = 0; i < l.cols; i++) {
-      cond[(j >> 1) * cols + (i >> 1)] += l.cond[j * l.cols + i] / 4;
+function levelOf(cols: number, rows: number, cond: Float64Array): Level {
+  let level = fineLevels.get(cond);
+  if (!level) {
+    const east = new Float64Array(cols * rows), south = new Float64Array(cols * rows);
+    for (let j = 0; j < rows; j++) {
+      for (let i = 0; i < cols; i++) {
+        const k = j * cols + i;
+        if (i < cols - 1) east[k] = face(cond[k], cond[k + 1]);
+        if (j < rows - 1) south[k] = face(cond[k], cond[k + cols]);
+      }
     }
-    coarseConditions.set(l.cond, cond);
+    level = levelFromFaces(cols, rows, east, south);
+    fineLevels.set(cond, level);
   }
-  const source = new Float64Array(cols * rows);
-  for (let j = 0; j < l.rows; j++) {
-    for (let i = 0; i < l.cols; i++) {
-      const k = j * l.cols + i, c = (j >> 1) * cols + (i >> 1);
-      source[c] += l.source[k];
-    }
-  }
-  return levelOf(cols, rows, cond, source);
+  return level;
 }
 
 /**
- * Итерации Гаусса — Зейделя с верхней релаксацией. Давление `p` — с рамкой в
- * строку сверху и снизу (индекс клетки + cols), чтобы соседи читались без
- * проверок: у краёв и преград коэффициент грани — 0.
+ * Вдвое грубее — по граням, а не по клеткам: грань грубой клетки — половина
+ * суммы двух тонких граней на её границе. Перегородка, закрывающая границу,
+ * остаётся закрытой и на грубой сетке (усреднение клеток делало её проницаемой).
  */
-function relaxRange(l: Level, p: Float64Array, first: number, last: number): void {
-  const { cols, east: ce, south: cs, source, west: cw, north: cn, inverse: inv } = l;
-  for (let k = first; k < last; k++) {
-    if (inv[k] === 0) continue;
+function coarsen(l: Level): Level {
+  let c = coarseLevels.get(l);
+  if (!c) {
+    const cols = Math.ceil(l.cols / 2), rows = Math.ceil(l.rows / 2);
+    const east = new Float64Array(cols * rows), south = new Float64Array(cols * rows);
+    for (let j = 0; j < l.rows; j++) {
+      for (let i = 0; i < l.cols; i++) {
+        const k = j * l.cols + i, K = (j >> 1) * cols + (i >> 1);
+        if ((i & 1) && (i >> 1) < cols - 1) east[K] += l.east[k] / 2;
+        if ((j & 1) && (j >> 1) < rows - 1) south[K] += l.south[k] / 2;
+      }
+    }
+    c = levelFromFaces(cols, rows, east, south);
+    coarseLevels.set(l, c);
+  }
+  return c;
+}
+
+const vector = (l: Level) => new Float64Array((l.rows + 2) * l.cols);
+
+/** y = A·x: для каждой клетки Σ проводимость грани × (x − x соседа). */
+function apply(l: Level, x: Float64Array, y: Float64Array): void {
+  const { cols, east, south, west, north, diag } = l;
+  for (let k = 0, n = cols * l.rows; k < n; k++) {
     const q = k + cols;
-    const target = (source[k] + cw[k] * p[q - 1] + ce[k] * p[q + 1] + cn[k] * p[q - cols] + cs[k] * p[q + cols]) * inv[k];
-    p[q] += DRIFT_OMEGA * (target - p[q]);
+    y[q] = diag[k] === 0 ? 0 : diag[k] * x[q] - west[k] * x[q - 1] - east[k] * x[q + 1] - north[k] * x[q - cols] - south[k] * x[q + cols];
   }
 }
 
-function* relax(l: Level, p: Float64Array, iterations: number): Calculation {
-  const n = l.cols * l.rows;
-  for (let it = 0; it < iterations; it++) {
-    for (let first = 0; first < n; first += 2048) {
-      yield;
-      relaxRange(l, p, first, Math.min(n, first + 2048));
+/** Проход Гаусса — Зейделя по A·x = b: вперёд или назад (пара проходов симметрична — нужно для сопряжённых градиентов). */
+function sweep(l: Level, x: Float64Array, b: Float64Array, forward: boolean): void {
+  const { cols, east, south, west, north, inverse } = l, n = cols * l.rows;
+  for (let s = 0; s < n; s++) {
+    const k = forward ? s : n - 1 - s;
+    if (inverse[k] === 0) continue;
+    const q = k + cols;
+    x[q] = (b[q] + west[k] * x[q - 1] + east[k] * x[q + 1] + north[k] * x[q - cols] + south[k] * x[q + cols]) * inverse[k];
+  }
+}
+
+/** Рабочие векторы уровня: приближение, правая часть, невязка. */
+interface Work { readonly x: Float64Array; readonly b: Float64Array; readonly r: Float64Array }
+
+/**
+ * Многосеточный V-цикл: сгладить, невязку — на вдвое более грубую сетку
+ * (сумма по четырём клеткам), решить там так же, поправку — обратно
+ * (каждой из четырёх клеток), сгладить в обратном порядке. На самой грубой
+ * сетке — просто много проходов. Начинает с нуля: результат зависит только от b.
+ */
+function* vcycle(levels: readonly Level[], work: readonly Work[], d: number): Calculation {
+  const l = levels[d], { x, b, r } = work[d];
+  x.fill(0);
+  if (d === levels.length - 1) {
+    for (let s = 0; s < DRIFT_COARSEST_SWEEPS; s++) { sweep(l, x, b, true); sweep(l, x, b, false); }
+    return;
+  }
+  sweep(l, x, b, true);
+  yield;
+  apply(l, x, r);
+  const c = levels[d + 1], cb = work[d + 1].b;
+  cb.fill(0);
+  for (let j = 0; j < l.rows; j++) {
+    for (let i = 0; i < l.cols; i++) {
+      const q = (j + 1) * l.cols + i;
+      cb[((j >> 1) + 1) * c.cols + (i >> 1)] += b[q] - r[q];
     }
   }
+  yield* vcycle(levels, work, d + 1);
+  const cx = work[d + 1].x;
+  for (let j = 0; j < l.rows; j++) {
+    for (let i = 0; i < l.cols; i++) {
+      if (l.inverse[j * l.cols + i] !== 0) x[(j + 1) * l.cols + i] += cx[((j >> 1) + 1) * c.cols + (i >> 1)];
+    }
+  }
+  sweep(l, x, b, false);
+  yield;
 }
 
-/** Решение каскадом: точно на самой грубой сетке, дальше — перенос на вдвое более тонкую и сглаживание. Давление — с рамкой (см. relax). */
-function* solve(fine: Level): Calculation<Float64Array> {
+const dot = (a: Float64Array, b: Float64Array) => {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
+  return s;
+};
+
+/**
+ * Давление p из A·p = источник: сопряжённые градиенты, каждый шаг ускорен
+ * V-циклом. Останавливается, когда невязка падает до DRIFT_TOLERANCE от
+ * начальной. Всегда с нуля — поэтому снос — функция номера шага. Давление — с рамкой.
+ */
+function* solve(fine: Level, source: Float64Array): Calculation<Float64Array> {
   const levels = [fine];
   while (levels[levels.length - 1].cols > DRIFT_COARSEST) levels.push(coarsen(levels[levels.length - 1]));
-  const last = levels[levels.length - 1];
-  let p = new Float64Array((last.rows + 2) * last.cols + 2);
-  yield* relax(last, p, DRIFT_COARSE_ITERATIONS);
-  for (let d = levels.length - 2; d >= 0; d--) {
-    const l = levels[d], c = levels[d + 1];
-    const q = new Float64Array((l.rows + 2) * l.cols + 2);
-    for (let j = 0; j < l.rows; j++) for (let i = 0; i < l.cols; i++) q[(j + 1) * l.cols + i] = p[((j >> 1) + 1) * c.cols + (i >> 1)];
-    yield* relax(l, q, DRIFT_FINE_ITERATIONS);
-    p = q;
+  const work = levels.map((l) => ({ x: vector(l), b: vector(l), r: vector(l) }));
+  const { cols } = fine, n = cols * fine.rows;
+  const p = vector(fine), r = vector(fine), d = vector(fine), q = vector(fine);
+  for (let k = 0; k < n; k++) if (fine.inverse[k] !== 0) r[k + cols] = source[k];
+  const stop = DRIFT_TOLERANCE * Math.sqrt(dot(r, r));
+  const precondition = function* (): Calculation<Float64Array> {
+    work[0].b.set(r);
+    yield* vcycle(levels, work, 0);
+    return work[0].x;
+  };
+  let z = yield* precondition();
+  d.set(z);
+  let rz = dot(r, z);
+  for (let it = 0; it < DRIFT_MAX_ITERATIONS && Math.sqrt(dot(r, r)) > stop; it++) {
+    apply(fine, d, q);
+    const a = rz / dot(d, q);
+    for (let i = 0; i < p.length; i++) { p[i] += a * d[i]; r[i] -= a * q[i]; }
+    z = yield* precondition();
+    const next = dot(r, z), beta = next / rz;
+    rz = next;
+    for (let i = 0; i < d.length; i++) d[i] = z[i] + beta * d[i];
+    yield;
   }
-  return p.subarray(fine.cols, fine.cols + fine.cols * fine.rows);
+  return p.subarray(cols, cols + n);
 }
 
-/** Самая грубая сетка — не шире стольких клеток; итераций на ней и на каждом более тонком уровне; релаксация. */
+/**
+ * Самая грубая сетка — не шире стольких клеток, проходов на ней; допуск по
+ * невязке (скорость течений отличается от точного решения меньше чем на 0,5%)
+ * и предел шагов на случай, если сходимость не наступит.
+ */
 const DRIFT_COARSEST = 26;
-const DRIFT_COARSE_ITERATIONS = 600;
-const DRIFT_FINE_ITERATIONS = 30;
-const DRIFT_OMEGA = 1.7;
+const DRIFT_COARSEST_SWEEPS = 40;
+const DRIFT_TOLERANCE = 0.01;
+const DRIFT_MAX_ITERATIONS = 60;
 
 /** Течения в шаге t. */
 export function computeDriftField(world: Sources, t: number, ground?: Ground): DriftField {
@@ -232,8 +305,8 @@ function* computeDriftFieldTask(world: Sources, t: number, ground?: Ground): Cal
     fx[k] = pull * dvx;
     fy[k] = pull * dvy;
   }
-  const level0 = levelOf(cols, rows, cond, new Float64Array(n));
-  const { east, south } = level0;
+  const fine = levelOf(cols, rows, cond);
+  const { east, south } = fine;
   const fEast = new Float64Array(n), fSouth = new Float64Array(n);
   for (let j = 0; j < rows; j++) {
     if ((j & 3) === 0) yield;
@@ -258,7 +331,7 @@ function* computeDriftFieldTask(world: Sources, t: number, ground?: Ground): Cal
       source[k] = s;
     }
   }
-  const p = yield* solve(levelOf(cols, rows, cond, source));
+  const p = yield* solve(fine, source);
   // Плотность потока в клетке — среднее потоков через её грани (давление + увлечение).
   for (let j = 0; j < rows; j++) {
     if ((j & 3) === 0) yield;
