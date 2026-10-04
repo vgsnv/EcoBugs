@@ -11,6 +11,8 @@ const host = self as unknown as {
 const BASE_RATE = STEPS_PER_SECOND;
 const SLICE_MS = 6;
 const SNAPSHOT_MS = 50;
+/** Наибольшее отставание, которое мир догоняет, — в секундах реального времени. */
+const MAX_DEBT = 0.25;
 let world: World | null = null;
 let epoch = 0, paused = false, speed = 1, active = true;
 let carry = 0, lastTime = performance.now(), lastSnapshot = 0;
@@ -110,15 +112,19 @@ function advance(): void {
     }
     if (performance.now() - start >= SLICE_MS || (!calculation && commands.length)) break;
   }
-  behind = !paused && active && n < want;
-  carry = paused || !active || behind ? 0 : Math.max(0, carry - n);
+  // Отставание не сбрасывается, а ограничивается: иначе после сброса Worker
+  // засыпает, хотя мог бы считать, и упирается в предел раньше, чем позволяет физика.
+  // Предел — когда долг держится у потолка, а не после одного долгого обновления.
+  const maxDebt = MAX_DEBT * BASE_RATE * speed;
+  carry = paused || !active ? 0 : Math.min(Math.max(0, carry - n), maxDebt);
+  behind = !paused && active && carry >= maxDebt / 2;
   if (dt > 0 && !paused) rate += (n / dt - rate) * Math.min(1, dt * 2);
   if (!calculation) {
     if (publishOnCompletion) { publishOnCompletion = false; publish(false, true); }
     while (!calculation && commands.length) handleCommand(commands.shift()!);
     if (performance.now() - lastSnapshot >= SNAPSHOT_MS) publish();
   }
-  schedule(calculation || behind ? 0 : Math.max(1, Math.min(16, (1 - carry) * 1000 / (BASE_RATE * speed))));
+  schedule(calculation || carry >= 1 ? 0 : Math.max(1, Math.min(16, (1 - carry) * 1000 / (BASE_RATE * speed))));
 }
 
 host.onmessage = ({ data: command }) => {
