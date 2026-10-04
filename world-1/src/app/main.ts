@@ -335,7 +335,7 @@ function frame(now: number): void {
   if (sunLabel.textContent !== sunText) sunLabel.textContent = sunText;
   if (world.mineral.version !== mineralStatsVersion) {
     mineralStatsVersion = world.mineral.version;
-    // Полоса — весь минерал, кроме грунта: недра, «в пути» (взято извержением,
+    // Полоса — весь минерал: недра, «в пути» (взято извержением,
     // ещё не вышло), залежи, среда; риска — порог давления недр. Под полосой — шкала массы.
     const m = world.mineral;
     const medium = mineralInMedium(m);
@@ -360,7 +360,7 @@ function frame(now: number): void {
     const alive = m.volcanoes.filter((v) => v.stage !== 'extinct').length;
     const now = erupting ? `извергается вулкан ${erupting.id + 1}` : preparing ? `${preparing.fresh ? 'зарождается' : 'просыпается'} вулкан ${preparing.id + 1}` : alive ? 'вулканы спят' : 'вулканов нет';
     volcanoText.textContent = `${now} · живых ${alive} · извержений ${m.eruptions}`;
-    mineralBar.title = `Весь минерал, кроме грунта: ${formatMass(total)}; недра ${pctText(m.depths)} (${formatMass(m.depths)})`
+    mineralBar.title = `Весь минерал: ${formatMass(total)}; недра ${pctText(m.depths)} (${formatMass(m.depths)})`
       + (inTransit > 0 ? `, выходит извержением ${pctText(inTransit)}` : '')
       + `, в залежах ${pctText(deposits)}, в среде ${pctText(medium)}. Риска — порог давления недр (${pctText(m.threshold)}, ${formatMass(m.threshold)}): когда недра дорастут до неё, начнётся извержение.`;
     mineralBar.setAttribute('aria-label', mineralBar.title);

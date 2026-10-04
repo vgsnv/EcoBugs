@@ -15,7 +15,7 @@ export class WorldSummary {
     privateRoot.innerHTML = '<div class="legend-head"><h2>Сводка мира</h2></div>';
     const groups: [string, [string, string][]][] = [
       ['Мир', [['size', 'Размеры'], ['area', 'Площадь'], ['age', 'Возраст'], ['water', 'Вода'], ['shallows', 'Отмель'], ['land', 'Суша']]],
-      ['Минерал', [['total', 'Всего без грунта'], ['depths', 'В недрах'], ['medium', 'В среде'], ['deposits', 'В залежах'], ['transit', 'В извержениях']]],
+      ['Минерал', [['total', 'Всего'], ['depths', 'В недрах'], ['medium', 'В среде'], ['deposits', 'В залежах'], ['transit', 'В извержениях']]],
       ['Сейчас', [['volcanoes', 'Активные вулканы'], ['funnels', 'Воронки'], ['movements', 'Подвижки / толчки'], ['flow', 'Среднее течение']]],
       ['Изменения', [['period', 'Период наблюдения'], ['deltaWater', 'Вода'], ['deltaShallows', 'Отмель'], ['deltaLand', 'Суша'], ['deltaDepths', 'Недра'], ['deltaMedium', 'Среда'], ['deltaDeposits', 'Залежи'], ['deltaEruptions', 'Извержений началось'], ['emitted', 'Выброшено вулканами'], ['funnelSunk', 'Воронки → недра']]],
     ];
