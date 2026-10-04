@@ -13,7 +13,7 @@ import { TRAIL_DASH_FS, TRAIL_FADE_FS, TRAIL_SECONDS } from './trails.ts';
 import type { StreamField, StreamView } from './water.ts';
 import { TERRAIN_GLSL, type Grid, type TerrainData } from './terrain.ts';
 import { TECTONICS_GLSL, type Tectonics } from './ground.ts';
-import { GLASS_TINT, TABLE_GLSL, TABLE_KINDS, type TableKind } from './table.ts';
+import { GLASS_TINT, TABLE_GLSL } from './table.ts';
 
 /** Свечения и блёстки: копятся за кадр и рисуются после полей, в порядке вызовов. */
 export interface GlowSink {
@@ -308,8 +308,6 @@ export class FieldRenderer implements GlowSink {
   private quadVao!: WebGLVertexArrayObject;
   private commands: Command[] = [];
   private frame: Frame | null = null;
-  /** Стол под чашкой: коврик или дерево (render/table.ts). */
-  table: TableKind = 'mat';
   /** Ключи текстур, которые не меняются между кадрами. */
   private readonly mineralKey = {};
   private readonly streamKey = {};
@@ -427,15 +425,9 @@ export class FieldRenderer implements GlowSink {
     this.common(this.shadow, frame.world.dish);
     gl.uniform1f(this.shadow.uniform('u_wall'), wall);
     gl.uniform1f(this.shadow.uniform('u_dpr'), frame.camera.dpr);
-    this.tableUniforms(this.shadow);
+    gl.uniform3f(this.shadow.uniform('u_glassTint'), ...GLASS_TINT);
     gl.bindVertexArray(this.quadVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-  }
-
-  private tableUniforms(p: Program): void {
-    const gl = this.gl!;
-    gl.uniform1i(p.uniform('u_table'), TABLE_KINDS.indexOf(this.table));
-    gl.uniform3f(p.uniform('u_glassTint'), ...GLASS_TINT[this.table]);
   }
 
   private drawImage(texture: WebGLTexture, src: readonly number[], dst: readonly number[], alpha: number): void {
@@ -653,7 +645,7 @@ export class FieldRenderer implements GlowSink {
     gl.uniform4fv(p.uniform('u_ring'), tec.rings);
     gl.uniform1i(p.uniform('u_ringCount'), tec.ringCount);
     gl.uniform1ui(p.uniform('u_seed'), t.seed >>> 0);
-    this.tableUniforms(p);
+    gl.uniform3f(p.uniform('u_glassTint'), ...GLASS_TINT);
     // Мелкие детали камня проявляются с приближением, как прежде у плиток местности.
     gl.uniform1f(p.uniform('u_detail'), smoothstep(0.5, 4, frame.camera.zoom));
     gl.uniform2f(p.uniform('u_grid'), m.cols * m.cell, m.rows * m.cell);

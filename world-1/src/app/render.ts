@@ -10,7 +10,6 @@ import { DRIFT_REFERENCE, insideDish, sunAt, type GroundChanges, type MineralPro
 import { Camera } from './render/camera.ts';
 import { FieldRenderer } from './render/field.ts';
 import { GroundLayer } from './render/ground.ts';
-import type { TableKind } from './render/table.ts';
 import type { Frame } from './render/frame.ts';
 import { LightLayer } from './render/light.ts';
 import { MineralLayer } from './render/mineral.ts';
@@ -89,13 +88,6 @@ export class WorldRenderer {
     this.water.resetFoam();
     this.resize();
     this.fit();
-  }
-
-  /** Стол под чашкой и стекло под него. */
-  setTable(kind: TableKind): void {
-    this.field.table = kind;
-    this.walls.table = kind;
-    this.frameKey = '';
   }
 
   /** Изменения грунта из очередного снимка мира (для свежего грунта и песочной взвеси). */

@@ -83,7 +83,6 @@ const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#pa
   onZoomOut: () => renderer.zoomBy(1 / ZOOM_STEP),
   onZoomFit: () => renderer.fit(),
   onRulers: (enabled) => renderer.setRulers(enabled),
-  onTable: (kind) => renderer.setTable(kind),
   onStreamView: (view) => { renderer.streamView = view; },
   onProcesses: (enabled) => {
     renderer.showProcesses = enabled;

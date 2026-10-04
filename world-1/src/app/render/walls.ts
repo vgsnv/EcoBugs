@@ -2,14 +2,12 @@
 import { cellInsideDish, type World } from '../../core/index.ts';
 import type { Frame } from './frame.ts';
 import { traceDish } from './palette.ts';
-import type { TableKind } from './table.ts';
 
 /** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
-/** Стекло под стол (render/table.ts): у коврика чистое голубоватое, у дерева — зеленоватое, как оконное. */
-const GLASS = {
-  mat: { fill: 'rgba(205, 230, 255, 0.5)', mid: 'rgba(211, 238, 244, 0.72)', to: 'rgba(128, 166, 180, 0.48)', end: 'rgba(188, 214, 224, 0.84)' },
-  wood: { fill: 'rgba(200, 238, 214, 0.5)', mid: 'rgba(212, 242, 226, 0.72)', to: 'rgba(118, 168, 140, 0.5)', end: 'rgba(184, 220, 200, 0.84)' },
-} as const;
+const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
+const GLASS_MID = 'rgba(211, 238, 244, 0.72)';
+const GLASS_GLOSS_TO = 'rgba(128, 166, 180, 0.48)';
+const GLASS_END = 'rgba(188, 214, 224, 0.84)';
 const GLASS_GLOSS_FROM = 'rgba(244, 253, 255, 0.94)';
 const GLASS_EDGE = 'rgba(255, 255, 255, 0.9)';
 const GLASS_SHADOW = 'rgba(30, 55, 80, 0.65)';
@@ -20,7 +18,6 @@ export class WallsLayer {
   /** Кромка стекла (в единицах мира) — строится один раз на мир. */
   private edges = new Path2D();
   private world!: World;
-  table: TableKind = 'mat';
 
   setWorld(world: World): void {
     this.world = world;
@@ -34,7 +31,6 @@ export class WallsLayer {
     const dish = this.world.dish;
     const { width, height } = dish;
     const W = this.world.partitions.thickness;
-    const glass = GLASS[this.table];
     const solid = new Path2D();
     // Обод чашки: внешний прямоугольник минус внутренний (правило even-odd),
     // стекло с бликом — светлее к углам.
@@ -48,16 +44,16 @@ export class WallsLayer {
     }
     const gloss = ctx.createLinearGradient(0, -W, 0, height + W);
     gloss.addColorStop(0, GLASS_GLOSS_FROM);
-    gloss.addColorStop(0.22, glass.mid);
-    gloss.addColorStop(0.65, glass.to);
-    gloss.addColorStop(1, glass.end);
+    gloss.addColorStop(0.22, GLASS_MID);
+    gloss.addColorStop(0.65, GLASS_GLOSS_TO);
+    gloss.addColorStop(1, GLASS_END);
     ctx.fillStyle = gloss;
     ctx.fill(solid, 'evenodd');
     ctx.save(); ctx.beginPath(); traceDish(ctx, dish); ctx.clip();
     // Контактная тень перегородок лежит на среде, а стекло остаётся полупрозрачным.
     ctx.save(); ctx.translate(camera.px(1), camera.px(2));
     ctx.fillStyle = 'rgba(18, 48, 66, 0.28)'; ctx.fill(this.parts); ctx.restore();
-    ctx.fillStyle = glass.fill; ctx.fill(this.parts);
+    ctx.fillStyle = GLASS_FILL; ctx.fill(this.parts);
     ctx.clip(this.parts);
     for (const part of this.world.partitions.partitions) {
       for (let k = 1; k < part.points.length; k++) {
@@ -66,9 +62,9 @@ export class WallsLayer {
         const horizontal = ay === by;
         const face = horizontal ? ctx.createLinearGradient(0, y, 0, y + W) : ctx.createLinearGradient(x, 0, x + W, 0);
         face.addColorStop(0, GLASS_GLOSS_FROM);
-        face.addColorStop(0.24, glass.mid);
-        face.addColorStop(0.7, glass.to);
-        face.addColorStop(1, glass.end);
+        face.addColorStop(0.24, GLASS_MID);
+        face.addColorStop(0.7, GLASS_GLOSS_TO);
+        face.addColorStop(1, GLASS_END);
         ctx.fillStyle = face;
         ctx.fillRect(x, y, Math.abs(bx - ax) + W, Math.abs(by - ay) + W);
       }
