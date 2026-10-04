@@ -19,6 +19,8 @@ const FRESH_STEPS = 400_000;
 const FRESH_FULL = 0.12;
 /** Окно усреднения силы переноса, шагов модели; её мерило — доля наибольшего переноса. */
 const LIFT_STEPS = 20_000;
+/** Окно усреднения изменений грунта для «Процессов», шагов модели: туда-обратно перекатывающийся грунт гасится. */
+const RATE_STEPS = 20_000;
 const LIFT_REFERENCE = 1;
 /** Сколько секунд реального времени видна волна толчка; сколько волн и подвижек показывать сразу. */
 const QUAKE_SHOW = 2.2;
@@ -40,6 +42,8 @@ export class GroundLayer {
   private fresh = new Float32Array(0);
   private lift = new Float32Array(0);
   private version = 0;
+  /** Для «Процессов»: изменение грунта от течений и от тектоники, уровня за шаг, скользящее среднее за RATE_STEPS шагов. */
+  readonly rates = { sand: new Float32Array(0), tectonic: new Float32Array(0), version: 0 };
   /** Последний учтённый толчок и идущие волны: подвижка и время начала показа. */
   private seenQuake = 0;
   private rings: { m: Movement; at: number }[] = [];
@@ -51,6 +55,9 @@ export class GroundLayer {
     const n = world.mineral.field.length;
     this.fresh = new Float32Array(n);
     this.lift = new Float32Array(n);
+    this.rates.sand = new Float32Array(n);
+    this.rates.tectonic = new Float32Array(n);
+    this.rates.version++;
     this.version++;
     this.seenQuake = world.terrain.nextQuake;
     this.rings = [];
@@ -64,6 +71,7 @@ export class GroundLayer {
     const per = GROUND_PER_LEVEL * m.cell * m.cell;
     const fade = Math.exp(-changes.steps / FRESH_STEPS);
     const keep = Math.exp(-changes.steps / LIFT_STEPS);
+    const average = Math.exp(-changes.steps / RATE_STEPS);
     // Мерило переноса (уровень за шаг) — около 95-го процентиля в чашке.
     const ref = LIFT_REFERENCE * SAND_RATE * Math.max(1e-6, w.params.terrainSpeed) / MINERAL_PERIOD;
     const { fresh, lift } = this;
@@ -74,8 +82,11 @@ export class GroundLayer {
       fresh[k] = Math.min(1, Math.max(0, fresh[k] * fade + gain / FRESH_FULL));
       const rate = Math.min(1, changes.lift[k] / per / changes.steps / ref);
       lift[k] = lift[k] * keep + rate * (1 - keep);
+      this.rates.sand[k] = this.rates.sand[k] * average + gain / changes.steps * (1 - average);
+      this.rates.tectonic[k] = this.rates.tectonic[k] * average + changes.tectonic[k] / per / changes.steps * (1 - average);
     }
     this.version++;
+    this.rates.version++;
   }
 
   /** Свежесть грунта 0…1 по центрам клеток минерала. */
@@ -90,6 +101,11 @@ export class GroundLayer {
     const i = Math.floor(x / m.cell), j = Math.floor(y / m.cell);
     if (i < 0 || j < 0 || i >= m.cols || j >= m.rows) return 0;
     return this.lift[j * m.cols + i];
+  }
+
+  /** Идущие подвижки (не толчки) — для подписей в «Процессах». */
+  movements(): readonly Movement[] {
+    return this.world ? this.world.terrain.active.filter((m) => !m.quake) : [];
   }
 
   /** Идущие подвижки и волны толчков к кадру (`animTime` — секунды реального времени показа). */

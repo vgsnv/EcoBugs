@@ -4,6 +4,7 @@
  * они задаются при сотворении, поэтому правки копятся в черновике и
  * применяются кнопкой «Создать мир».
  */
+import { PROCESS_COLORS } from './render/processes.ts';
 import { layoutPartitions, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type WorldParams } from '../core/index.ts';
 import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render/palette.ts';
 import { formatArea, formatDuration, formatLength, formatMultiplier, formatNumber, formatPercent, formatWorldAge } from './units.ts';
@@ -418,9 +419,14 @@ export class Panel {
       stream.classList.toggle('active', mineral);
       this.handlers.onStreamView(mineral ? 'mineral' : 'water');
     });
-    const processes = el('button', { textContent: 'Процессы', title: 'Общее течение, размыв, оседание и уход в недра', ariaPressed: 'false' });
-    const processLegend = el('span', { className: 'process-legend', hidden: true, title: 'Цвет показывает количество минерала за последнее обновление (10 с мира, 100 шагов); ярче — больше. При одновременных процессах цвета смешиваются.' });
-    processLegend.innerHTML = '<span><i style="color:#e88536">↗</i>размыв</span><span><i style="color:#32c995">↧</i>оседание</span><span><i style="color:#c27bff">⊙</i>в недра</span>';
+    const processes = el('button', { textContent: 'Процессы', title: 'Общее течение, размыв, оседание и уход в недра, перенос грунта и тектоника', ariaPressed: 'false' });
+    const processLegend = el('span', { className: 'process-legend', hidden: true, title: 'Цвет: минерал — за последнее обновление (10 с мира, 100 шагов); грунт — в среднем за последние 20 тыс. шагов. Ярче — больше; при одновременных процессах цвета смешиваются. Песочные стрелки — течение несёт грунт; подписи — идущие подвижки.' });
+    const hex = (c: readonly number[]) => `#${c.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+    const C = PROCESS_COLORS;
+    processLegend.innerHTML = [
+      [C.erosion, '↗', 'размыв залежей'], [C.settling, '↧', 'оседание'], [C.sinking, '⊙', 'в недра'],
+      [C.sandIn, '▴', 'намыв грунта'], [C.sandOut, '▾', 'размыв грунта'], [C.rise, '↑', 'подъём'], [C.sink, '↓', 'опускание'],
+    ].map(([c, icon, text]) => `<span><i style="color:${hex(c as readonly number[])}">${icon}</i>${text}</span>`).join('');
     processLegend.setAttribute('role', 'note');
     processes.addEventListener('click', () => {
       const enabled = processes.getAttribute('aria-pressed') !== 'true';

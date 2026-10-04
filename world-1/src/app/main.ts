@@ -304,8 +304,15 @@ function probe(): void {
     ...(processes && processes.step > 0 ? [
       `Последний расчёт: шаг ${processes.step.toLocaleString('ru')} · за ${formatDuration(100)}`,
       `Размыв ${formatMass(processes.erosion[k])} · оседание ${formatMass(processes.settling[k])} · воронка → недра ${formatMass(processes.sinking[k])}`,
+      groundLine(renderer.groundAt(k)),
     ] : []),
   ]);
+}
+
+/** Грунт в пробе «Процессов»: изменение уровня в сутки мира (864 000 шагов). */
+function groundLine(g: { sand: number; tectonic: number }): string {
+  const day = (v: number) => `${v >= 0 ? '+' : '−'}${formatNumber(Math.abs(v * 864_000))}`;
+  return `Грунт за сутки: течения ${day(g.sand)} ур. · тектоника ${day(g.tectonic)} ур.`;
 }
 
 function frame(now: number): void {

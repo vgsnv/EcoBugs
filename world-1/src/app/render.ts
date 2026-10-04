@@ -95,6 +95,11 @@ export class WorldRenderer {
     this.ground.accept(changes);
   }
 
+  /** Изменение грунта в клетке минерала k за последний промежуток (уровня за шаг): течениями и тектоникой. */
+  groundAt(k: number): { sand: number; tectonic: number } {
+    return { sand: this.ground.rates.sand[k] ?? 0, tectonic: this.ground.rates.tectonic[k] ?? 0 };
+  }
+
   /** Изменение компоновки сохраняет масштаб, левый край чашки или центр приближенного вида. */
   resizeKeepingView(): void { this.resize(); }
 
@@ -198,7 +203,11 @@ export class WorldRenderer {
     this.sources.drawEruptions(frame, this.field);
     // Жерла — отверстия в недра: поверх течений, ничто не проходит сквозь них.
     this.sources.drawVents(frame, this.field);
-    if (this.showProcesses) this.processLayer.draw(frame, this.processes);
+    if (this.showProcesses) {
+      this.processLayer.draw(frame, this.processes, {
+        rates: this.ground.rates, lift: (x, y) => this.ground.liftAt(x, y), movements: this.ground.movements(),
+      });
+    }
     this.walls.draw(frame);
     if (this.probePoint) {
       const { x, y } = this.probePoint;

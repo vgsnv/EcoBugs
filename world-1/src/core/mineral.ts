@@ -173,14 +173,15 @@ export function mineralExchanges(m: MineralState): MineralExchanges { return wor
 /**
  * Изменения грунта от течений и осыпания, накопленные с прошлого запроса —
  * только для показа (не состояние, не хеш, не файл): сколько грунта течения
- * подняли с клетки (`lift`) и насколько грунт клетки изменился (`net`), за `steps` шагов.
+ * подняли с клетки (`lift`), насколько грунт клетки изменили они (`net`) и
+ * тектоника (`tectonic`), за `steps` шагов.
  */
-export interface GroundChanges { lift: Float32Array; net: Float32Array; steps: number }
+export interface GroundChanges { lift: Float32Array; net: Float32Array; tectonic: Float32Array; steps: number }
 /** Забрать накопленные изменения грунта (копии) и начать копить заново. */
 export function takeGroundChanges(m: MineralState): GroundChanges {
   const g = workspace(m).groundChanges;
-  const out = { lift: g.lift.slice(), net: g.net.slice(), steps: g.steps };
-  g.lift.fill(0); g.net.fill(0); g.steps = 0;
+  const out = { lift: g.lift.slice(), net: g.net.slice(), tectonic: g.tectonic.slice(), steps: g.steps };
+  g.lift.fill(0); g.net.fill(0); g.tectonic.fill(0); g.steps = 0;
   return out;
 }
 
@@ -217,7 +218,7 @@ function workspace(m: MineralState): MineralWork {
       speed: new Float32Array(n), flowX: new Float32Array(n), flowY: new Float32Array(n),
       tvx: new Float32Array(n), tvy: new Float32Array(n), pushX: new Float32Array(n), pushY: new Float32Array(n),
       holes: new Uint8Array(n), seen: new Uint8Array(n), ground: new Float64Array(n),
-      groundChanges: { lift: new Float32Array(n), net: new Float32Array(n), steps: 0 },
+      groundChanges: { lift: new Float32Array(n), net: new Float32Array(n), tectonic: new Float32Array(n), steps: 0 },
       processes: { step: 0, vx: new Float32Array(n), vy: new Float32Array(n),
         erosion: new Float32Array(n), settling: new Float32Array(n), sinking: new Float32Array(n) },
     };
@@ -609,7 +610,11 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   }
 
   // Подвижки и толчки: грунт из подложки и в неё; опускание топит залежи в недра.
+  // Для показа — что изменила тектоника (буфер грунта здесь свободен).
+  work.ground.set(gr);
   m.depths += moveGround(terrain, params, step - P, step, cols, rows, cell, blocked);
+  const tect = work.groundChanges.tectonic;
+  for (let k = 0; k < n; k++) tect[k] += gr[k] - work.ground[k];
 
   // 3. Выход вещества активных извержений за весь промежуток.
   for (const vol of m.volcanoes) {
