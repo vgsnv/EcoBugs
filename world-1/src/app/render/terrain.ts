@@ -202,7 +202,7 @@ export class TerrainLayer {
         if (!insideDish(w.dish, x, y)) continue;
         const L = smoothLevelAt(w.viscosity, x, y);
         const v = STONE_BASE + STONE_MOTTLE * sampleGrid(this.mottle, x, y);
-        const depth = 1 - smoothstep(0, 1.3, L), dry = smoothstep(1.35, 1.75, L);
+        const shallow = smoothstep(0.3, 1.3, L), abyss = 1 - smoothstep(0.04, 0.3, L), dry = smoothstep(1.35, 1.75, L);
         const stone = v + STONE_UNDERWATER_LIFT * (1 - dry);
         let r = stone + 6, g = stone + 3, b = stone;
         // Залежи — в центрах клеток минерала.
@@ -211,8 +211,8 @@ export class TerrainLayer {
           const cover = lode * DEPOSIT_MAX;
           r += (DEPOSIT_COLOR[0] - r) * cover; g += (DEPOSIT_COLOR[1] - g) * cover; b += (DEPOSIT_COLOR[2] - b) * cover;
         }
-        const water = mix(mix(SHALLOW_WATER, DEEP_WATER, smoothstep(0, 0.62, depth)), ABYSS_WATER, smoothstep(0.62, 1, depth));
-        const cover = (1 - SHALLOWS_CLARITY + (0.97 - 1 + SHALLOWS_CLARITY) * depth) * (1 - dry) * (1 - 0.24 * lode);
+        const water = mix(mix(DEEP_WATER, SHALLOW_WATER, shallow), ABYSS_WATER, abyss);
+        const cover = Math.min(1, 0.94 + (1 - SHALLOWS_CLARITY - 0.94) * shallow + 0.05 * abyss) * (1 - dry) * (1 - 0.24 * lode);
         r += (water[0] - r) * cover; g += (water[1] - g) * cover; b += (water[2] - b) * cover;
         const k = (j * pw + i) * 4;
         img.data[k] = r; img.data[k + 1] = g; img.data[k + 2] = b; img.data[k + 3] = 255;
@@ -285,10 +285,11 @@ vec3 terrainAt(vec2 w) {
   float crack = u_detail > 0. ? 1. - smoothstep(.02, .07, crackEdge(w / ${STONE_SLAB.toFixed(1)})) : 0.;
   float fine = u_detail > 0. ? ${STONE_GRAIN.toFixed(1)} * cornered(u_grain, u_grainGrid, w) - ${STONE_CRACK.toFixed(1)} * crack : 0.;
   float v = ${STONE_BASE.toFixed(1)} + ${STONE_MOTTLE.toFixed(1)} * cornered(u_mottle, u_mottleGrid, w) + fine * u_detail;
-  // Глубина — по уровню дна, плавно: чем глубже, тем вода темнее, насыщеннее и
-  // непрозрачнее; к отмели светлеет и сквозь неё видно дно; к суше сходит на нет.
-  float depth = 1. - smoothstep(0., 1.3, L);
-  float shallow = 1. - depth;
+  // Глубина — по уровню дна, плавно: обычное дно (0,3) — глубокая синяя вода;
+  // выше — постепенно светлеет к отмели и сквозь неё видно дно; вымытое глубже
+  // обычного (к голому стеклу) — темнее и насыщеннее; к суше вода сходит на нет.
+  float shallow = smoothstep(.3, 1.3, L);
+  float abyss = 1. - smoothstep(.04, .3, L);
   float dry = smoothstep(1.35, 1.75, L);
   float stone = v + ${STONE_UNDERWATER_LIFT.toFixed(1)} * (1. - dry);
   vec3 c = vec3(stone + 6., stone + 3., stone);
@@ -303,9 +304,9 @@ vec3 terrainAt(vec2 w) {
     float cover = lode * ${DEPOSIT_MAX.toFixed(3)} * (.94 + .12 * (speck - .5) * u_detail);
     c += (${vec3(DEPOSIT_COLOR)} + crystal * vec3(.9, .6, 1.) - c) * cover;
   }
-  vec3 water = mix(mix(${vec3(SHALLOW_WATER)}, ${vec3(DEEP_WATER)}, smoothstep(0., .62, depth)), ${vec3(ABYSS_WATER)}, smoothstep(.62, 1., depth));
+  vec3 water = mix(mix(${vec3(DEEP_WATER)}, ${vec3(SHALLOW_WATER)}, shallow), ${vec3(ABYSS_WATER)}, abyss);
   // Плотные залежи слегка просвечивают и в глубокой воде.
-  float cover = mix(1. - ${SHALLOWS_CLARITY.toFixed(3)}, .97, depth) * (1. - dry) * (1. - .24 * lode) * (1. - .5 * bare);
+  float cover = min(1., mix(.94, 1. - ${SHALLOWS_CLARITY.toFixed(3)}, shallow) + .05 * abyss) * (1. - dry) * (1. - .24 * lode) * (1. - .5 * bare);
   c += (water - c) * cover;
   // Свежий грунт светлее и чище; темнеет до старого со временем. Виден сквозь
   // воду — тем лучше, чем мельче (намывается он на отмели и у берегов).
