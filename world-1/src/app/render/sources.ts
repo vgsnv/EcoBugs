@@ -8,7 +8,7 @@ import { BURST_WIDTH, DRIFT_REFERENCE, ERUPTION_RADIUS, VOLCANO_BIRTH, VOLCANO_P
 import type { GlowSink } from './field.ts';
 import type { Frame } from './frame.ts';
 import { SINK_S } from './mineral.ts';
-import { MINERAL_COLOR, mix, rgb, smoothstep, type Rgb } from './palette.ts';
+import { mix, rgb, smoothstep, type Rgb } from './palette.ts';
 
 /**
  * Извержение — показывается только то, что есть в модели: вспышка света у
@@ -28,12 +28,14 @@ const VENT_GLOW_MIN_CSS = 14;
  */
 const VENT_SIZE: readonly [number, number] = [9, 15];
 const VENT_MIN_CSS: readonly [number, number] = [6, 9];
-const VENT_ASH: Rgb = [110, 108, 122];
+export const VENT_ASH: Rgb = [110, 108, 122];
 const VENT_PULSE_S = 0.9;
 /** Отверстие вулкана: белизна сердцевины в силе. */
-const VENT_SPARK: Rgb = [250, 242, 255];
+export const VENT_SPARK: Rgb = [250, 242, 255];
 /** Кромка жерла отделяет его от дымки; у спящего вулкана остаётся матовой. */
-const VENT_RIM: Rgb = [185, 153, 209];
+export const VENT_RIM: Rgb = [185, 153, 209];
+/** Глубина отверстия жерла — тёмная, но тоном дна. */
+export const VENT_HOLE: Rgb = [40, 26, 66];
 /** Пульс созревшего вулкана: насколько диск вырастает на пике. */
 const VENT_BEAT = 0.3;
 /** Радиус точки на экране, CSS px: у спящего и только зародившегося — и перед самым взрывом. */
@@ -90,10 +92,11 @@ const VENT_VOLUME_FROM = 0.35;
 const THROWN_GRAINS = 48;
 const THROWN_S = 1.6;
 const THROWN_MAX = 400;
+/** Жерл в шейдере полей не больше стольких; чисел на жерло. */
+export const MAX_VENTS = 12;
+export const VENT_FLOATS = 8;
 /** Показанное жерло догоняет модель за столько секунд (до e⁻¹). */
 const VENT_EASE_S = 0.35;
-/** Отверстие жерла: тёмная глубина. */
-const VENT_HOLE: Rgb = [46, 24, 78];
 /** Волна залпа: сколько бежит, с; докуда (доля радиуса выброса); цвет. */
 const RING_S = 1.4;
 const RING_REACH = 0.7;
@@ -125,7 +128,8 @@ export class SourcesLayer {
   /** Сколько раз извергался каждый вулкан на прошлом кадре. */
   private seenBursts = new Map<string, number>();
   /** Показанные жерла: размер, свет из недр, белизна — догоняют модель плавно. */
-  private vents = new Map<number, { size: number; light: number; hot: number }>();
+  private vents = new Map<number, { size: number; light: number; hot: number; after: number }>();
+  private readonly ventData = new Float32Array(MAX_VENTS * VENT_FLOATS);
   private ventTime = -1;
   private world!: World;
 
@@ -190,44 +194,17 @@ export class SourcesLayer {
   }
 
   /**
-   * Жерла по стадиям — плоские отверстия в недра со светом из глубины (drawVent).
-   * Размер — по модели: сильный вулкан крупнее во всех стадиях; извергающийся —
-   * по объёму извержения и темпу выброса сейчас. Показ догоняет модель плавно:
-   * новый вулкан вырастает из точки, смены стадий без скачков.
-   * - готовится — разгорается и растёт по мере созревания и роста давления;
-   *   созревший перед выбросом пульсирует;
-   * - извергается — свет из недр в полную силу, белая сердцевина у залпа, к концу сжимается;
-   *   каждый залп пускает кольцо по воде;
-   * - спит — маленькое тусклое отверстие; потух — сереет и затягивается;
-   * - после извержения на дне медленно тает сиреневый шрам.
-   * Затем воронки.
+   * Жерла для шейдера полей: по VENT_FLOATS чисел — x, y, радиус отверстия,
+   * свет из недр, белизна сердцевины, пепел, пульс. Цель — по модели, показ
+   * догоняет её плавно (новый вулкан вырастает из точки, смены стадий без скачков).
    */
-  drawVents(frame: Frame, glows: GlowSink): void {
-    const { ctx, camera, world, animTime } = frame;
+  ventShapes(frame: Frame): { data: Float32Array; count: number } {
+    const { camera, world, animTime } = frame;
     const m = world.mineral;
     const step = world.step;
     const pressure = Math.max(0, Math.min(1, (m.depths / m.threshold - VOLCANO_BIRTH) / (1 - VOLCANO_BIRTH)));
-    ctx.globalCompositeOperation = 'source-over';
-    // Шрамы недавних извержений — под жерлами.
-    for (const v of m.volcanoes) {
-      if ((v.stage !== 'dormant' && v.stage !== 'extinct') || v.k === 0) continue;
-      const fade = 1 - (step - v.until) / SCAR_STEPS;
-      if (fade <= 0) continue;
-      this.softSpot(ctx, v.x, v.y, Math.max(camera.px(10), v.radius * SCAR_SIZE), [[0, SCAR_COLOR, SCAR_ALPHA * fade * fade], [0.6, SCAR_COLOR, 0.5 * SCAR_ALPHA * fade * fade], [1, SCAR_COLOR, 0]]);
-    }
-    // Волны залпов — кольца, бегущие от жерла.
-    for (const s of this.shocks) {
-      const f = (animTime - s.t) / RING_S;
-      if (f >= 1) continue;
-      const ease = 1 - (1 - f) ** 3;
-      const radius = camera.px(4) + Math.max(camera.px(26), ERUPTION_RADIUS * RING_REACH * s.scale) * ease;
-      ctx.globalAlpha = 0.75 * (1 - f) ** 2;
-      ctx.strokeStyle = rgb(RING_COLOR);
-      ctx.lineWidth = camera.px(0.6 + 1.6 * (1 - f));
-      ctx.beginPath(); ctx.arc(s.x, s.y, radius, 0, Math.PI * 2); ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-    this.drawThrown(frame);
+    const out = this.ventData;
+    let count = 0;
     const dt = this.ventTime < 0 ? 0 : Math.min(0.25, Math.max(0, animTime - this.ventTime));
     this.ventTime = animTime;
     const seen = new Set<number>();
@@ -267,16 +244,67 @@ export class SourcesLayer {
       }
       // Показ догоняет модель плавно: новый вулкан вырастает из точки, смены стадий без скачков.
       let shown = this.vents.get(v.id);
-      if (!shown) { shown = { size: 0, light: 0, hot: 0 }; this.vents.set(v.id, shown); }
+      if (!shown) { shown = { size: 0, light: 0, hot: 0, after: 1 }; this.vents.set(v.id, shown); }
       // На паузе и в первом кадре — сразу как в модели; на ходу — плавно (новое жерло — из точки).
       const k = dt > 0 ? 1 - Math.exp(-dt / VENT_EASE_S) : 1;
       shown.size += (size - shown.size) * k;
       shown.light += (light - shown.light) * k;
       shown.hot += (hot - shown.hot) * k;
-      this.drawVent(frame, v.x, v.y, shown.size, shown.light, shown.hot, ash, beat);
-      if (v.stage === 'erupting') this.drawSpring(frame, v, shown.size, after);
+      shown.after = after;
+      if (count < MAX_VENTS && shown.size > 0.01) {
+        out.set([v.x, v.y, shown.size, shown.light, shown.hot, ash, beat, 0], count * VENT_FLOATS);
+        count++;
+      }
     }
     for (const id of this.vents.keys()) if (!seen.has(id)) this.vents.delete(id);
+    for (const id of this.vents.keys()) if (!seen.has(id)) this.vents.delete(id);
+    return { data: out, count };
+  }
+
+  /**
+   * Вокруг жерл (сами отверстия — в шейдере полей, ventShapes): шрамы, волны
+   * залпов, крупинки залпов, приток; затем воронки. Жерла по стадиям — плоские отверстия в недра со светом из глубины.
+   * Размер — по модели: сильный вулкан крупнее во всех стадиях; извергающийся —
+   * по объёму извержения и темпу выброса сейчас. Показ догоняет модель плавно:
+   * новый вулкан вырастает из точки, смены стадий без скачков.
+   * - готовится — разгорается и растёт по мере созревания и роста давления;
+   *   созревший перед выбросом пульсирует;
+   * - извергается — свет из недр в полную силу, белая сердцевина у залпа, к концу сжимается;
+   *   каждый залп пускает кольцо по воде;
+   * - спит — маленькое тусклое отверстие; потух — сереет и затягивается;
+   * - после извержения на дне медленно тает сиреневый шрам.
+   * Затем воронки.
+   */
+  drawVents(frame: Frame, glows: GlowSink): void {
+    const { ctx, camera, world, animTime } = frame;
+    const m = world.mineral;
+    const step = world.step;
+    ctx.globalCompositeOperation = 'source-over';
+    // Шрамы недавних извержений — под жерлами.
+    for (const v of m.volcanoes) {
+      if ((v.stage !== 'dormant' && v.stage !== 'extinct') || v.k === 0) continue;
+      const fade = 1 - (step - v.until) / SCAR_STEPS;
+      if (fade <= 0) continue;
+      this.softSpot(ctx, v.x, v.y, Math.max(camera.px(10), v.radius * SCAR_SIZE), [[0, SCAR_COLOR, SCAR_ALPHA * fade * fade], [0.6, SCAR_COLOR, 0.5 * SCAR_ALPHA * fade * fade], [1, SCAR_COLOR, 0]]);
+    }
+    // Волны залпов — кольца, бегущие от жерла.
+    for (const s of this.shocks) {
+      const f = (animTime - s.t) / RING_S;
+      if (f >= 1) continue;
+      const ease = 1 - (1 - f) ** 3;
+      const radius = camera.px(4) + Math.max(camera.px(26), ERUPTION_RADIUS * RING_REACH * s.scale) * ease;
+      ctx.globalAlpha = 0.75 * (1 - f) ** 2;
+      ctx.strokeStyle = rgb(RING_COLOR);
+      ctx.lineWidth = camera.px(0.6 + 1.6 * (1 - f));
+      ctx.beginPath(); ctx.arc(s.x, s.y, radius, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    this.drawThrown(frame);
+    // Приток из жерла — по показанному размеру отверстия (само отверстие рисует шейдер полей).
+    for (const v of m.volcanoes) {
+      const shown = this.vents.get(v.id);
+      if (v.stage === 'erupting' && shown) this.drawSpring(frame, v, shown.size, shown.after);
+    }
     for (const id of this.springs.keys()) if (!m.volcanoes.some((v) => v.id === id && v.stage === 'erupting')) this.springs.delete(id);
     this.drawFunnels(frame, glows);
     ctx.globalAlpha = 1;
@@ -602,36 +630,6 @@ export class SourcesLayer {
     }
     ctx.globalAlpha = 1;
   }
-
-  /**
-   * Жерло — отверстие в недра, плоское и круглое (как и выброс из него), внутри темно, из глубины пробивается свет — тем ярче и шире, чем
-   * больше `light`; `hot` — белая сердцевина (залп, набухание); кромка светится;
-   * `ash` — потухшее сереет; `beat` — пульс созревшего.
-   */
-  private drawVent(frame: Frame, x: number, y: number, radius: number, light: number, hot: number, ash: number, beat: number): void {
-    if (radius <= 0.01) return;
-    const { ctx, camera } = frame;
-    // Ореол вокруг — свет из недр на дне.
-    this.softSpot(ctx, x, y, radius * (3 + 1.2 * beat), [[0, MINERAL_COLOR, (0.4 + 0.3 * beat) * light], [0.45, MINERAL_COLOR, 0.14 * light], [1, MINERAL_COLOR, 0]]);
-    const path = new Path2D();
-    path.arc(x, y, radius, 0, Math.PI * 2);
-    const deep = mix(VENT_HOLE, VENT_ASH, ash);
-    const core = mix(mix(MINERAL_COLOR, VENT_SPARK, hot), VENT_ASH, ash);
-    const g = ctx.createRadialGradient(x, y, 0, x, y, radius);
-    g.addColorStop(0, rgb(mix(deep, core, Math.min(1, light + hot))));
-    g.addColorStop(Math.max(0.05, 0.25 + 0.45 * light + 0.2 * hot) * 0.9, rgb(mix(deep, MINERAL_COLOR, 0.55 * light)));
-    g.addColorStop(1, rgb(deep));
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = g;
-    ctx.fill(path);
-    // Светящаяся кромка — край отверстия, сквозь который виден свет.
-    ctx.globalAlpha = Math.min(1, 0.25 + 0.6 * light + 0.3 * hot) * (1 - ash * 0.7);
-    ctx.strokeStyle = rgb(mix(mix(VENT_RIM, VENT_SPARK, Math.max(hot, 0.4 * light)), VENT_ASH, ash));
-    ctx.lineWidth = camera.px(1 + 0.6 * hot);
-    ctx.stroke(path);
-    ctx.globalAlpha = 1;
-  }
-
 
   /** Мягкое круглое пятно: стопы — (доля радиуса, цвет, непрозрачность). */
   private softSpot(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, stops: [number, Rgb, number][]): void {

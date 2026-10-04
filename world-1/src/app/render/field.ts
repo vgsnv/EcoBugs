@@ -15,6 +15,7 @@ import type { StreamField, StreamView } from './water.ts';
 import { TERRAIN_GLSL, type Grid, type TerrainData } from './terrain.ts';
 import { TECTONICS_GLSL, type Tectonics } from './ground.ts';
 import { GLASS_TINT, TABLE_GLSL } from './table.ts';
+import { MAX_VENTS, VENT_ASH, VENT_HOLE, VENT_RIM, VENT_SPARK } from './sources.ts';
 
 /** Свечения и блёстки: копятся за кадр и рисуются после полей, в порядке вызовов. */
 export interface GlowSink {
@@ -37,6 +38,8 @@ export interface FieldInputs {
   /** Свежесть грунта (сетка минерала) и идущие подвижки и толчки. */
   readonly fresh: Grid;
   readonly tectonics: Tectonics;
+  /** Жерла вулканов (render/sources.ts, ventShapes). */
+  readonly vents: { readonly data: Float32Array; readonly count: number };
   /** Узор ряби (альфа, бесшовный): равномерная рябь при «Процессах» и пена. */
   readonly ripple: HTMLCanvasElement;
   /** Пена у берега (альфа), на всю чашку. */
@@ -56,6 +59,9 @@ export interface FieldInputs {
   readonly averageMix: number;
   readonly view: StreamView;
 }
+
+/** Цвет 0…255 → vec3 GLSL 0…1. */
+const vec3 = (c: readonly number[]) => `vec3(${c.map((x) => (x / 255).toFixed(4)).join(', ')})`;
 
 /** Переход дымки минерала к новому состоянию — за средний промежуток между состояниями, в этих пределах, мс. */
 const MINERAL_FADE_MIN_MS = 60;
@@ -180,12 +186,49 @@ float rippleAt(vec2 uv) { return texture(u_ripple, uv).a; }
 
 vec3 screenOver(vec3 c, vec3 s) { return c + s * (1. - c); }
 
+uniform vec4 u_ventA[${MAX_VENTS}];   // x, y, радиус, свет из недр
+uniform vec4 u_ventB[${MAX_VENTS}];   // белизна, пепел, пульс
+uniform int u_ventCount;
+/**
+ * Жерла — отверстия в дне: тёмная глубина с мягким краем, как всё на дне
+ * (её затеняет тень, тонирует вода, накрывает дымка). Возвращает цвет дна.
+ */
+vec3 ventHoles(vec3 c, vec2 w) {
+  for (int n = 0; n < ${MAX_VENTS}; n++) {
+    if (n >= u_ventCount) break;
+    vec4 a = u_ventA[n], b = u_ventB[n];
+    float d = length(w - a.xy) / a.z;
+    float soft = .18 + 1.2 / (a.z * u_cam.x);
+    float hole = 1. - smoothstep(1. - soft, 1. + soft * .5, d);
+    if (hole > 0.) c = mix(c, mix(${vec3(VENT_HOLE)}, ${vec3(VENT_ASH)} * .8, b.y), hole * (.75 + .2 * b.y));
+  }
+  return c;
+}
+/** Свет из недр сквозь отверстие: сердцевина, светлая кромка, мягкий ореол по дну. */
+vec3 ventLight(vec3 c, vec2 w) {
+  for (int n = 0; n < ${MAX_VENTS}; n++) {
+    if (n >= u_ventCount) break;
+    vec4 a = u_ventA[n], b = u_ventB[n];
+    if (a.w <= .01) continue;
+    float d = length(w - a.xy) / a.z;
+    float core = exp(-d * d * (3.2 - 1.6 * b.x));
+    float rim = exp(-pow((d - .9) / .16, 2.));
+    float halo = exp(-d * d / (5.5 + 2.5 * b.z));
+    vec3 deep = u_mineralThin;
+    vec3 hot = mix(deep, ${vec3(VENT_SPARK)}, b.x);
+    c = screenOver(c, hot * core * a.w * .8);
+    c = screenOver(c, mix(${vec3(VENT_RIM)}, ${vec3(VENT_SPARK)}, .4 * b.x) * rim * a.w * .35);
+    c = screenOver(c, deep * halo * a.w * (.22 + .12 * b.z));
+  }
+  return c;
+}
+
 void main() {
   vec2 px = screenPx();
   vec2 w = worldAt(px);
   float inside = insideDish(w);
   if (inside <= 0.) { o = vec4(0.); return; }
-  vec3 c = terrainAt(w);
+  vec3 c = ventHoles(terrainAt(w), w);
   vec4 mineral = mix(texture(u_mineralPrev, w / u_grid), texture(u_mineral, w / u_grid), u_mineralMix);
   float held = mineral.g;
   float lit1 = min(1., u_lit);
@@ -235,6 +278,9 @@ void main() {
     vec3 tone = vec3(1., 250. / 255., 230. / 255.);
     c = screenOver(c, (.35 + .65 * tone * ra) * foam * .4);
   }
+
+  // Свет из недр — собственное свечение жерл, сквозь воду (не зависит от пятен света).
+  c = ventLight(c, w);
 
   // Минерал: мутность затемняет дно, дымка ложится поверх.
   c *= mineral.r;
@@ -685,6 +731,15 @@ export class FieldRenderer implements GlowSink {
     gl.uniform1i(p.uniform('u_moveCount'), tec.moveCount);
     gl.uniform4fv(p.uniform('u_ring'), tec.rings);
     gl.uniform1i(p.uniform('u_ringCount'), tec.ringCount);
+    const vents = input.vents;
+    const ventA = new Float32Array(MAX_VENTS * 4), ventB = new Float32Array(MAX_VENTS * 4);
+    for (let n = 0; n < vents.count; n++) {
+      ventA.set(vents.data.subarray(n * 8, n * 8 + 4), n * 4);
+      ventB.set(vents.data.subarray(n * 8 + 4, n * 8 + 8), n * 4);
+    }
+    gl.uniform4fv(p.uniform('u_ventA'), ventA);
+    gl.uniform4fv(p.uniform('u_ventB'), ventB);
+    gl.uniform1i(p.uniform('u_ventCount'), vents.count);
     gl.uniform1ui(p.uniform('u_seed'), t.seed >>> 0);
     gl.uniform3f(p.uniform('u_glassTint'), ...GLASS_TINT);
     // Мелкие детали камня проявляются с приближением, как прежде у плиток местности.

@@ -192,6 +192,7 @@ export class WorldRenderer {
       terrain: this.terrain.data(),
       fresh: this.ground.freshGrid(),
       tectonics: this.ground.tectonics(animTime),
+      vents: this.sources.ventShapes(frame),
       ripple: this.water.ripple,
       foam: this.water.foam(w),
       ...light.strength,
