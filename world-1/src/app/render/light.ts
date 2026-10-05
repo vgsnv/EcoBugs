@@ -6,7 +6,7 @@
  * теплеют (нагрев усиливает) и чуть высветляются; ярче солнца 1 — блик.
  * Маску света считает GPU тем же полем, что и модель (LIGHT_MASK_FS). Здесь — эллипсы пятен
  */
-import { LIGHT_FIELD_GLSL, lightFieldUniforms, sunAt } from '../../core/index.ts';
+import { LIGHT_FIELD_GLSL, lightBackground, lightFieldUniforms, sunAt } from '../../core/index.ts';
 import type { Frame } from './frame.ts';
 
 /** Сила солнечного оттенка при солнце 1 и добавка от нагрева (при нагреве 2). */
@@ -42,7 +42,7 @@ export class LightLayer {
         // И чуть высветляет их, чтобы свет читался и на тёмной суше.
         glow: SUN_GLOW,
         sunNow: sunAt(w.light, w.step),
-        background: p.backgroundLevel,
+        background: lightBackground(w.light),
       },
     };
   }
@@ -66,7 +66,7 @@ out vec4 o;
 void main() {
   // Поле плавное — маска в пониженном разрешении, на холст растягивается со сглаживанием.
   vec2 px = vec2(gl_FragCoord.x, u_maskSize.y - gl_FragCoord.y) * u_maskScale;
-  float l = lightField(worldAt(px));
+  float l = min(1., lightField(worldAt(px)));
   float sharp = smoothstep(.35, .65, l);
   o = vec4(sharp, l, 0., 1.);
 }`;

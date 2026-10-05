@@ -16,7 +16,7 @@
  */
 import { finishCalculation, type Calculation } from './task.ts';
 import { DRIFT_CELL, DRIFT_DRAG, DRIFT_MAX, DRIFT_PERIOD, DRIFT_SPEED, LIGHT_DRIFT_SPEED } from './constants.ts';
-import { rasterizeSpotIntensityTask, sunAt, type LightMap } from './light.ts';
+import { lightBackground, rasterizeSpotIntensityTask, sunAt, type LightMap } from './light.ts';
 import type { WorldParams } from './params.ts';
 import { cellInsideDish } from './dish.ts';
 import { isBlocked, type PartitionLayout } from './partitions.ts';
@@ -280,9 +280,11 @@ function* computeDriftFieldTask(world: Sources, t: number, ground?: Ground): Cal
   const vx = new Float32Array(n);
   const vy = new Float32Array(n);
   const sun = sunAt(world.light, t);
+  // Отклик среды на свет — для знатоков: множитель к обычному.
+  const response = DRIFT_SPEED * world.params.driftResponse;
   if (sun <= 0) return { cols, rows, cell, vx, vy };
   // Свет места: фон + пятна; источник — отклонение от среднего по отсеку.
-  const bg = world.params.backgroundLevel;
+  const bg = lightBackground(world.light);
   const spotV = { vx: new Float32Array(n), vy: new Float32Array(n) };
   const intensity = yield* rasterizeSpotIntensityTask(world.light, t, cols, rows, cell, undefined, spotV);
   const { blocked, cond, region, regions } = ground;
@@ -342,7 +344,7 @@ function* computeDriftFieldTask(world: Sources, t: number, ground?: Ground): Cal
       const fe = i < cols - 1 ? east[k] * (p[k] - p[k + 1] + fEast[k]) : 0;
       const fn = j > 0 ? south[k - cols] * (p[k - cols] - p[k] + fSouth[k - cols]) : 0;
       const fs = j < rows - 1 ? south[k] * (p[k] - p[k + cols] + fSouth[k]) : 0;
-      let x = DRIFT_SPEED * (fw + fe) / 2, y = DRIFT_SPEED * (fn + fs) / 2;
+      let x = response * (fw + fe) / 2, y = response * (fn + fs) / 2;
       const v = Math.hypot(x, y);
       if (v > DRIFT_MAX) { x *= DRIFT_MAX / v; y *= DRIFT_MAX / v; }
       vx[k] = x;

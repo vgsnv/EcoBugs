@@ -11,12 +11,13 @@
  * сохраняет количество: минерал клетки делится между клетками вокруг точки
  * назначения; в перегородки не попадает.
  */
+import { medium } from './laws.ts';
 import { traceThrow, type ThrowWorld } from './throw.ts';
 import { finishCalculation, type Calculation } from './task.ts';
 import {
   ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_BURST, ERUPTION_TAIL_AREA, ERUPTION_BURSTS_MAX, BURST_WIDTH, BURST_FROM, THROW_RAYS, THROW_SAMPLES, MINERAL_SPREAD,
-  MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_SINK_SETTLE, MINERAL_LAYER, MINERAL_MOBILITY, TRANSPORT_SUBSTEPS, DRIFT_REFERENCE, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, SAND_RATE, SAND_THRESHOLD, SAND_TOP, SAND_UNDER, SLUMP_RATE, SLUMP_SLOPE,
-  FUNNEL_DEPOSIT, FUNNEL_SHAPE, FUNNEL_CORE_LEVEL, FUNNEL_MIN_CELLS, FUNNEL_HOLE_SHARE, FUNNEL_RAMP, FUNNEL_REACH, FUNNEL_DRAW, FUNNEL_LIFT, FUNNEL_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
+  MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_SINK_SETTLE, MINERAL_LAYER, MINERAL_MOBILITY, TRANSPORT_SUBSTEPS, DRIFT_REFERENCE, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, SAND_RATE, SAND_THRESHOLD, SAND_TOP, SAND_UNDER, SLUMP_RATE, SLUMP_SLOPE,
+  FUNNEL_DEPOSIT, FUNNEL_SHAPE, FUNNEL_CORE_LEVEL, FUNNEL_MIN_CELLS, FUNNEL_HOLE_SHARE, FUNNEL_RAMP, FUNNEL_REACH, FUNNEL_DRAW, FUNNEL_LIFT, FUNNEL_SINK, DEPOSIT_DISSOLVE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
   VOLCANO_MIN_GAP, VOLCANO_POWER, VOLCANO_BIRTH, VOLCANO_MATURE, VOLCANO_EXTINCT_CHANCE, VOLCANO_WAKE_CHANCE, VOLCANO_DORMANT_LIFE, VOLCANO_FADE, VOLCANO_DEPOSIT_AVOID,
 } from './constants.ts';
 import type { Drift } from './drift.ts';
@@ -281,7 +282,7 @@ export function createMineral(params: WorldParams, partitions: PartitionLayout):
   // минерал приходит в среду только извержениями.
   const field = new Float64Array(n);
 
-  const threshold = total * ERUPTION_PRESSURE * (0.5 + hash3(deriveSeed(params.seed, 'eruptions'), -1, 4) / 4294967296);
+  const threshold = total * params.eruptionPressure * (0.5 + hash3(deriveSeed(params.seed, 'eruptions'), -1, 4) / 4294967296);
   return { cols: cols, rows: rows, cell, field, depths: total, threshold, eruptions: 0, genesis: true, volcanoes: [], births: 0, funnels: [], funnelBirths: 0, flow: null, version: 0, blocked, nearWall: nearWalls(blocked, cols, rows), region, freeArea };
 }
 
@@ -677,7 +678,8 @@ function startEruptions(m: MineralState, params: WorldParams, terrain: TerrainSt
     const logSpan = (r: readonly [number, number], t: number) => r[0] * (r[1] / r[0]) ** t;
     const stock = params.mineralStock * m.freeArea;
     // Доля недр, но не больше предела: при полных недрах выходит серия извержений, а не одно.
-    const amount = Math.min(ERUPTION_MAX * stock, m.depths * Math.min(0.95, logSpan(ERUPTION_SHARE, u(2)) * vol.power));
+    // Предел одного извержения — около двух средних порогов давления: иначе при полных недрах одно извержение выбросило бы почти весь минерал мира.
+    const amount = Math.min(2 * params.eruptionPressure * stock, m.depths * Math.min(0.95, logSpan(ERUPTION_SHARE, u(2)) * vol.power));
     // В стартовой серии извержения идут в GENESIS_SPEEDUP раз быстрее.
     const duration = Math.max(1, Math.round(Math.min(ERUPTION_DURATION[1], Math.max(ERUPTION_DURATION[0],
       ERUPTION_DURATION_SCALE * Math.sqrt(amount / stock) * (0.6 + u(3)))) / (m.genesis ? GENESIS_SPEEDUP : 1)));
@@ -694,7 +696,7 @@ function startEruptions(m: MineralState, params: WorldParams, terrain: TerrainSt
     vol.k++;
     m.eruptions++;
     // Следующий порог — случайно вокруг среднего.
-    m.threshold = stock * ERUPTION_PRESSURE * (0.5 + u(4));
+    m.threshold = stock * params.eruptionPressure * (0.5 + u(4));
   }
 }
 
@@ -849,7 +851,7 @@ export function eruptionRate(params: WorldParams, vol: Volcano, u: number): numb
 
 /** Радиус выброса извержения объёма `total`: растёт как √ от доли предела. */
 export function eruptionRadius(m: MineralState, params: WorldParams, total: number): number {
-  const limit = ERUPTION_MAX * params.mineralStock * m.freeArea;
+  const limit = 2 * params.eruptionPressure * params.mineralStock * m.freeArea;
   return ERUPTION_RADIUS * Math.max(ERUPTION_RADIUS_MIN, Math.sqrt(Math.min(1, total / Math.max(1e-12, limit))));
 }
 
@@ -1209,7 +1211,7 @@ export function mineralDensity(m: MineralState, x: number, y: number): number {
 
 /** Мутность: доля света, проходящая сквозь растворённый минерал (0, 1]. */
 export function transparencyForDensity(density: number): number {
-  return 1 / (1 + TURBIDITY * density);
+  return 1 / (1 + medium.turbidity * density);
 }
 
 export function transparencyAt(m: MineralState, x: number, y: number): number {

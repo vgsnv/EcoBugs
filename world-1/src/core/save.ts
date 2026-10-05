@@ -1,17 +1,17 @@
 /**
- * Файл мира: JSON с меткой формата, версией, параметрами, номером шага и
- * контрольной суммой. Карты, перегородки и положение света восстанавливаются
- * из параметров и номера шага, поэтому загруженный мир продолжает жить так же,
- * как исходный.
+ * Файл мира: JSON с меткой формата, версией, параметрами, номером шага,
+ * состоянием (свет, минерал, местность) и контрольной суммой. Перегородки
+ * восстанавливаются из параметров; старые версии не переводятся.
  */
 import { makeParams, validateParams, type WorldParams } from './params.ts';
-import { applyTerrain, createWorld, worldHash, type World } from './world.ts';
+import { applyTerrain, createWorld, lightNumbers, worldHash, type World } from './world.ts';
+import type { Spot } from './light.ts';
 import { movement } from './terrain.ts';
 import { funnelFromNumbers, funnelNumbers, volcanoFromNumbers, volcanoNumbers } from './mineral.ts';
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 21;
+export const WORLD_FORMAT_VERSION = 23;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -35,6 +35,8 @@ const OLD_FORMATS: Record<number, string> = {
   18: 'тогда пятна света вращались, меняли форму и уходили за край чашки',
   19: 'тогда пятна света вращались, меняли форму и уходили за край чашки',
   20: 'тогда пятна света были эллипсами, отскакивавшими от стенок',
+  21: 'тогда свет был полем шума, а не пятнами',
+  22: 'тогда сопротивление сред, мутность и давление извержения не были параметрами',
 };
 
 export interface MineralFile {
@@ -77,6 +79,8 @@ export interface WorldFile {
   savedAt?: string;
   params: WorldParams;
   step: number;
+  /** Свет — состояние: числа lightNumbers (шаг, дрейф, поворот, ритм, пятна). */
+  light: number[];
   /** Минерал — состояние мира, из сида его не восстановить. */
   mineral: MineralFile;
   /** Местность — тоже состояние мира. */
@@ -100,6 +104,7 @@ export function worldToFile(world: World, savedAt?: Date): WorldFile {
     ...(savedAt ? { savedAt: savedAt.toISOString() } : {}),
     params: structuredClone(world.params),
     step: world.step,
+    light: lightNumbers(world.light),
     mineral: {
       depths: world.mineral.depths,
       threshold: world.mineral.threshold,
@@ -145,38 +150,41 @@ function fromBase64(text: string): Uint8Array {
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-/** Параметры из файла: берутся только известные поля, типы проверяются дальше. */
-function readParams(raw: unknown, problems: string[], legacyV18 = false): WorldParams | null {
+/** Параметры из файла: берутся только известные поля (по образцу умолчаний), типы проверяются дальше. */
+function readParams(raw: unknown, problems: string[]): WorldParams | null {
   if (!isObject(raw)) {
     problems.push('Нет параметров мира');
     return null;
   }
-  const shares = isObject(raw.viscosityShares) ? raw.viscosityShares : {};
-  const defaults = makeParams();
-  const params: WorldParams = {
-    seed: raw.seed as number,
-    shape: legacyV18 ? 'rectangle' : raw.shape as WorldParams['shape'],
-    aspectRatio: legacyV18 ? 4 / 3 : raw.aspectRatio as number,
-    sun: raw.sun as number,
-    lightDrift: raw.lightDrift as number,
-    sunRhythm: raw.sunRhythm as number,
-    sunPeriod: raw.sunPeriod as number,
-    backgroundLevel: raw.backgroundLevel as number,
-    illumination: raw.illumination as number,
-    spotSize: raw.spotSize as number,
-    baseTemperature: raw.baseTemperature as number,
-    spotHeat: raw.spotHeat as number,
-    viscosityShares: { water: shares.water as number, shallows: shares.shallows as number, land: shares.land as number },
-    viscosityZoneSize: raw.viscosityZoneSize as number,
-    mineralStock: raw.mineralStock as number,
-    terrainSpeed: raw.terrainSpeed as number,
-    quakeInterval: raw.quakeInterval as number,
-  };
-  for (const key of Object.keys(defaults) as (keyof WorldParams)[]) {
-    if (legacyV18 && (key === 'shape' || key === 'aspectRatio')) continue;
-    if (!(key in raw)) problems.push(`Нет параметра «${key}»`);
+  const defaults = makeParams() as unknown as Record<string, unknown>;
+  const params: Record<string, unknown> = {};
+  for (const key of Object.keys(defaults)) {
+    if (!(key in raw)) { problems.push(`Нет параметра «${key}»`); continue; }
+    const value = raw[key];
+    params[key] = isObject(defaults[key]) && isObject(value) ? { ...value } : value;
   }
-  return params;
+  return params as unknown as WorldParams;
+}
+
+/** Свет из файла (числа lightNumbers); возвращает причины отказа. */
+function restoreLight(world: World, raw: unknown): string[] {
+  if (!Array.isArray(raw) || raw.length < 11 || !raw.every((x) => typeof x === 'number' && Number.isFinite(x))) return ['Свет: числа повреждены'];
+  const n = raw as number[];
+  const count = n[10], per = 3 + 12;
+  if (!Number.isInteger(count) || count < 0 || n.length !== 11 + count * per) return ['Свет: число пятен не сходится'];
+  const l = world.light;
+  [l.step, l.offsetX, l.offsetY, l.angle, l.turnFrom, l.turnTo, l.turnStart] = n;
+  l.nextTurn = n[7] < 0 ? Number.POSITIVE_INFINITY : n[7];
+  l.turns = n[8];
+  l.rhythmPhase = n[9];
+  const spots: Spot[] = [];
+  for (let i = 0; i < count; i++) {
+    const o = 11 + i * per;
+    spots.push({ x: n[o], y: n[o + 1], r: n[o + 2], amps: n.slice(o + 3, o + 7), phases: n.slice(o + 7, o + 11), rates: n.slice(o + 11, o + 15) });
+  }
+  l.spots = spots;
+  if (l.step !== world.step) return ['Свет: шаг не совпадает с шагом мира'];
+  return [];
 }
 
 /** Разбор файла мира. Бросает WorldFileError со списком причин отказа. */
@@ -204,7 +212,7 @@ export function parseWorldFile(text: string): World {
   }
 
   const problems: string[] = [];
-  const params = readParams(data.params, problems, data.version === 18);
+  const params = readParams(data.params, problems);
   if (params) problems.push(...validateParams(params));
   const step = data.step;
   if (typeof step !== 'number' || !Number.isSafeInteger(step) || step < 0) {
@@ -219,9 +227,9 @@ export function parseWorldFile(text: string): World {
   // создания больше не допускают исходное сочетание долей.
   const world = createWorld(params, true);
   world.step = step as number;
-  const mineralProblems = [...restoreMineral(world, data.mineral), ...restoreTerrain(world, data.terrain)];
+  const mineralProblems = [...restoreLight(world, data.light), ...restoreMineral(world, data.mineral), ...restoreTerrain(world, data.terrain)];
   if (mineralProblems.length > 0) throw new WorldFileError(mineralProblems);
-  if (worldHash(world, data.version === 18) !== parseInt(data.checksum as string, 16)) {
+  if (worldHash(world) !== parseInt(data.checksum as string, 16)) {
     throw new WorldFileError(['Контрольная сумма не совпадает — файл повреждён или изменён вручную']);
   }
   return world;

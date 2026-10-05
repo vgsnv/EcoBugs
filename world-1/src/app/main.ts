@@ -4,7 +4,7 @@
  */
 import {
   Drift, flowAt, meanSpotSpeed, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInDeposits, mineralInMedium, smoothLevelAt, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
-  resistanceAt, temperatureAt, type World, type WorldParams,
+  resistanceAt, setMediumLaws, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
 import { WorldSummary } from './world-summary.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
@@ -46,6 +46,8 @@ let renderedFrames = 0;
 
 let world: World = createWorld(makeParams({ seed: 1 }));
 let paused = false;
+/** Идёт настройка черновика нового мира: время стоит, пока его не запустят. */
+let drafting = false;
 let speed = 1;
 const simulation = new Worker(new URL('./simulation.worker.ts', import.meta.url), { type: 'module' });
 let epoch = 0;
@@ -57,7 +59,7 @@ function send(command: SimulationCommand): void { simulation.postMessage(command
 function control(): void {
   send({ type: 'control', epoch, paused, speed, active: document.visibilityState === 'visible' });
 }
-function togglePause(): void { paused = !paused; control(); }
+function togglePause(): void { if (drafting) return; paused = !paused; control(); }
 function changeSpeed(next: number): void { speed = next; control(); }
 function create(params: WorldParams): void {
   epoch++;
@@ -73,7 +75,8 @@ let pinnedPoint: { x: number; y: number } | null = null;
 const $ = (selector: string) => document.querySelector<HTMLElement>(selector)!;
 const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#params'), legend: $('#legend'), tip: $('.tip'), observation: $('#observation'), navigation: $('#navigation'), viewControls: $('#view-controls'), summary: $('#world-summary') }, world.params, {
   onLayoutChange: () => { pointer = null; renderer.resizeKeepingView(); },
-  onCreate: (params: WorldParams) => create(params),
+  onDraft: (params: WorldParams) => { drafting = true; paused = true; create(params); },
+  onLaunch: () => { drafting = false; paused = false; control(); },
   onTogglePause: () => togglePause(),
   onUnpinProbe: () => { pinnedPoint = null; renderer.setProbePoint(null); panel.setProbePinned(false); },
   onSpeed: (s) => changeSpeed(s),
@@ -114,12 +117,13 @@ simulation.onmessage = ({ data }: MessageEvent<SimulationReply>) => {
     case 'snapshot': {
       ready = true;
       if (data.initial) {
-        const next: World = { ...data.initial, step: data.step, mineral: data.mineral, terrain: data.terrain,
-          viscosity: data.viscosity, drift: new Drift({ ...data.initial, viscosity: data.viscosity }) };
+        const next: World = { ...data.initial, light: data.light, step: data.step, mineral: data.mineral, terrain: data.terrain,
+          viscosity: data.viscosity, drift: new Drift({ ...data.initial, light: data.light, viscosity: data.viscosity }) };
         if (data.drift) next.drift.acceptNodes(data.step, data.drift.a, data.drift.b);
         setWorld(next);
       } else {
         world.step = data.step;
+        Object.assign(world.light, data.light);
         if (data.mineral) Object.assign(world.mineral, data.mineral);
         if (data.terrain) Object.assign(world.terrain, data.terrain);
         if (data.viscosity) Object.assign(world.viscosity, data.viscosity);
@@ -177,8 +181,10 @@ function setWorld(next: World): void {
   panel.setProbePinned(false);
   flowStep = next.step;
   worldSummary.reset(next);
+  const sameDish = next.dish.width === world.dish.width && next.dish.height === world.dish.height;
   world = next;
-  renderer.setWorld(world);
+  setMediumLaws(world.params);
+  renderer.setWorld(world, drafting && sameDish);
   mineralStatsVersion = -1;
   panel.setCurrent(world.params);
   document.title = `Песочница мира · сид ${world.params.seed}`;
@@ -336,7 +342,7 @@ function frame(now: number): void {
   }
   renderer.drawMinimap(minimap);
   const spotSpeed = millimetresPerSecond(meanSpotSpeed(world.light, world.step)) * 60;
-  const speedText = spotSpeed > 0 ? `свет перетекает ≈ ${(spotSpeed * 60 * 24).toFixed(0)} мм/сут` : 'свет стоит';
+  const speedText = spotSpeed > 0 ? `пятна плывут ≈ ${(spotSpeed * 60 * 24 / 10).toFixed(0)} см/сут` : 'свет стоит';
   if (lightSpeed.textContent !== speedText) lightSpeed.textContent = speedText;
   const rhythm = sunRhythmAt(world.light, world.step);
   const rising = sunRhythmAt(world.light, world.step + 100) >= rhythm;

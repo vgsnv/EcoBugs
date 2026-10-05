@@ -5,17 +5,19 @@
  * применяются кнопкой «Создать мир».
  */
 import { PROCESS_COLORS } from './render/processes.ts';
-import { layoutPartitions, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type WorldParams } from '../core/index.ts';
+import { createLightMap, dishCoverage, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type RhythmShape, type WorldParams } from '../core/index.ts';
 import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render/palette.ts';
-import { formatArea, formatDuration, formatLength, formatMultiplier, formatNumber, formatPercent, formatWorldAge } from './units.ts';
-import { gramsPerSquareMetre, secondsFromSteps, stepsFromSeconds } from '../core/units.ts';
+import { formatArea, formatLength, formatMass, formatMultiplier, formatNumber, formatPercent, formatWorldAge } from './units.ts';
 import { Sidebar } from './sidebar.ts';
 
 export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
 
 export interface PanelHandlers {
   onLayoutChange(): void;
-  onCreate(params: WorldParams): void;
+  /** Черновик нового мира: пересобрать его в чаше на шаге 0, время стоит. */
+  onDraft(params: WorldParams): void;
+  /** Запустить черновик: время идёт. */
+  onLaunch(): void;
   onTogglePause(): void;
   onUnpinProbe(): void;
   onSpeed(speed: number): void;
@@ -46,58 +48,48 @@ export const SPEED_KEYS = SPEEDS.map((_, i) => String(i + 1));
 
 const OPEN_GROUPS_KEY = 'ecobugs.params.open';
 
-type NumberKey = 'sun' | 'lightDrift' | 'sunRhythm' | 'sunPeriod' | 'backgroundLevel' | 'illumination' | 'spotSize' | 'baseTemperature' | 'spotHeat' | 'viscosityZoneSize' | 'terrainSpeed' | 'quakeInterval' | 'mineralStock';
+type NumberKey = 'lightShadow' | 'lightExtra' | 'spotCount' | 'spotAreaMin' | 'spotAreaMax' | 'driftCross' | 'driftTurn' | 'sunRhythm' | 'sunPeriod' | 'rhythmTransition' | 'rhythmRise' | 'viscosityZoneSize' | 'terrainSpeed' | 'quakeInterval' | 'mineralStock' | 'eruptionPressure' | 'driftResponse' | 'resistanceShallows' | 'resistanceLand' | 'turbidityLoss' | 'spotWobble' | 'spotBreath';
 
+/** Ползунок параметра: значение — в единицах параметра, шкала — линейная или логарифмическая. */
 interface SliderSpec {
   key: NumberKey;
   label: string;
-  /** Пояснение под ползунком: что задаёт параметр. */
+  /** Пояснение у ⓘ: что задаёт параметр. */
   hint: string;
+  /** Пределы — в единицах показа (см. view/store). */
   min: number;
   max: number;
-  step: number;
+  /** Шаг линейной шкалы; у логарифмической значения округляются до двух значащих цифр. */
+  step?: number;
+  log?: boolean;
+  /** Перевод хранимого значения в показываемое и обратно (например шаги ↔ часы). */
+  view?: (stored: number) => number;
+  store?: (shown: number) => number;
+  format: (shown: number) => string;
+  /** Особый режим вместо крайнего значения: флажок, при котором параметр равен `value`. */
+  toggle?: { label: string; value: number };
 }
 
-const GROUPS: readonly { title: string; sliders: readonly SliderSpec[] }[] = [
-  {
-    title: 'Свет',
-    sliders: [
-      { key: 'sun', label: 'Солнце', hint: 'Средняя яркость света в пятнах. От неё же зависит сила течений: ярче — сильнее и длиннее.', min: 0.1, max: 3, step: 0.1 },
-      { key: 'lightDrift', label: 'Скорость дрейфа', hint: 'Как быстро перетекает свет — меняются очертания пятен, они сливаются, расходятся, гаснут и разгораются рядом: 1 — обычно (заметно меняются за десятки суток мира), 0 — свет стоит. Медленнее — ниши и концы течений дольше на одном месте, минерал успевает оседать; быстрее — ниши чаще меняются.', min: 0, max: 5, step: 0.1 },
-      { key: 'sunRhythm', label: 'Размах ритма', hint: 'Солнце медленно и плавно то светлеет, то тускнеет: от (1 − размах) до (1 + размах) от среднего. 0 — ровное солнце. Ритм меняет энергию и силу течений, но не температуру.', min: 0, max: 0.9, step: 0.05 },
-      { key: 'sunPeriod', label: 'Период ритма', hint: 'Длительность полного цикла солнца в модельном времени: от яркого к тусклому и обратно.', min: 10000, max: 1000000, step: 10000 },
-      { key: 'backgroundLevel', label: 'Яркость фона', hint: 'Свет между пятнами — доля от света в пятне.', min: 0.02, max: 0.9, step: 0.01 },
-      { key: 'illumination', label: 'Освещённость', hint: 'Какую часть площади чашки занимают пятна света.', min: 0.05, max: 0.8, step: 0.01 },
-      { key: 'spotSize', label: 'Размер пятен', hint: 'Крупность светлых областей: больше — меньше пятен, но крупнее; очертания неровные, пятна сливаются и расходятся.', min: 15, max: 200, step: 1 },
-    ],
-  },
-  {
-    title: 'Температура',
-    sliders: [
-      { key: 'baseTemperature', label: 'Базовая', hint: 'Температура на фоне; задаёт общий уровень мутаций.', min: 0.1, max: 3, step: 0.05 },
-      { key: 'spotHeat', label: 'Нагрев в пятнах', hint: 'Насколько в пятне теплее, чем на фоне. В тепле мутации сильнее.', min: 0, max: 3, step: 0.05 },
-    ],
-  },
-  {
-    title: 'Вязкость',
-    sliders: [
-      { key: 'viscosityZoneSize', label: 'Размер зон', hint: 'Средний размер зон воды, отмели и суши.', min: 30, max: 300, step: 5 },
-    ],
-  },
-  {
-    title: 'Местность',
-    sliders: [
-      { key: 'terrainSpeed', label: 'Скорость местности', hint: 'Множитель для залежей (минерал оседает там, где течения слабые, и смывается сильными), переноса и осыпания грунта и тектоники. 0 — местность неподвижна.', min: 0, max: 5, step: 0.1 },
-      { key: 'quakeInterval', label: 'Промежуток между толчками', hint: 'Средний промежуток между толчками — короткими резкими подъёмами или провалами небольшого участка, в модельном времени. Медленные подвижки (хребты, моря, проливы) идут сами, раз в несколько часов.', min: 50000, max: 2000000, step: 50000 },
-    ],
-  },
-  {
-    title: 'Минерал',
-    sliders: [
-      { key: 'mineralStock', label: 'Запас минерала', hint: 'Запас минерала на единицу свободной площади чашки; 1 расчётная единица = 1 кг/м². Оно постоянно: минерал переходит между средой, телами, останками, залежами и недрами. При сотворении весь он в недрах и выходит извержениями; вулканы рождаются, извергаются, засыпают и гаснут сами — когда и где, решают недра.', min: 0.2, max: 5, step: 0.1 },
-    ],
-  },
-];
+const HOUR = 36_000;
+const hoursOf = (steps: number) => steps / HOUR;
+const stepsOf = (hours: number) => Math.round(hours * HOUR);
+/** Площадь чаши, см². */
+const DISH_CM2 = 19_200;
+const round1 = (v: number) => (v >= 10 ? Math.round(v) : Math.round(v * 10) / 10);
+const hoursText = (h: number) => (h * 60 < 1 ? '< 1 мин' : h < 1 ? `${formatNumber(Math.round(h * 60))} мин` : h < 48 ? `${formatNumber(round1(h))} ч` : `${formatNumber(round1(h / 24))} сут`);
+
+/** Округление до двух значащих цифр — для логарифмической шкалы. */
+const nice = (v: number) => {
+  if (v <= 0) return 0;
+  const p = 10 ** (Math.floor(Math.log10(v)) - 1);
+  return Math.round(v / p) * p;
+};
+
+/** Прежние параметры местности — до генератора суши. */
+const ZONE_SIZE: SliderSpec = { key: 'viscosityZoneSize', label: 'Размер зон', hint: 'Средний размер зон воды, отмели и суши. Заменится генератором суши (массивы, изрезанность, внутренние моря).', min: 80, max: 300, step: 5, format: (v) => formatLength(v) };
+const TERRAIN_SPEED: SliderSpec = { key: 'terrainSpeed', label: 'Скорость местности', hint: 'Пока — общий множитель процессов дна: оседания и размыва, переноса и осыпания грунта, воронок, тектоники. Уйдёт: темп дна станет следствием течений и свойств дна.', min: 0, max: 5, step: 0.1, format: (v) => formatMultiplier(v) };
+const QUAKES: SliderSpec = { key: 'quakeInterval', label: 'Толчки', hint: 'В среднем раз в сколько часов случается толчок — короткий подъём или провал небольшого участка. Заменится «Тектоникой»: объём за час и высоты.', min: 1.5, max: 55, log: true, view: hoursOf, store: stepsOf, format: (v) => `раз в ${hoursText(v)}` };
+const STOCK: SliderSpec = { key: 'mineralStock', label: 'Запас минерала', hint: 'Сколько минерала в недрах при сотворении, на квадратный метр свободной площади. Дальше масса постоянна: минерал ходит между недрами, средой и залежами. Больше запас — крупнее извержения и воронки, а не чаще.', min: 200, max: 5000, log: true, view: (v) => v * 1000, store: (v) => v / 1000, format: (v) => `${formatNumber(v)} г/м²` };
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLElementTagNameMap[K]> = {}, ...children: (Node | string)[]): HTMLElementTagNameMap[K] {
   const node = Object.assign(document.createElement(tag), props);
@@ -184,15 +176,20 @@ export class Panel {
   private readonly fileMenu = el('details', { className: 'file-menu' });
   private readonly menuToggle = el('summary', { ariaLabel: 'Меню мира', title: 'Меню мира' });
   private readonly zoomButton = el('button', { className: 'zoom', title: 'Показать чашку целиком (0)' });
-  private readonly createButton = el('button', { className: 'primary', textContent: 'Создать мир' });
+  private readonly createButton = el('button', { className: 'primary', textContent: 'Запустить мир' });
+  /** Идёт настройка черновика нового мира. */
+  private drafting = false;
+  private draftTimer = 0;
+  private readonly draftBanner = el('div', { className: 'draft-banner', hidden: true, textContent: 'Черновик нового мира — время стоит. Настройте параметры справа и нажмите «Запустить мир».' });
+  private readonly newWorldDialog = el('dialog', { className: 'confirm' });
   private readonly status = el('span', { className: 'status' });
   private statusTimer = 0;
-  private readonly revertButton = el('button', { textContent: 'Отменить правки' });
   private readonly defaultsButton = el('button', { textContent: 'По умолчанию' });
   /** Синхронизация полей с черновиком; флаг — отличается ли поле от текущего мира. */
   private readonly inputs: (() => void)[] = [];
+  /** Строки-следствия под ручками. */
+  private readonly consequences: (() => void)[] = [];
   private readonly layoutLabel = el('span', { className: 'value' });
-  private readonly layoutPreview = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   private readonly marks: { node: HTMLElement; changed: () => boolean }[] = [];
   private readonly sidebar: Sidebar;
 
@@ -256,10 +253,13 @@ export class Panel {
 
   /** Мир создан с этими параметрами — черновик совпадает с миром. */
   setCurrent(params: WorldParams): void {
-    this.current = structuredClone(params);
-    this.draft = structuredClone(params);
-    for (const sync of this.inputs) sync();
-    this.refresh();
+    // Пометки «изменено» — относительно умолчаний: черновик в чаше и есть текущий мир.
+    this.current = makeParams({ seed: params.seed, shape: params.shape, aspectRatio: params.aspectRatio });
+    if (!this.drafting) {
+      this.draft = structuredClone(params);
+      for (const sync of this.inputs) sync();
+    }
+    this.refresh(false);
   }
 
   /** Открыть или закрыть настройки; черновик сохраняется при закрытии. */
@@ -450,8 +450,8 @@ export class Panel {
     });
     this.paramsToggle.addEventListener('click', () => {
       this.closeMenu();
-      this.toggleParams(true);
-      this.roots.params.querySelector<HTMLSelectElement>('select')!.focus();
+      if (this.drafting) { this.toggleParams(true); return; }
+      this.newWorldDialog.showModal();
     });
     this.focusToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path class="focus-enter" d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4"/><path class="focus-exit" d="M3 7h4V3M13 3v4h4M17 13h-4v4M7 17v-4H3"/></svg>';
     this.focusToggle.addEventListener('click', () => { void this.toggleFullscreen(); });
@@ -519,32 +519,85 @@ export class Panel {
 
   private buildParams(): void {
     const open = loadOpenGroups();
-    const group = (title: string, fields: HTMLElement[], openByDefault: boolean) => {
-      const d = el('details', { open: open[title] ?? openByDefault }, el('summary', { textContent: title }), el('div', { className: 'fields' }, ...fields));
+    const group = (title: string, about: string, fields: HTMLElement[], openByDefault: boolean, kind = '') => {
+      const head = el('summary', {}, el('span', { className: 'group-title', textContent: title }), el('span', { className: 'group-about', textContent: about }));
+      const d = el('details', { open: open[title] ?? openByDefault, className: `param-group ${kind}` }, head, el('div', { className: 'fields' }, ...fields));
       d.addEventListener('toggle', () => saveOpenGroup(title, d.open));
       return d;
     };
+    const sub = (text: string) => el('div', { className: 'subhead', textContent: text });
+    const world = this.worldFields();
     this.roots.params.append(
       el('div', { className: 'params-head' }, el('h2', { textContent: 'Параметры нового мира' })),
       el('div', { className: 'params-body' },
-        group('Мир', this.worldFields(), true),
-        ...GROUPS.map((g) => group(g.title, [...g.sliders.map((s) => this.slider(s)), ...(g.title === 'Вязкость' ? this.sharesRows() : [])], g.title === 'Свет')),
+        group('Чаша', 'форма, пропорции, стартовая картина', [sub('Форма'), world[0], world[1], sub('Стартовая картина'), world[2], world[3]], true),
+        group('Свет', 'пятна, яркость и их движение', this.lightFields(sub), true),
+        group('Ритм солнца', 'как свет нарастает и спадает', this.rhythmFields(), false),
+        group('Местность', 'прежние ручки — до генератора суши', [this.slider(ZONE_SIZE), ...this.sharesRows(), this.slider(TERRAIN_SPEED), this.slider(QUAKES)], false),
+        group('Минерал', 'запас недр и извержения', [
+          this.slider(STOCK), this.consequence(() => `Всего в недрах ≈ ${formatMass(this.draft.mineralStock * 1_920_000)} — без перегородок.`),
+          this.slider({ key: 'eruptionPressure', label: 'Давление извержения', hint: 'Сколько минерала (доля всего запаса) должно накопиться в недрах, чтобы вулкан извергся. Выше — извержения реже и крупнее; ниже — чаще и мельче. Как часто они случаются на деле, покажет сводка.', min: 0.03, max: 0.5, step: 0.01, format: (v) => formatPercent(v) }),
+        ], false),
+        group('Для знатоков', 'тонкая настройка законов', this.expertFields(), false, 'expert'),
       ),
       el('div', { className: 'params-foot' },
         this.dirtyNote,
         this.errorsBox,
         this.createButton,
-        el('span', { className: 'row' }, this.revertButton, this.defaultsButton),
+        el('span', { className: 'row end' }, this.defaultsButton),
       ),
     );
-    this.revertButton.addEventListener('click', () => this.replaceDraft(this.current));
     this.defaultsButton.addEventListener('click', () => this.replaceDraft(makeParams({ seed: this.draft.seed })));
     this.createButton.addEventListener('click', () => {
       if (validateParams(this.draft).length > 0) return;
-      this.handlers.onCreate(structuredClone(this.draft));
+      window.clearTimeout(this.draftTimer);
+      this.handlers.onDraft(structuredClone(this.draft));
+      this.setDrafting(false);
+      this.handlers.onLaunch();
       this.toggleSummary(true);
     });
+    this.buildNewWorldDialog();
     this.toggleParams(false);
+  }
+
+  /** Предупреждение перед новым миром: текущий будет заменён без возврата. */
+  private buildNewWorldDialog(): void {
+    const d = this.newWorldDialog;
+    const saveAndGo = el('button', { type: 'button', textContent: 'Сохранить и продолжить' });
+    const go = el('button', { type: 'button', className: 'primary', textContent: 'Продолжить' });
+    const close = el('button', { type: 'button', textContent: 'Отмена' });
+    d.append(
+      el('h3', { textContent: 'Новый мир' }),
+      el('p', { textContent: 'Текущий мир будет заменён черновиком нового, вернуться к нему будет нельзя. Сохранить его перед этим?' }),
+      el('div', { className: 'row end' }, close, saveAndGo, go),
+    );
+    close.addEventListener('click', () => d.close());
+    saveAndGo.addEventListener('click', () => { this.handlers.onSave(); d.close(); this.startDraft(); });
+    go.addEventListener('click', () => { d.close(); this.startDraft(); });
+    document.body.append(d);
+    document.querySelector('.stage')?.append(this.draftBanner);
+  }
+
+  /** Настройка черновика: время стоит, в чаше — получающийся мир. */
+  private startDraft(): void {
+    this.setDrafting(true);
+    this.toggleParams(true);
+    this.handlers.onDraft(structuredClone(this.draft));
+  }
+
+  private setDrafting(next: boolean): void {
+    this.drafting = next;
+    this.draftBanner.hidden = !next;
+    this.roots.app.classList.toggle('drafting', next);
+  }
+
+  /** Черновик изменился: пересобрать мир в чаше, когда ручки чуть успокоятся. */
+  private scheduleDraft(): void {
+    if (!this.drafting) return;
+    window.clearTimeout(this.draftTimer);
+    this.draftTimer = window.setTimeout(() => {
+      if (validateParams(this.draft).length === 0) this.handlers.onDraft(structuredClone(this.draft));
+    }, 250);
   }
 
   /** Подпись поля: название, ⓘ с пояснением и (если есть) значение справа. */
@@ -621,7 +674,7 @@ export class Panel {
     this.inputs.push(updateSize);
     syncShape(); updateSize();
     const seed = el('input', { type: 'number', min: '0', max: String(0xffffffff), step: '1' });
-    const random = el('button', { textContent: 'Случайный' });
+    const random = el('button', { textContent: 'Другая картина', title: 'Новый сид: та же настройка, другая стартовая картина' });
 
     seed.addEventListener('input', () => { this.draft.seed = Number(seed.value); this.refresh(); });
     random.addEventListener('click', () => {
@@ -635,39 +688,184 @@ export class Panel {
     return [
       this.mark(el('label', {}, this.caption('Форма чашки', 'Круглая или прямоугольная граница мира. Площадь одинакова; форма фиксируется при создании.'), shape), () => this.draft.shape !== this.current.shape),
       this.mark(el('label', {}, this.caption('Пропорции', 'Ширина к высоте, от 1:4 до 4:1. У круга всегда 1:1; изменение окна не меняет созданный мир.'), ratios, custom, el('span', { className: 'row' }, screen, monitor), size), () => this.draft.aspectRatio !== this.current.aspectRatio),
-      this.mark(el('label', {}, this.caption('Сид', 'Из него строится вся случайность мира: один сид — один и тот же мир.'), el('span', { className: 'row' }, seed, random)),
+      this.mark(el('label', {}, this.caption('Сид', 'Источник случая для стартовой картины: планировки, пятен, местности, первых событий недр. Дальше мир живёт сам и может разойтись.'), el('span', { className: 'row' }, seed, random)),
         () => this.draft.seed !== this.current.seed),
       el('div', { className: 'layout' },
-        this.caption('Планировка', 'Перегородки внутри чашки — одна из готовых планировок; какая, решает сид. Из перегородок получаются отсеки, коридоры и лагуны.', this.layoutLabel),
-        this.layoutPreview),
+        this.caption('Планировка', 'Перегородки внутри чашки — одна из готовых планировок; какая, решает сид. Из перегородок получаются отсеки, коридоры и лагуны — их видно в чаше.', this.layoutLabel)),
     ];
   }
 
-  private slider(spec: SliderSpec): HTMLElement {
-    const timed = spec.key === 'sunPeriod' || spec.key === 'quakeInterval';
-    const display = (v: number) => {
-      if (timed) return formatDuration(v);
-      if (spec.key === 'spotSize' || spec.key === 'viscosityZoneSize') return formatLength(v);
-      if (spec.key === 'backgroundLevel' || spec.key === 'illumination' || spec.key === 'sunRhythm') return formatPercent(v);
-      if (spec.key === 'lightDrift' || spec.key === 'terrainSpeed') return formatMultiplier(v);
-      if (spec.key === 'mineralStock') return `${formatNumber(gramsPerSquareMetre(v))} г/м²`;
-      return `${formatNumber(v)} усл. ед.`;
+  /** Положение ползунка (0…1000 у логарифмической шкалы) ↔ показываемое значение. */
+  private scale(spec: SliderSpec): { toInput: (v: number) => number; fromInput: (x: number) => number; attrs: { min: string; max: string; step: string } } {
+    if (!spec.log) return { toInput: (v) => v, fromInput: (x) => x, attrs: { min: String(spec.min), max: String(spec.max), step: String(spec.step ?? 1) } };
+    const k = Math.log(spec.max / spec.min);
+    return {
+      toInput: (v) => Math.round((1000 * Math.log(Math.max(spec.min, v) / spec.min)) / k),
+      fromInput: (x) => Math.min(spec.max, Math.max(spec.min, nice(spec.min * Math.exp((k * x) / 1000)))),
+      attrs: { min: '0', max: '1000', step: '1' },
     };
-    const inputValue = (v: number) => timed ? secondsFromSteps(v) : v;
-    const input = el('input', { type: 'range', min: String(inputValue(spec.min)), max: String(inputValue(spec.max)), step: String(inputValue(spec.step)) });
+  }
+
+  private slider(spec: SliderSpec): HTMLElement {
+    const view = spec.view ?? ((v: number) => v), store = spec.store ?? ((v: number) => v);
+    const sc = this.scale(spec);
+    const input = el('input', { type: 'range', ...sc.attrs });
     const value = el('span', { className: 'value' });
+    const toggle = spec.toggle ? el('input', { type: 'checkbox' }) : null;
+    // Последнее обычное значение — к нему возвращается снятый флажок.
+    let last = this.draft[spec.key] === spec.toggle?.value ? store(spec.min) : this.draft[spec.key];
+    const show = () => {
+      const special = toggle !== null && this.draft[spec.key] === spec.toggle!.value;
+      if (toggle) toggle.checked = special;
+      input.disabled = special;
+      if (!special) input.value = String(sc.toInput(view(this.draft[spec.key])));
+      value.textContent = special ? spec.toggle!.label : spec.format(view(this.draft[spec.key]));
+      input.setAttribute('aria-valuetext', value.textContent);
+    };
     input.addEventListener('input', () => {
-      this.draft[spec.key] = timed ? Math.round(stepsFromSeconds(Number(input.value))) : Number(input.value);
-      value.textContent = display(this.draft[spec.key]);
-      input.setAttribute('aria-valuetext', value.textContent);
-      this.refresh();
+      this.draft[spec.key] = last = store(sc.fromInput(Number(input.value)));
+      show(); this.refresh();
     });
-    this.inputs.push(() => {
-      input.value = String(inputValue(this.draft[spec.key]));
-      value.textContent = display(this.draft[spec.key]);
-      input.setAttribute('aria-valuetext', value.textContent);
+    toggle?.addEventListener('change', () => {
+      this.draft[spec.key] = toggle.checked ? spec.toggle!.value : last;
+      show(); this.refresh();
     });
-    return this.mark(el('label', {}, this.caption(spec.label, spec.hint, value), input), () => this.draft[spec.key] !== this.current[spec.key]);
+    this.inputs.push(show);
+    show();
+    const node = el('label', {}, this.caption(spec.label, spec.hint, value), input);
+    if (toggle) node.append(el('span', { className: 'check' }, toggle, spec.toggle!.label));
+    return this.mark(node, () => this.draft[spec.key] !== this.current[spec.key]);
+  }
+
+  /** Диапазон «от–до» одним ползунком: два бегунка не переходят друг через друга. */
+  private range(spec: Omit<SliderSpec, 'key' | 'toggle'> & { keys: [NumberKey, NumberKey]; formatRange?: (lo: number, hi: number) => string }): HTMLElement {
+    const [lo, hi] = spec.keys;
+    const sc = this.scale({ ...spec, key: lo });
+    const a = el('input', { type: 'range', ...sc.attrs, ariaLabel: `${spec.label}: от` });
+    const b = el('input', { type: 'range', ...sc.attrs, ariaLabel: `${spec.label}: до` });
+    const value = el('span', { className: 'value' });
+    const show = () => {
+      a.value = String(sc.toInput(this.draft[lo]));
+      b.value = String(sc.toInput(this.draft[hi]));
+      value.textContent = this.draft[lo] === this.draft[hi] ? spec.format(this.draft[lo]) : spec.formatRange ? spec.formatRange(this.draft[lo], this.draft[hi]) : `${spec.format(this.draft[lo])} — ${spec.format(this.draft[hi])}`;
+    };
+    a.addEventListener('input', () => {
+      if (Number(a.value) > Number(b.value)) a.value = b.value;
+      this.draft[lo] = sc.fromInput(Number(a.value));
+      show(); this.refresh();
+    });
+    b.addEventListener('input', () => {
+      if (Number(b.value) < Number(a.value)) b.value = a.value;
+      this.draft[hi] = sc.fromInput(Number(b.value));
+      show(); this.refresh();
+    });
+    this.inputs.push(show);
+    show();
+    return this.mark(el('label', {}, this.caption(spec.label, spec.hint, value), el('span', { className: 'dual' }, a, b)),
+      () => this.draft[lo] !== this.current[lo] || this.draft[hi] !== this.current[hi]);
+  }
+
+  /** Форма ритма солнца: три кнопки с графиком волны и ручка своей формы. */
+  private rhythmShape(): HTMLElement[] {
+    const shapes: [RhythmShape, string][] = [['wave', 'Волна'], ['daynight', 'День и ночь'], ['skewed', 'Несимметричная']];
+    const graph = (shape: RhythmShape) => {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('viewBox', '0 0 60 20');
+      svg.setAttribute('preserveAspectRatio', 'none');
+      svg.style.width = '100%';
+      svg.style.height = '18px';
+      svg.style.flex = 'none';
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      const pts: string[] = [];
+      for (let i = 0; i <= 60; i++) {
+        const u = i / 60, ph = u * Math.PI * 2;
+        let y = Math.sin(ph);
+        if (shape === 'daynight') y = Math.max(-1, Math.min(1, Math.sin(ph) / Math.sin(Math.PI * this.draft.rhythmTransition)));
+        if (shape === 'skewed') { const r = this.draft.rhythmRise; y = u < r ? -Math.cos((Math.PI * u) / r) : Math.cos((Math.PI * (u - r)) / (1 - r)); }
+        pts.push(`${i === 0 ? 'M' : 'L'}${i},${10 - y * 8}`);
+      }
+      path.setAttribute('d', pts.join(''));
+      svg.append(path);
+      return svg;
+    };
+    const buttons = shapes.map(([shape, label]) => {
+      const b = el('button', { type: 'button', className: 'shape', title: label });
+      b.addEventListener('click', () => { this.draft.rhythmShape = shape; sync(); this.refresh(); });
+      return { shape, label, b };
+    });
+    const transition = this.slider({ key: 'rhythmTransition', label: 'Переход', hint: 'Сколько от периода занимает переход между днём и ночью: меньше — резче смена, длиннее плато.', min: 0.02, max: 0.5, step: 0.01, format: (v) => formatPercent(v) });
+    const rise = this.slider({ key: 'rhythmRise', label: 'Рост', hint: 'Какая часть периода уходит на рост света; остальное — на спад.', min: 0.05, max: 0.95, step: 0.05, format: (v) => formatPercent(v) });
+    const sync = () => {
+      for (const { shape, label, b } of buttons) {
+        b.replaceChildren(graph(shape), el('span', { textContent: label }));
+        b.setAttribute('aria-pressed', String(this.draft.rhythmShape === shape));
+      }
+      // Ручки формы занимают одно место: ни одна не видна у волны, но место остаётся — панель не прыгает.
+      transition.classList.toggle('slot-off', this.draft.rhythmShape !== 'daynight');
+      rise.classList.toggle('slot-off', this.draft.rhythmShape !== 'skewed');
+    };
+    this.inputs.push(sync);
+    sync();
+    return [
+      this.mark(el('div', { className: 'field' }, this.caption('Форма ритма', 'Как свет нарастает и спадает за период: плавной волной, днём и ночью с плато или с разной длиной роста и спада.'), el('div', { className: 'shapes' }, ...buttons.map((x) => x.b))),
+        () => this.draft.rhythmShape !== this.current.rhythmShape),
+      el('div', { className: 'slot' }, transition, rise),
+    ];
+  }
+
+  /** Строка-следствие под ручками: пересчитывается при каждом изменении черновика. */
+  private consequence(text: () => string): HTMLElement {
+    const node = el('div', { className: 'note consequence' });
+    const update = () => { try { node.textContent = text(); } catch { node.textContent = ''; } };
+    this.consequences.push(update);
+    update();
+    return node;
+  }
+
+  /** Тонкие законы среды и света — свёрнуты, по умолчанию подобраны. */
+  private expertFields(): HTMLElement[] {
+    return [
+      el('div', { className: 'expert-note', textContent: 'Значения по умолчанию подобраны — меняйте, если знаете, зачем.' }),
+      this.slider({ key: 'driftResponse', label: 'Отклик среды на свет', hint: 'Насколько сильно среда течёт от разницы света между пятном и тенью: ×1 — обычно, ×2 — течения вдвое сильнее при том же свете.', min: 0.1, max: 5, log: true, format: (v) => `×${formatNumber(v)}` }),
+      this.slider({ key: 'resistanceShallows', label: 'Сопротивление отмели', hint: 'Во сколько раз отмель хуже воды пропускает течение и минерал (вода — 1).', min: 1, max: 30, log: true, format: (v) => `×${formatNumber(v)}` }),
+      this.slider({ key: 'resistanceLand', label: 'Сопротивление суши', hint: 'Во сколько раз суша хуже воды пропускает течение и минерал (вода — 1). Больше — острова почти как стены.', min: 1, max: 100, log: true, format: (v) => `×${formatNumber(v)}` }),
+      this.slider({ key: 'turbidityLoss', label: 'Мутность', hint: 'Сколько света гасит растворённый минерал: доля света, теряемая при 1000 г/м² раствора.', min: 0, max: 0.9, step: 0.01, format: (v) => `${formatPercent(v)} на 1000 г/м²` }),
+      this.slider({ key: 'spotWobble', label: 'Неровность края пятна', hint: 'Насколько край пятна отходит от круга. 0 — круглые пятна.', min: 0, max: 0.35, step: 0.01, format: (v) => formatPercent(v) }),
+      this.slider({ key: 'spotBreath', label: 'Дыхание края пятна', hint: 'За сколько времени мира форма края проходит полный цикл; площадь пятна при этом не меняется.', min: 0.5, max: 72, log: true, format: (v) => hoursText(v) }),
+    ];
+  }
+
+  private lightFields(sub: (text: string) => HTMLElement): HTMLElement[] {
+    return [
+      sub('Яркость'),
+      this.slider({ key: 'lightShadow', label: 'Свет в тени', hint: 'Сколько света падает на место вне пятен, лм/см².', min: 0, max: 200, step: 1, format: (v) => `${formatNumber(v)} лм/см²` }),
+      this.slider({ key: 'lightExtra', label: 'Пятно ярче тени на', hint: 'Добавка света в пятне сверх тени, лм/см²: свет в пятне — тень плюс добавка. От этой разницы зависит сила течений: больше — сильнее течения.', min: 0, max: 300, step: 5, format: (v) => `+${formatNumber(v)} лм/см²` }),
+      this.consequence(() => `В пятне ${formatNumber(this.draft.lightShadow + this.draft.lightExtra)} лм/см², в тени ${formatNumber(this.draft.lightShadow)}.`),
+      sub('Пятна'),
+      this.slider({ key: 'spotCount', label: 'Число пятен', hint: 'Сколько пятен света в мире. Пятна плывут общим дрейфом и проходят друг сквозь друга; где перекрываются — светлее.', min: 0, max: 48, step: 1, format: (v) => `${v} шт.` }),
+      this.range({ keys: ['spotAreaMin', 'spotAreaMax'], label: 'Площадь пятна', hint: 'Самое маленькое и самое большое пятно, см²; размер каждого — случайный в диапазоне. Вся чаша — 19 200 см².', min: 25, max: DISH_CM2, log: true, format: (v) => `${formatNumber(v)} см²`, formatRange: (a, b) => `${formatNumber(a)}–${formatNumber(b)} см²` }),
+      this.consequence(() => {
+        const map = createLightMap(this.draft);
+        const lit = dishCoverage(map, map.width, map.height, 0, 16);
+        return `Под пятнами ≈ ${Math.round(lit * 100)}% чаши · пятно ${formatNumber(round1((100 * this.draft.spotAreaMin) / DISH_CM2))}–${formatNumber(round1((100 * this.draft.spotAreaMax) / DISH_CM2))}% чаши`;
+      }),
+      sub('Движение'),
+      this.slider({ key: 'driftCross', label: 'Пятна пересекают чашу', hint: 'Дрейф: за сколько времени мира пятна пересекают чашу. Все плывут вместе, в одну сторону.', min: 6, max: 1440, log: true, format: (v) => `за ${hoursText(v)}`, toggle: { label: 'свет стоит', value: 0 } }),
+      this.slider({ key: 'driftTurn', label: 'Смена направления', hint: 'В среднем раз в сколько времени дрейф поворачивает в случайную сторону; поворот плавный, за час.', min: 1, max: 240, log: true, format: (v) => `раз в ${hoursText(v)}`, toggle: { label: 'не поворачивает', value: 0 } }),
+      this.consequence(() => this.draft.driftCross > 0 ? `Просмотр: ×1000 — ${hoursText(this.draft.driftCross / 1000)}, ×10000 — ${hoursText(this.draft.driftCross / 10000)}` : 'Пятна стоят на месте'),
+    ];
+  }
+
+  private rhythmFields(): HTMLElement[] {
+    return [
+      this.slider({ key: 'sunRhythm', label: 'Размах', hint: 'Насколько свет отходит от среднего: от (1 − размах) до (1 + размах). 0 — ровное солнце. Меняется свет и в пятне, и в тени, а с ним сила течений.', min: 0, max: 0.9, step: 0.05, format: (v) => formatPercent(v) }),
+      this.slider({ key: 'sunPeriod', label: 'Период', hint: 'Длительность полного цикла: от яркого к тусклому и обратно.', min: 0.5, max: 240, log: true, view: hoursOf, store: stepsOf, format: (v) => hoursText(v) }),
+      ...this.rhythmShape(),
+      this.consequence(() => {
+        const spot = this.draft.lightShadow + this.draft.lightExtra, a = this.draft.sunRhythm;
+        return a > 0 ? `Свет в пятне ходит от ${formatNumber(spot * (1 - a))} до ${formatNumber(spot * (1 + a))} лм/см².` : 'Солнце ровное.';
+      }),
+    ];
   }
 
   private sharesRows(): HTMLElement[] {
@@ -826,36 +1024,16 @@ export class Panel {
     tip.replaceChildren(...lines.map((l, i) => el('div', {}, i === 0 ? el('b', { textContent: l }) : l)));
   }
 
-  /** Схема планировки, которую даст сид из черновика. */
+  /** Какая планировка достанется черновику. */
   private showLayout(): void {
     const seed = this.draft.seed;
-    const svg = this.layoutPreview;
-    const ratio = this.draft.aspectRatio;
-    if (!Number.isFinite(ratio) || ratio < 0.25 || ratio > 4) { svg.replaceChildren(); this.layoutLabel.textContent = '—'; return; }
-    const dish = dishOf(this.draft);
-    const W = 160, H = 160 * dish.height / dish.width;
-    svg.setAttribute('viewBox', `-3 -3 ${W + 6} ${H + 6}`);
-    if (!Number.isInteger(seed) || seed < 0 || seed > 0xffffffff) {
-      this.layoutLabel.textContent = '—';
-      svg.replaceChildren();
-      return;
-    }
-    const preset = layoutForSeed(seed);
-    this.layoutLabel.textContent = `${preset.number} из ${LAYOUT_PRESETS.length}`;
-    const ns = 'http://www.w3.org/2000/svg';
-    const make = (tag: string, attrs: Record<string, string | number>) => {
-      const node = document.createElementNS(ns, tag);
-      for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
-      return node;
-    };
-    svg.replaceChildren(
-      this.draft.shape === 'circle' ? make('circle', { cx: W / 2, cy: H / 2, r: W / 2, class: 'dish' }) : make('rect', { x: 0, y: 0, width: W, height: H, class: 'dish' }),
-      ...layoutPartitions(preset, dish).map((part) => make('polyline', { points: part.points.map(([x, y]) => `${x * W / dish.width},${y * H / dish.height}`).join(' '), class: 'wall' })),
-    );
+    this.layoutLabel.textContent = Number.isInteger(seed) && seed >= 0 && seed <= 0xffffffff ? `${layoutForSeed(seed).number} из ${LAYOUT_PRESETS.length}` : '—';
   }
 
-  private refresh(): void {
+  private refresh(rebuild = true): void {
     this.showLayout();
+    if (rebuild) this.scheduleDraft();
+    for (const update of this.consequences) update();
     const s = this.draft.viscosityShares;
     s.water = Math.round((1 - s.land - s.shallows) * 100) / 100;
     this.waterValue.textContent = formatPercent(s.water);
@@ -868,8 +1046,7 @@ export class Panel {
       m.node.classList.toggle('changed', c);
       if (c) changed++;
     }
-    this.dirtyNote.textContent = changed ? `Изменено: ${changed} — применится к новому миру.` : '';
-    this.revertButton.disabled = changed === 0;
+    this.dirtyNote.textContent = changed ? `Отличается от умолчаний: ${changed}.` : 'Всё по умолчанию.';
     this.defaultsButton.disabled = JSON.stringify(this.draft) === JSON.stringify(makeParams({ seed: this.draft.seed }));
   }
 }

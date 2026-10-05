@@ -531,11 +531,11 @@ export class FieldRenderer implements GlowSink {
     const p = this.lightProgram;
     gl.useProgram(p.program);
     this.common(p, frame.world.dish);
-    gl.uniform2f(p.uniform('u_lightOffset'), light.offset[0], light.offset[1]);
-    gl.uniform1f(p.uniform('u_lightScale'), light.scale);
-    gl.uniform1f(p.uniform('u_lightTime'), light.time);
-    gl.uniform1f(p.uniform('u_lightThreshold'), light.threshold);
-    gl.uniform1f(p.uniform('u_lightEdge'), light.edge);
+    gl.uniform2f(p.uniform('u_lightPlane'), light.plane[0], light.plane[1]);
+    gl.uniform1i(p.uniform('u_spotCount'), light.count);
+    gl.uniform4fv(p.uniform('u_spots'), light.spots);
+    gl.uniform4fv(p.uniform('u_spotAmps'), light.amps);
+    gl.uniform4fv(p.uniform('u_spotPhases'), light.phases);
     gl.uniform2f(p.uniform('u_maskSize'), width, height);
     gl.uniform1f(p.uniform('u_maskScale'), this.canvas.width / width);
     gl.bindVertexArray(this.quadVao);

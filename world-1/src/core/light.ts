@@ -1,200 +1,267 @@
 import { finishCalculation, type Calculation } from './task.ts';
 import { dishOf } from './dish.ts';
 /**
- * Свет (спецификация, раздел «Свет»): общее световое поле, запертое в чашке.
+ * Свет (спецификация, раздел «Свет»): отдельные пятна на фоне тени.
  *
- * Пятна — где поле шума выше порога. Координаты поля искажает другое, медленно
- * меняющееся поле (domain warping): очертания перетекают, сливаются и
- * расходятся, каждый участок смещается в свою сторону; общего кружения нет,
- * всё поле очень медленно сносится в одну сторону. Порог — по распределению
- * в самой чашке: формы крупные и в чашку их попадает немного, поэтому порог
- * подбирается по чашке (thresholdAt) так, чтобы доля её площади под пятнами
- * была равна освещённости, — это тоже формула от шага (пересчёт раз в
- * THRESHOLD_STEP шагов, между ними — плавно). Крупность форм — «Размер пятен» × LIGHT_FORM_SCALE, темп — «Дрейф света».
+ * Пятно — объект со своим местом, площадью и формой края; площадь постоянна,
+ * край медленно «дышит». Все пятна плывут общим дрейфом по замкнутой плоскости
+ * размером с чашу (ушедшее за край входит с другой стороны) и проходят друг
+ * сквозь друга: их вклады складываются. Направление дрейфа время от времени
+ * меняется на случайное, поворот плавный. Свет места — свет в тени плюс вклад
+ * пятен, в лм/см², умноженный на ритм солнца.
  *
- * Всё — формула от номера шага: свет на любом шаге считается сразу. Шейдер
- * показа считает то же поле тем же шумом (LIGHT_FIELD_GLSL) — модель и картинка совпадают.
+ * Пятна, сдвиг дрейфа и фаза ритма — состояние мира: advanceLight двигает их
+ * по шагам (живая смена законов продолжает от текущего, без скачков), запросы
+ * на шаг t чуть впереди состояния продолжают дрейф и ритм от него. Шейдер
+ * показа считает то же поле (LIGHT_FIELD_GLSL) по тем же пятнам.
  */
-import { LIGHT_EDGE, LIGHT_FORM_SCALE, LIGHT_TEMPO, LIGHT_WARP } from './constants.ts';
-import { deriveSeed } from './prng.ts';
-import type { WorldParams } from './params.ts';
+import {
+  DRIFT_TURN_STEPS, LIGHT_REFERENCE, MAX_SPOTS, SPOT_EDGE, SPOT_REACH,
+} from './constants.ts';
+import { deriveSeed, hash3 } from './prng.ts';
+import type { RhythmShape, WorldParams } from './params.ts';
+import { stepsFromSeconds } from './units.ts';
 
 const TAU = Math.PI * 2;
+/** Гармоники края пятна: 2-я…5-я. */
+const HARMONICS = 4;
+
+/** Пятно света: центр, радиус круга той же площади (мм), форма края. */
+export interface Spot {
+  x: number;
+  y: number;
+  r: number;
+  /** Размах гармоник края (доля радиуса), начальные фазы и темп «дыхания» каждой. */
+  amps: number[];
+  phases: number[];
+  rates: number[];
+}
+
+/** Законы света — из параметров; меняются в живом мире. */
+export interface LightLaws {
+  /** Свет в пятне и в тени, лм/см². */
+  spot: number;
+  shadow: number;
+  rhythmAmp: number;
+  /** Период ритма, шагов. */
+  rhythmPeriod: number;
+  rhythmShape: RhythmShape;
+  rhythmTransition: number;
+  rhythmRise: number;
+  /** Скорость дрейфа, мм за шаг (0 — свет стоит); средний промежуток смены направления, шагов (0 — не меняется). */
+  speed: number;
+  turnEvery: number;
+  /** Полный цикл «дыхания» края пятна, шагов. */
+  breath: number;
+}
 
 export interface LightMap {
   readonly width: number;
   readonly height: number;
   readonly circle: boolean;
-  /** Сдвиг поля по сиду (единицы шума) и крупность форм (единиц мира на единицу шума). */
-  readonly offsetX: number;
-  readonly offsetY: number;
-  readonly scale: number;
-  /** Темп перетекания: единиц времени поля за шаг (0 — свет стоит). */
-  readonly pace: number;
-  /** Освещённость — доля чашки под пятнами. */
-  readonly share: number;
-  readonly sun: number;
-  readonly background: number;
-  /** Ритм солнца: размах, период (шагов) и фаза из сида. */
-  readonly rhythm: { readonly amp: number; readonly period: number; readonly phase: number };
+  readonly seed: number;
+  laws: LightLaws;
+  spots: Spot[];
+  /** Шаг, к которому приведено состояние. */
+  step: number;
+  /** Накопленный сдвиг дрейфа, мм. */
+  offsetX: number;
+  offsetY: number;
+  /** Направление дрейфа сейчас; идущий поворот (откуда, куда, начало; turnStart < 0 — не поворачивает). */
+  angle: number;
+  turnFrom: number;
+  turnTo: number;
+  turnStart: number;
+  /** Когда начнётся следующий поворот и сколько их было. */
+  nextTurn: number;
+  turns: number;
+  /** Фаза ритма солнца, радиан. */
+  rhythmPhase: number;
 }
 
-/* Шум — тот же, что в LIGHT_FIELD_GLSL: целочисленный хеш, значения в узлах, сглаживание пятой степени. */
-function mixh(x: number): number {
-  x = (x + 0x9e3779b9) >>> 0;
-  x = Math.imul(x ^ (x >>> 16), 0x85ebca6b) >>> 0;
-  x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35) >>> 0;
-  return (x ^ (x >>> 16)) >>> 0;
-}
-function h2(x: number, y: number, s: number): number {
-  return mixh((Math.imul(x, 0x27d4eb2d) ^ mixh((Math.imul(y, 0x165667b1) ^ s) >>> 0)) >>> 0) / 4294967296;
-}
-const fade = (f: number) => f * f * f * (f * (f * 6 - 15) + 10);
-function vnoise(x: number, y: number, s: number): number {
-  const i = Math.floor(x), j = Math.floor(y), fx = fade(x - i), fy = fade(y - j);
-  const a = h2(i, j, s), b = h2(i + 1, j, s), c = h2(i, j + 1, s), d = h2(i + 1, j + 1, s);
-  return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
-}
-function fbm(x: number, y: number, s: number): number {
-  return 0.55 * vnoise(x, y, s) + 0.3 * vnoise(x * 2.03 + 17.1, y * 2.03 + 17.1, s + 1) + 0.15 * vnoise(x * 4.1 - 9.3, y * 4.1 - 9.3, s + 2);
+const unit = (seed: number, a: number, b: number) => hash3(seed, a, b) / 4294967296;
+
+export function lightLaws(params: WorldParams, width: number): LightLaws {
+  const hours = (h: number) => stepsFromSeconds(h * 3600);
+  return {
+    spot: params.lightShadow + params.lightExtra,
+    shadow: params.lightShadow,
+    rhythmAmp: params.sunRhythm,
+    rhythmPeriod: params.sunPeriod,
+    rhythmShape: params.rhythmShape,
+    rhythmTransition: params.rhythmTransition,
+    rhythmRise: params.rhythmRise,
+    speed: params.driftCross > 0 ? width / hours(params.driftCross) : 0,
+    turnEvery: params.driftTurn > 0 ? hours(params.driftTurn) : 0,
+    breath: hours(params.spotBreath),
+  };
 }
 
-/** Смещение координат поля в точке шума (x, y) во время s: искажение плюс общий медленный снос. */
-function displacement(x: number, y: number, s: number, out: [number, number]): void {
-  const qx = fbm(x * 0.7 + s * 0.6, y * 0.7 - s * 0.35, 20) - 0.5;
-  const qy = fbm(x * 0.7 + 5.2 - s * 0.45, y * 0.7 + 1.3 + s * 0.55, 30) - 0.5;
-  out[0] = LIGHT_WARP * qx - s * 0.2;
-  out[1] = LIGHT_WARP * qy + s * 0.15;
-}
-
-const scratch: [number, number] = [0, 0];
-
-/** Значение поля в точке мира (x, y) во время поля s. */
-function fieldAt(map: LightMap, x: number, y: number, s: number): number {
-  const px = x / map.scale + map.offsetX, py = y / map.scale + map.offsetY;
-  displacement(px, py, s, scratch);
-  return fbm(px + scratch[0], py + scratch[1], 60);
-}
-
-/** Свет пятен по значению поля: 0 — фон, 1 — пятно; край — плавный. */
-function lightOfField(threshold: number, f: number): number {
-  const lo = threshold - LIGHT_EDGE, hi = threshold + LIGHT_EDGE;
-  const u = Math.min(1, Math.max(0, (f - lo) / (hi - lo)));
-  return u * u * (3 - 2 * u);
-}
-
-/** Порог пересчитывается раз в столько шагов поля; сетка выборки по чашке. */
-const THRESHOLD_STEP = 4000;
-const SAMPLE_COLS = 48;
-const SAMPLE_ROWS = 36;
-const thresholds = new WeakMap<LightMap, Map<number, number>>();
-
-/** Порог, при котором под пятнами доля освещённости чашки, в узле времени `key` (× THRESHOLD_STEP шагов). */
-function thresholdKey(map: LightMap, key: number): number {
-  let cache = thresholds.get(map);
-  if (!cache) { cache = new Map(); thresholds.set(map, cache); }
-  const hit = cache.get(key);
-  if (hit !== undefined) return hit;
-  const s = key * THRESHOLD_STEP * map.pace;
-  const values: number[] = [];
-  for (let j = 0; j < SAMPLE_ROWS; j++) for (let i = 0; i < SAMPLE_COLS; i++) {
-    const x = ((i + 0.5) / SAMPLE_COLS) * map.width, y = ((j + 0.5) / SAMPLE_ROWS) * map.height;
-    if (map.circle && (x - map.width / 2) ** 2 + (y - map.height / 2) ** 2 > (map.width / 2) ** 2) continue;
-    values.push(fieldAt(map, x, y, s));
+/** Пятна генератора: число и площадь (см²) — из параметров, места и формы — из сида. */
+function createSpots(params: WorldParams, width: number, height: number): Spot[] {
+  const s = deriveSeed(params.seed, 'spots');
+  const spots: Spot[] = [];
+  for (let n = 0; n < params.spotCount; n++) {
+    const area = (params.spotAreaMin + (params.spotAreaMax - params.spotAreaMin) * unit(s, n, 0)) * 100; // см² → мм²
+    const amps: number[] = [], phases: number[] = [], rates: number[] = [];
+    for (let h = 0; h < HARMONICS; h++) {
+      amps.push(((0.4 + 0.6 * unit(s, n, 10 + h)) / (h + 2)) * params.spotWobble);
+      phases.push(unit(s, n, 20 + h) * TAU);
+      rates.push((unit(s, n, 30 + h) < 0.5 ? -1 : 1) * (0.5 + unit(s, n, 40 + h)));
+    }
+    spots.push({ x: unit(s, n, 1) * width, y: unit(s, n, 2) * height, r: Math.sqrt(area / Math.PI), amps, phases, rates });
   }
-  values.sort((a, b) => a - b);
-  const at = Math.min(values.length - 1, Math.max(0, Math.floor((1 - map.share) * values.length)));
-  const value = values[at];
-  if (cache.size > 64) cache.delete(cache.keys().next().value!);
-  cache.set(key, value);
-  return value;
+  return spots;
 }
 
-/** Порог в шаге t — плавно между узлами времени. */
-export function thresholdAt(map: LightMap, t: number): number {
-  if (map.pace === 0) return thresholdKey(map, 0);
-  const u = t / THRESHOLD_STEP, k = Math.floor(u);
-  const a = thresholdKey(map, k), b = thresholdKey(map, k + 1);
-  return a + (b - a) * (u - k);
+/** Промежуток до следующего поворота — случайный, в среднем turnEvery. */
+function turnGap(map: LightMap): number {
+  const u = unit(deriveSeed(map.seed, 'drift-turns'), map.turns, 0);
+  return Math.max(1, Math.round(-Math.log(1 - u * 0.999) * map.laws.turnEvery));
 }
 
 export function createLightMap(params: WorldParams): LightMap {
   const { width, height, shape } = dishOf(params);
-  const h = deriveSeed(params.seed, 'light');
-  return {
-    width, height, circle: shape === 'circle',
-    // Сдвиг по сиду — большой и положительный: координаты шума не уходят в минус.
-    offsetX: 500 + (h % 100000) / 100, offsetY: 500 + (Math.floor(h / 100000) % 100000) / 100,
-    scale: params.spotSize * LIGHT_FORM_SCALE,
-    pace: params.lightDrift / LIGHT_TEMPO,
-    share: params.illumination,
-    sun: params.sun, background: params.backgroundLevel,
-    rhythm: { amp: params.sunRhythm, period: params.sunPeriod, phase: (deriveSeed(params.seed, 'sun') / 4294967296) * TAU },
+  const seed = params.seed;
+  const angle = unit(deriveSeed(seed, 'drift'), 0, 0) * TAU;
+  const map: LightMap = {
+    width, height, circle: shape === 'circle', seed,
+    laws: lightLaws(params, width),
+    spots: createSpots(params, width, height),
+    step: 0, offsetX: 0, offsetY: 0,
+    angle, turnFrom: angle, turnTo: angle, turnStart: -1, nextTurn: 0, turns: 0,
+    rhythmPhase: unit(deriveSeed(seed, 'sun'), 0, 0) * TAU,
   };
+  map.nextTurn = map.laws.turnEvery > 0 ? turnGap(map) : Number.POSITIVE_INFINITY;
+  return map;
 }
 
-/** Время поля в шаге t. */
-export function lightTime(map: LightMap, t: number): number {
-  return t * map.pace;
+/** Новые законы света в живом мире: действуют с текущего шага, состояние продолжается. */
+export function setLightLaws(map: LightMap, params: WorldParams): void {
+  const had = map.laws.turnEvery;
+  map.laws = lightLaws(params, map.width);
+  if (map.laws.turnEvery !== had) map.nextTurn = map.laws.turnEvery > 0 ? map.step + turnGap(map) : Number.POSITIVE_INFINITY;
 }
 
-/** Интенсивность пятен в точке чашки (0 — фон, 1 — пятно). */
-export function spotIntensityAt(map: LightMap, x: number, y: number, t: number): number {
-  return lightOfField(thresholdAt(map, t), fieldAt(map, x, y, lightTime(map, t)));
+const smooth = (u: number) => u * u * (3 - 2 * u);
+const wrapAngle = (a: number) => a - TAU * Math.round(a / TAU);
+
+/** Довести состояние света до шага `step`: дрейф, повороты, фаза ритма. */
+export function advanceLight(map: LightMap, step: number): void {
+  const L = map.laws;
+  const dPhase = TAU / L.rhythmPeriod;
+  while (map.step < step) {
+    const t = ++map.step;
+    if (t >= map.nextTurn) {
+      map.turnFrom = map.angle;
+      map.turnTo = unit(deriveSeed(map.seed, 'drift-turns'), map.turns, 1) * TAU;
+      map.turnStart = t;
+      map.turns++;
+      map.nextTurn = L.turnEvery > 0 ? t + turnGap(map) : Number.POSITIVE_INFINITY;
+    }
+    if (map.turnStart >= 0) {
+      const u = Math.min(1, (t - map.turnStart) / DRIFT_TURN_STEPS);
+      map.angle = map.turnFrom + wrapAngle(map.turnTo - map.turnFrom) * smooth(u);
+      if (u >= 1) map.turnStart = -1;
+    }
+    map.offsetX += L.speed * Math.cos(map.angle);
+    map.offsetY += L.speed * Math.sin(map.angle);
+    map.rhythmPhase = (map.rhythmPhase + dPhase) % TAU;
+  }
 }
 
-/** Интенсивность пятен сразу во многих точках (x, y подряд в `points`). */
-export function spotIntensityAtPoints(map: LightMap, points: Float64Array, t: number, out: Float32Array): Float32Array {
-  const s = lightTime(map, t), th = thresholdAt(map, t);
-  for (let i = 0; i < out.length; i++) out[i] = lightOfField(th, fieldAt(map, points[2 * i], points[2 * i + 1], s));
-  return out;
+/** Сдвиг дрейфа в шаге t: от состояния, впереди — продолжая нынешнее направление. */
+function offsetAt(map: LightMap, t: number): [number, number] {
+  const dt = t - map.step;
+  return [map.offsetX + map.laws.speed * Math.cos(map.angle) * dt, map.offsetY + map.laws.speed * Math.sin(map.angle) * dt];
+}
+
+/** Форма волны ритма: −1…1 по фазе. */
+function rhythmWave(L: LightLaws, phase: number): number {
+  if (L.rhythmShape === 'daynight') {
+    // Плато дня и ночи, переход занимает долю периода rhythmTransition.
+    const edge = Math.sin(Math.PI * Math.min(0.5, Math.max(0.01, L.rhythmTransition)));
+    return Math.max(-1, Math.min(1, Math.sin(phase) / edge));
+  }
+  if (L.rhythmShape === 'skewed') {
+    // Рост занимает долю периода rhythmRise, спад — остальное.
+    const u = ((phase / TAU) % 1 + 1) % 1, rise = Math.min(0.95, Math.max(0.05, L.rhythmRise));
+    return u < rise ? -Math.cos((Math.PI * u) / rise) : Math.cos((Math.PI * (u - rise)) / (1 - rise));
+  }
+  return Math.sin(phase);
+}
+
+/** Множитель ритма солнца в шаге t: вокруг 1, от (1 − размах) до (1 + размах). */
+export function sunRhythmAt(map: LightMap, t: number): number {
+  const L = map.laws;
+  return 1 + L.rhythmAmp * rhythmWave(L, map.rhythmPhase + (TAU * (t - map.step)) / L.rhythmPeriod);
 }
 
 /**
- * Скорость перетекания в точке, единиц мира за шаг: куда смещаются очертания
- * поля — против изменения смещения координат.
+ * Сила солнца в шаге t — свет в пятне с ритмом относительно обычного
+ * (LIGHT_REFERENCE): мерило для течений, размыва и показа.
  */
-function flowVelocity(map: LightMap, x: number, y: number, s: number, out: [number, number]): void {
-  if (map.pace === 0) { out[0] = 0; out[1] = 0; return; }
-  const px = x / map.scale + map.offsetX, py = y / map.scale + map.offsetY;
-  const ds = 0.01;
-  displacement(px, py, s + ds, scratch);
-  const ax = scratch[0], ay = scratch[1];
-  displacement(px, py, s - ds, scratch);
-  const k = -map.scale * map.pace / (2 * ds);
-  out[0] = (ax - scratch[0]) * k;
-  out[1] = (ay - scratch[1]) * k;
-}
-
-/** Множитель ритма солнца в шаге t: плавная волна вокруг 1. */
-export function sunRhythmAt(map: LightMap, t: number): number {
-  const r = map.rhythm;
-  return 1 + r.amp * Math.sin((TAU * t) / r.period + r.phase);
-}
-
-/** Сила солнца в шаге t: параметр «Солнце» × ритм. */
 export function sunAt(map: LightMap, t: number): number {
-  return map.sun * sunRhythmAt(map, t);
+  return (map.laws.spot / LIGHT_REFERENCE) * sunRhythmAt(map, t);
 }
 
-/** Свет в точке чашки: фон, свет пятна или переход между ними — при солнце шага t. */
+/** Свет в тени как доля света в пятне. */
+export function lightBackground(map: LightMap): number {
+  return map.laws.spot > 0 ? Math.min(1, map.laws.shadow / map.laws.spot) : 1;
+}
+
+/** Свет места по вкладу пятен (0 — тень, 1 — пятно, больше — перекрытие), в долях обычного света. */
 export function lightFromIntensity(map: LightMap, intensity: number, t: number): number {
-  return sunAt(map, t) * (map.background + (1 - map.background) * intensity);
+  const bg = lightBackground(map);
+  return sunAt(map, t) * (bg + (1 - bg) * intensity);
+}
+
+/** Вклад одного пятна в точке на расстоянии (dx, dy) от центра, в шаге t. */
+function spotProfile(s: Spot, dx: number, dy: number, t: number, breath: number): number {
+  const d = Math.hypot(dx, dy);
+  const e = SPOT_EDGE * s.r;
+  if (d > s.r * SPOT_REACH + e) return 0;
+  const theta = Math.atan2(dy, dx), w = (TAU * t) / breath;
+  let rr = 1, sq = 0;
+  for (let h = 0; h < HARMONICS; h++) {
+    rr += s.amps[h] * Math.cos((h + 2) * theta + s.phases[h] + s.rates[h] * w);
+    sq += s.amps[h] * s.amps[h];
+  }
+  // Нормировка держит площадь пятна постоянной при любой форме края.
+  const edge = (s.r * rr) / Math.sqrt(1 + sq / 2);
+  const u = (edge + e / 2 - d) / e;
+  return u <= 0 ? 0 : u >= 1 ? 1 : smooth(u);
+}
+
+const wrap = (d: number, L: number) => d - L * Math.round(d / L);
+
+/** Вклад пятен в точке чашки (0 — тень, 1 — пятно; в перекрытии больше 1). */
+export function spotIntensityAt(map: LightMap, x: number, y: number, t: number): number {
+  const [ox, oy] = offsetAt(map, t);
+  let sum = 0;
+  for (const s of map.spots) sum += spotProfile(s, wrap(x - s.x - ox, map.width), wrap(y - s.y - oy, map.height), t, map.laws.breath);
+  return sum;
+}
+
+/** Вклад пятен сразу во многих точках (x, y подряд в `points`). */
+export function spotIntensityAtPoints(map: LightMap, points: Float64Array, t: number, out: Float32Array): Float32Array {
+  for (let i = 0; i < out.length; i++) out[i] = spotIntensityAt(map, points[2 * i], points[2 * i + 1], t);
+  return out;
 }
 
 export function lightAt(map: LightMap, x: number, y: number, t: number): number {
   return lightFromIntensity(map, spotIntensityAt(map, x, y, t), t);
 }
 
-/** Скорость перетекания света в клетках (для увлечения). */
+/** Скорость дрейфа пятен в клетках (для увлечения среды). */
 export interface SpotVelocity {
   readonly vx: Float32Array;
   readonly vy: Float32Array;
 }
 
 /**
- * Интенсивность пятен на сетке чашки: `cols × rows` ячеек размером `cell`
- * (по центрам). С `velocity` — ещё и скорость перетекания там, где светло.
+ * Вклад пятен на сетке чашки: `cols × rows` ячеек размером `cell` (по центрам).
+ * С `velocity` — ещё и скорость дрейфа там, где светло.
  */
 export function rasterizeSpotIntensity(map: LightMap, t: number, cols: number, rows: number, cell: number, out?: Float32Array, velocity?: SpotVelocity): Float32Array {
   return finishCalculation(rasterizeSpotIntensityTask(map, t, cols, rows, cell, out, velocity));
@@ -202,21 +269,40 @@ export function rasterizeSpotIntensity(map: LightMap, t: number, cols: number, r
 
 export function* rasterizeSpotIntensityTask(map: LightMap, t: number, cols: number, rows: number, cell: number, out?: Float32Array, velocity?: SpotVelocity): Calculation<Float32Array> {
   const field = out && out.length === cols * rows ? out : new Float32Array(cols * rows);
-  const s = lightTime(map, t), th = thresholdAt(map, t);
-  const v: [number, number] = [0, 0];
-  for (let j = 0; j < rows; j++) {
-    if ((j & 3) === 0) yield;
-    for (let i = 0; i < cols; i++) {
-      const x = (i + 0.5) * cell, y = (j + 0.5) * cell, k = j * cols + i;
-      const light = lightOfField(th, fieldAt(map, x, y, s));
-      field[k] = light;
-      if (!velocity) continue;
-      if (light > 0) flowVelocity(map, x, y, s, v); else { v[0] = 0; v[1] = 0; }
-      velocity.vx[k] = v[0]; velocity.vy[k] = v[1];
+  field.fill(0);
+  const [ox, oy] = offsetAt(map, t);
+  const { width: W, height: H } = map;
+  for (const s of map.spots) {
+    yield;
+    // Обходим только рамку пятна; на замкнутой плоскости рамка может переходить край.
+    const reach = s.r * SPOT_REACH + SPOT_EDGE * s.r;
+    const cx = ((s.x + ox) % W + W) % W, cy = ((s.y + oy) % H + H) % H;
+    const i0 = Math.floor((cx - reach) / cell), i1 = Math.ceil((cx + reach) / cell);
+    const j0 = Math.floor((cy - reach) / cell), j1 = Math.ceil((cy + reach) / cell);
+    const seen = i1 - i0 >= cols || j1 - j0 >= rows ? new Uint8Array(cols * rows) : null;
+    for (let j = j0; j <= j1; j++) {
+      const py = (j + 0.5) * cell, jj = ((Math.floor(wrapCoord(py, H) / cell)) % rows + rows) % rows;
+      for (let i = i0; i <= i1; i++) {
+        const px = (i + 0.5) * cell, ii = ((Math.floor(wrapCoord(px, W) / cell)) % cols + cols) % cols;
+        const k = jj * cols + ii;
+        if (seen) { if (seen[k]) continue; seen[k] = 1; }
+        const v = spotProfile(s, wrap(px - cx, W), wrap(py - cy, H), t, map.laws.breath);
+        if (v > 0) field[k] += v;
+      }
+    }
+  }
+  if (velocity) {
+    const sx = map.laws.speed * Math.cos(map.angle), sy = map.laws.speed * Math.sin(map.angle);
+    for (let k = 0; k < field.length; k++) {
+      const lit = field[k] > 0;
+      velocity.vx[k] = lit ? sx : 0;
+      velocity.vy[k] = lit ? sy : 0;
     }
   }
   return field;
 }
+
+const wrapCoord = (v: number, L: number) => ((v % L) + L) % L;
 
 /** Доля чашки под пятнами в шаге t — оценка по сетке. */
 export function dishCoverage(map: LightMap, width: number, height: number, t: number, cell = 8): number {
@@ -233,47 +319,59 @@ export function dishCoverage(map: LightMap, width: number, height: number, t: nu
   return lit / inside;
 }
 
-/** Средняя скорость перетекания там, где светло (для подписи в сводке), единиц за шаг. */
-export function meanSpotSpeed(map: LightMap, t: number): number {
-  const s = lightTime(map, t), th = thresholdAt(map, t);
-  const v: [number, number] = [0, 0];
-  let sum = 0, weight = 0;
-  for (let j = 0; j < 12; j++) for (let i = 0; i < 16; i++) {
-    const x = ((i + 0.5) / 16) * map.width, y = ((j + 0.5) / 12) * map.height;
-    const light = lightOfField(th, fieldAt(map, x, y, s));
-    if (light <= 0) continue;
-    flowVelocity(map, x, y, s, v);
-    sum += Math.hypot(v[0], v[1]) * light; weight += light;
-  }
-  return weight > 0 ? sum / weight : 0;
+/** Скорость дрейфа пятен, мм за шаг (для подписи в сводке). */
+export function meanSpotSpeed(map: LightMap, _t: number): number {
+  return map.spots.length > 0 ? map.laws.speed : 0;
 }
 
-/** Параметры поля для шейдера (LIGHT_FIELD_GLSL) в шаге t. */
-export function lightFieldUniforms(map: LightMap, t: number): { offset: [number, number]; scale: number; time: number; threshold: number; edge: number } {
-  return { offset: [map.offsetX, map.offsetY], scale: map.scale, time: lightTime(map, t), threshold: thresholdAt(map, t), edge: LIGHT_EDGE };
+/** Пятна для шейдера (LIGHT_FIELD_GLSL) в шаге t: центр со сдвигом, радиус, гармоники края с фазой. */
+export function lightFieldUniforms(map: LightMap, t: number): { plane: [number, number]; count: number; spots: Float32Array; amps: Float32Array; phases: Float32Array } {
+  const n = Math.min(MAX_SPOTS, map.spots.length);
+  const spots = new Float32Array(MAX_SPOTS * 4), amps = new Float32Array(MAX_SPOTS * 4), phases = new Float32Array(MAX_SPOTS * 4);
+  const [ox, oy] = offsetAt(map, t);
+  const w = (TAU * t) / map.laws.breath;
+  for (let i = 0; i < n; i++) {
+    const s = map.spots[i];
+    let sq = 0;
+    for (let h = 0; h < HARMONICS; h++) {
+      amps[4 * i + h] = s.amps[h];
+      phases[4 * i + h] = ((s.phases[h] + s.rates[h] * w) % TAU + TAU) % TAU;
+      sq += s.amps[h] * s.amps[h];
+    }
+    spots[4 * i] = wrapCoord(s.x + ox, map.width);
+    spots[4 * i + 1] = wrapCoord(s.y + oy, map.height);
+    spots[4 * i + 2] = s.r;
+    spots[4 * i + 3] = 1 / Math.sqrt(1 + sq / 2);
+  }
+  return { plane: [map.width, map.height], count: n, spots, amps, phases };
 }
 
 /**
- * То же поле в GLSL (для маски света на GPU): `lightField(w)` — 0…1 в точке мира.
- * Униформы: u_lightOffset, u_lightScale, u_lightTime, u_lightThreshold, u_lightEdge.
+ * То же поле в GLSL (для маски света на GPU): `lightField(w)` — вклад пятен в
+ * точке мира (больше 1 в перекрытии). Униформы: u_lightPlane, u_spotCount,
+ * u_spots[i] = (x, y, радиус, нормировка), u_spotAmps[i], u_spotPhases[i].
  */
 export const LIGHT_FIELD_GLSL = `
-uniform vec2 u_lightOffset;
-uniform float u_lightScale;
-uniform float u_lightTime;
-uniform float u_lightThreshold;
-uniform float u_lightEdge;
-uint lightMix(uint x) { x += 0x9e3779b9u; x = (x ^ (x >> 16u)) * 0x85ebca6bu; x = (x ^ (x >> 13u)) * 0xc2b2ae35u; return x ^ (x >> 16u); }
-float lightHash(ivec2 p, int s) { return float(lightMix(uint(p.x) * 0x27d4eb2du ^ lightMix(uint(p.y) * 0x165667b1u ^ uint(s)))) / 4294967296.; }
-float lightNoise(vec2 p, int s) {
-  ivec2 i = ivec2(floor(p)); vec2 f = fract(p); f = f * f * f * (f * (f * 6. - 15.) + 10.);
-  return mix(mix(lightHash(i, s), lightHash(i + ivec2(1, 0), s), f.x), mix(lightHash(i + ivec2(0, 1), s), lightHash(i + ivec2(1, 1), s), f.x), f.y);
-}
-float lightFbm(vec2 p, int s) { return .55 * lightNoise(p, s) + .3 * lightNoise(p * 2.03 + 17.1, s + 1) + .15 * lightNoise(p * 4.1 - 9.3, s + 2); }
+#define MAX_SPOTS ${MAX_SPOTS}
+uniform vec2 u_lightPlane;
+uniform int u_spotCount;
+uniform vec4 u_spots[MAX_SPOTS];
+uniform vec4 u_spotAmps[MAX_SPOTS];
+uniform vec4 u_spotPhases[MAX_SPOTS];
 float lightField(vec2 w) {
-  vec2 p = w / u_lightScale + u_lightOffset;
-  float s = u_lightTime;
-  vec2 q = vec2(lightFbm(p * .7 + vec2(s * .6, -s * .35), 20), lightFbm(p * .7 + vec2(5.2 - s * .45, 1.3 + s * .55), 30)) - .5;
-  float f = lightFbm(p + ${LIGHT_WARP.toFixed(3)} * q + vec2(-s * .2, s * .15), 60);
-  return smoothstep(u_lightThreshold - u_lightEdge, u_lightThreshold + u_lightEdge, f);
+  float sum = 0.;
+  for (int i = 0; i < MAX_SPOTS; i++) {
+    if (i >= u_spotCount) break;
+    vec4 s = u_spots[i];
+    vec2 d = w - s.xy;
+    d -= u_lightPlane * floor(d / u_lightPlane + .5);
+    float r = length(d), e = ${SPOT_EDGE.toFixed(3)} * s.z;
+    if (r > s.z * ${SPOT_REACH.toFixed(3)} + e) continue;
+    float th = atan(d.y, d.x);
+    vec4 a = u_spotAmps[i], p = u_spotPhases[i];
+    float rr = 1. + a.x * cos(2. * th + p.x) + a.y * cos(3. * th + p.y) + a.z * cos(4. * th + p.z) + a.w * cos(5. * th + p.w);
+    float edge = s.z * rr * s.w;
+    sum += smoothstep(0., 1., (edge + e * .5 - r) / e);
+  }
+  return sum;
 }`;

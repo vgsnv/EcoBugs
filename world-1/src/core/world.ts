@@ -1,12 +1,14 @@
 /**
- * Мир: параметры + номер шага. Всё остальное строится из сида детерминированно.
+ * Мир: параметры, номер шага и состояние — свет, минерал, местность. Стартовую
+ * картину строит из сида генератор.
  */
 import { finishCalculation, type Calculation } from './task.ts';
 import { phase } from './profile.ts';
 import { dishOf, type Dish } from './dish.ts';
 import { mix32 } from './prng.ts';
 import { type WorldParams, validateParams } from './params.ts';
-import { type LightMap, createLightMap, lightAt } from './light.ts';
+import { setMediumLaws } from './laws.ts';
+import { type LightMap, advanceLight, createLightMap, lightAt } from './light.ts';
 import { type ViscosityMap, createViscosityMap } from './viscosity.ts';
 import { type PartitionLayout, buildLayout, layoutForSeed } from './partitions.ts';
 import { Drift } from './drift.ts';
@@ -20,7 +22,7 @@ export interface World {
   readonly params: Readonly<WorldParams>;
   /** Возраст мира — число прошедших шагов, отсчёт с нуля. */
   step: number;
-  /** Карта света; строится из сида, движение — функция номера шага. */
+  /** Пятна света, дрейф и ритм — состояние, меняется по шагам. */
   readonly light: LightMap;
   /** Карта вязкости; строится из сида и не меняется. */
   readonly viscosity: ViscosityMap;
@@ -46,6 +48,7 @@ export function createWorld(params: WorldParams, restoring = false): World {
   const errors = validateParams(params);
   if (errors.length > 0) throw new InvalidParamsError(errors);
   const own = structuredClone(params);
+  setMediumLaws(own);
   const viscosity = createViscosityMap(own, !restoring);
   const light = createLightMap(own);
   const dish = dishOf(own);
@@ -67,13 +70,14 @@ export function createWorld(params: WorldParams, restoring = false): World {
  * состояние, обновляется раз в MINERAL_PERIOD шагов. Ходы существ появятся позже.
  */
 export function stepWorld(world: World): void {
-  if ((world.step + 1) % MINERAL_PERIOD !== 0) { world.step++; return; }
+  if ((world.step + 1) % MINERAL_PERIOD !== 0) { world.step++; advanceLight(world.light, world.step); return; }
   finishCalculation(stepWorldTask(world));
 }
 
 /** Пока задача не завершена, массивы промежуточные: их нельзя показывать или сохранять. */
 export function* stepWorldTask(world: World): Calculation {
   const step = world.step + 1;
+  advanceLight(world.light, step);
   if (step % MINERAL_PERIOD === 0) {
     yield* updateMineralTask(world.mineral, world.params, world.drift, world.partitions, world.terrain, world.light, step);
   }
@@ -129,16 +133,32 @@ export function hashNumbers(values: Iterable<number>): number {
   return h >>> 0;
 }
 
+/** Числа параметров в порядке ключей: строки — по символам, вложенные объекты — по их полям. */
+function paramNumbers(p: Readonly<WorldParams>): number[] {
+  const out: number[] = [];
+  const add = (v: unknown) => {
+    if (typeof v === 'number') out.push(v);
+    else if (typeof v === 'string') for (const ch of v) out.push(ch.charCodeAt(0));
+    else if (v && typeof v === 'object') for (const key of Object.keys(v).sort()) add((v as Record<string, unknown>)[key]);
+  };
+  add(p);
+  return out;
+}
+
+/** Состояние света числами: дрейф, ритм, пятна. */
+export function lightNumbers(l: LightMap): number[] {
+  return [
+    l.step, l.offsetX, l.offsetY, l.angle, l.turnFrom, l.turnTo, l.turnStart, Number.isFinite(l.nextTurn) ? l.nextTurn : -1, l.turns, l.rhythmPhase,
+    l.spots.length, ...l.spots.flatMap((s) => [s.x, s.y, s.r, ...s.amps, ...s.phases, ...s.rates]),
+  ];
+}
+
 /** Контрольная сумма состояния: одинаковые миры дают одинаковую сумму. */
-export function worldHash(world: World, legacyV18 = false): number {
-  const p = world.params;
+export function worldHash(world: World): number {
   return hashNumbers([
-    p.seed, world.dish.width, world.dish.height,
-    ...(legacyV18 ? [] : [p.shape === 'circle' ? 1 : 0, p.aspectRatio]), p.sun, p.lightDrift, p.sunRhythm, p.sunPeriod, p.backgroundLevel, p.illumination, p.spotSize,
-    p.baseTemperature, p.spotHeat,
-    p.viscosityShares.water, p.viscosityShares.shallows, p.viscosityShares.land,
-    p.viscosityZoneSize, p.mineralStock, p.terrainSpeed, p.quakeInterval,
+    ...paramNumbers(world.params), world.dish.width, world.dish.height,
     world.step,
+    ...lightNumbers(world.light),
     world.mineral.depths,
     ...world.terrain.ground,
     ...world.terrain.deposits,

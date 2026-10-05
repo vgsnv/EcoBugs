@@ -111,6 +111,7 @@
       .time { display: grid; grid-template-columns: auto auto; align-items: baseline; gap: 0 10px; height: var(--h); padding: 0 10px; border-color: var(--line); background: var(--raised); text-align: left; }
       .world-age { font: 600 12.5px var(--mono); color: var(--text); }
       .world-rate, .actual-rate { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+      .actual-rate { display: inline-block; min-width: 15ch; }
       .world-rate { display: none; }
       .actual-rate[data-limited=true] { color: #9a6200; }
       .desktop-control-label { display: inline; }
@@ -246,6 +247,70 @@
       .note { color: var(--muted); font-size: 12px; }
       .note:empty, .errors:empty { display: none; }
       .errors { color: var(--danger); font-size: 12px; }
+      /* Диапазон «от–до»: два бегунка на одной дорожке, ловят только бегунки. */
+      .dual { position: relative; height: 18px; display: block; }
+      .dual input { position: absolute; inset: 0; pointer-events: none; background: none; }
+      .dual input::-webkit-slider-thumb { pointer-events: auto; }
+      .dual input::-moz-range-thumb { pointer-events: auto; }
+      .dual input + input::-webkit-slider-runnable-track { background: none; }
+      .check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+      .check input { margin: 0; accent-color: var(--accent); }
+      label:has(input[type=range]:disabled) input[type=range] { opacity: .4; }
+      .field { display: flex; flex-direction: column; gap: 4px; }
+      .shapes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+      .shape { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px 2px; font-size: 11px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--text); cursor: pointer; }
+      .shape svg { width: 100%; height: 18px; }
+      .shape path { fill: none; stroke: var(--muted); stroke-width: 1.5; }
+      .shape[aria-pressed=true] { border-color: var(--accent); color: var(--accent); }
+      .shape[aria-pressed=true] path { stroke: var(--accent); }
+      .consequence { margin-top: -4px; }
+      /* Панель параметров: группы-карточки, подзаголовки, воздух между полями. */
+      #params .params-body { padding: 4px 14px 16px; gap: 10px; }
+      #params details.param-group { border: 1px solid var(--line); border-radius: 10px; background: var(--raised); padding: 0; }
+      #params details.param-group > summary { display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto; column-gap: 8px; align-items: center; padding: 11px 14px; margin: 0; list-style: none; text-transform: none; letter-spacing: 0; color: var(--text); }
+      #params details.param-group > summary::-webkit-details-marker { display: none; }
+      #params details.param-group > summary::after { content: ''; grid-column: 2; grid-row: 1 / span 2; width: 7px; height: 7px; border-right: 1.6px solid var(--muted); border-bottom: 1.6px solid var(--muted); transform: rotate(-45deg); transition: transform 120ms; margin-right: 2px; }
+      #params details.param-group[open] > summary::after { transform: rotate(45deg); }
+      #params .group-title { font-size: 13.5px; font-weight: 600; }
+      #params .group-about { grid-column: 1; font-size: 11.5px; color: var(--muted); font-weight: 400; }
+      #params details.param-group[open] > summary { border-bottom: 1px solid var(--line); }
+      #params details.param-group > .fields { padding: 14px 14px 16px; gap: 16px; }
+      #params details.param-group.expert { background: transparent; border-style: dashed; }
+      #params .subhead { font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--faint); margin: 6px 0 -6px; }
+      #params .subhead:first-child { margin-top: 0; }
+      #params label, #params .field { gap: 7px; }
+      /* Ничего не прыгает: подпись — одна строка, значение — плашка постоянной ширины, следствие — две строки. */
+      #params label > .row, #params .field > .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; font-size: 12.5px; min-height: 20px; }
+      #params label > .row > span:first-child, #params .field > .row > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      #params .value { min-width: 11ch; text-align: center; font-variant-numeric: tabular-nums; }
+      #params .slot { display: grid; }
+      #params .slot > * { grid-area: 1 / 1; }
+      #params .slot-off { visibility: hidden; }
+      #params .value { padding: 2px 7px; border-radius: 999px; background: var(--bg); color: var(--text); font-size: 11px; white-space: nowrap; }
+      #params .changed .value { background: var(--accent-soft); color: var(--accent); }
+      #params .consequence { margin-top: -6px; padding: 7px 10px; border-radius: 7px; background: var(--bg); color: var(--muted); font-size: 11.5px; line-height: 1.45; min-height: calc(2 * 1.45em + 14px); display: flex; align-items: center; }
+      #params .consequence:empty { display: none; }
+      #params .check { font-size: 11.5px; margin-top: -2px; }
+      #params .expert-note { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+      #params .layout .row { color: var(--muted); }
+      /* Тонкие ползунки — как у скорости мира. */
+      #params input[type=range] { -webkit-appearance: none; appearance: none; height: 16px; background: transparent; }
+      #params input[type=range]::-webkit-slider-runnable-track { height: 3px; border-radius: 2px; background: var(--line-strong); }
+      #params input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5.5px; border-radius: 50%; background: var(--raised); border: 2px solid var(--accent); box-shadow: 0 1px 3px #2a292526; }
+      #params input[type=range]::-moz-range-track { height: 3px; border-radius: 2px; background: var(--line-strong); }
+      #params input[type=range]::-moz-range-thumb { width: 10px; height: 10px; border-radius: 50%; background: var(--raised); border: 2px solid var(--accent); }
+      #params input[type=range]:disabled::-webkit-slider-thumb { border-color: var(--faint); }
+      #params .dual input + input::-webkit-slider-runnable-track { background: transparent; }
+      #params .params-foot { padding: 12px 14px 14px; gap: 10px; }
+      #params .params-foot .primary { height: 34px; font-size: 13px; border-radius: 8px; }
+
+      /* Предупреждение перед новым миром и метка черновика над чашей. */
+      dialog.confirm { max-width: 380px; border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; background: var(--panel); color: var(--text); box-shadow: 0 12px 32px #2a292540; }
+      dialog.confirm::backdrop { background: #2a292533; }
+      dialog.confirm h3 { margin: 0 0 6px; font-size: 15px; }
+      dialog.confirm p { margin: 0 0 14px; font-size: 13px; line-height: 1.45; color: var(--muted); }
+      dialog.confirm .row { gap: 8px; }
+      .draft-banner { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 5; padding: 6px 12px; border-radius: 999px; background: var(--panel); border: 1px solid var(--accent); color: var(--accent); font-size: 12px; box-shadow: 0 4px 12px #2a292530; pointer-events: none; white-space: nowrap; }
 
       /* Режим «на весь экран»: только карта и ход мира. */
       .app.focus-mode .mineral-stats, .app.focus-mode .toolbar-secondary, .app.focus-mode .file-menu { display: none; }

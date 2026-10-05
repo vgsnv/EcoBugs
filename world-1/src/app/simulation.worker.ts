@@ -60,7 +60,7 @@ function publish(initial = false, force = false): void {
     type: 'snapshot', epoch, ...state,
     ...(showProcesses ? { processes: mineralProcesses(world.mineral) } : {}),
     ...(mineralChanged ? { ground: takeGroundChanges(world.mineral) } : {}),
-    exchanges: mineralExchanges(world.mineral), step: world.step,
+    exchanges: mineralExchanges(world.mineral), step: world.step, light: world.light,
     ...(drift ? { drift: { a: drift.a, b: drift.b } } : {}), rate: paused ? 0 : rate, behind,
   });
   const buffers = new Set<ArrayBuffer>();

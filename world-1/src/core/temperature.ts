@@ -9,7 +9,7 @@ import { type LightMap, rasterizeSpotIntensity, spotIntensityAt } from './light.
 
 /** Температура по интенсивности пятна в точке (0 — фон, 1 — пятно). */
 export function temperatureFromIntensity(params: Pick<WorldParams, 'baseTemperature' | 'spotHeat'>, intensity: number): number {
-  return params.baseTemperature + params.spotHeat * intensity;
+  return params.baseTemperature + params.spotHeat * Math.min(1, intensity);
 }
 
 export function temperatureAt(params: WorldParams, light: LightMap, x: number, y: number, t: number): number {

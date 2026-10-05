@@ -1,5 +1,5 @@
 /** Мини-карта в отдельной панели: вся чашка, пятна света, перегородки и рамка вида. */
-import { rasterizeSpotIntensity, sunAt, type World } from '../../core/index.ts';
+import { lightBackground, rasterizeSpotIntensity, sunAt, type World } from '../../core/index.ts';
 import type { Camera } from './camera.ts';
 import { SHADE_COLOR, lightShade, rgb, traceDish } from './palette.ts';
 
@@ -57,7 +57,7 @@ export class Minimap {
       m.fillRect(0, 0, width, height);
       m.globalCompositeOperation = 'source-over';
     };
-    shade(sun * world.params.backgroundLevel);
+    shade(sun * lightBackground(world.light));
     // Пятна света — по полю модели на грубой сетке: незатенённая местность сквозь маску света.
     const cols = 64, rows = Math.max(1, Math.round(64 * height / width));
     const light = rasterizeSpotIntensity(world.light, world.step, cols, rows, width / cols);

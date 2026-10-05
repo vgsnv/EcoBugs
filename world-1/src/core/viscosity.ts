@@ -1,3 +1,4 @@
+import { resistance } from './laws.ts';
 import { finishCalculation, type Calculation } from './task.ts';
 import { dishOf, insideDish } from './dish.ts';
 /**
@@ -11,7 +12,7 @@ import { dishOf, insideDish } from './dish.ts';
  * TERRAIN_PERIOD шагов карта пересобирается из уровня грунта (applyLevels).
  */
 import {
-  LIGHT_ABSORPTION, MINERAL_CELL, SHALLOWS_RING_MIN, VISCOSITY_BLUR, VISCOSITY_CELL, VISCOSITY_MULTIPLIERS,
+  LIGHT_ABSORPTION, MINERAL_CELL, SHALLOWS_RING_MIN, VISCOSITY_BLUR, VISCOSITY_CELL,
 } from './constants.ts';
 import { periodicFbm } from './noise.ts';
 import { deriveSeed } from './prng.ts';
@@ -277,9 +278,9 @@ export function gradationAt(map: ViscosityMap, x: number, y: number): Gradation 
   return map.levels[j * map.cols + i] as Gradation;
 }
 
-/** Сопротивление движению в точке: множитель градации (постоянные мира), плавно на стыках. */
+/** Сопротивление движению в точке: множитель градации (законы среды), плавно на стыках. */
 export function resistanceAt(map: ViscosityMap, x: number, y: number): number {
-  return interpolate(VISCOSITY_MULTIPLIERS, smoothLevelAt(map, x, y));
+  return interpolate(resistance, smoothLevelAt(map, x, y));
 }
 
 /** Доля усваиваемого света в точке. */
@@ -287,5 +288,5 @@ export function absorptionAt(map: ViscosityMap, x: number, y: number): number {
   return interpolate(LIGHT_ABSORPTION, smoothLevelAt(map, x, y));
 }
 
-export const multiplierForLevel = (level: number) => interpolate(VISCOSITY_MULTIPLIERS, level);
+export const multiplierForLevel = (level: number) => interpolate(resistance, level);
 export const absorptionForLevel = (level: number) => interpolate(LIGHT_ABSORPTION, level);

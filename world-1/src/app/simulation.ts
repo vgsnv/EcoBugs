@@ -1,5 +1,5 @@
 /** Сообщения между показом и единственным владельцем состояния — Worker. */
-import type { DriftField, GroundChanges, MineralExchanges, MineralProcesses, MineralState, TerrainState, ViscosityMap, World, WorldParams } from '../core/index.ts';
+import type { DriftField, GroundChanges, LightMap, MineralExchanges, MineralProcesses, MineralState, TerrainState, ViscosityMap, World, WorldParams } from '../core/index.ts';
 
 export type SimulationCommand =
   | { type: 'create'; epoch: number; params: WorldParams }
@@ -18,6 +18,8 @@ export type SimulationSnapshot = {
   type: 'snapshot';
   epoch: number;
   step: number;
+  /** Свет — состояние, меняется каждый шаг: присылается в каждом снимке (пятен немного). */
+  light: LightMap;
   drift?: { a: DriftField; b: DriftField };
   processes?: MineralProcesses;
   /** Изменения грунта от течений и осыпания с прошлого снимка — для показа. */

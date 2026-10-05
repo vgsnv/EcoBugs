@@ -71,7 +71,8 @@ export class WorldRenderer {
     if (wasFitted) this.fit();
   }
 
-  setWorld(world: World): void {
+  /** Новый мир; `keepView` — оставить камеру (черновик той же чаши), иначе показать чашу целиком. */
+  setWorld(world: World, keepView = false): void {
     this.frameKey = '';
     this.minimap.reset();
     this.world = world;
@@ -90,7 +91,7 @@ export class WorldRenderer {
     if (fresh) this.water.buildSparkles(world, fresh.level, fresh.deposits);
     this.water.resetFoam();
     this.resize();
-    this.fit();
+    if (!keepView) this.fit();
   }
 
   /** Изменения грунта из очередного снимка мира (для свежего грунта и песочной взвеси). */
