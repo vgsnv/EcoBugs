@@ -56,7 +56,7 @@ export class ProcessesLayer {
       const image = dc.createImageData(m.cols, m.rows);
       const reference = world.params.mineralStock * m.cell * m.cell;
       // Мерило грунта: десятая доля уровня за шаг при сильном переносе (подвижка — несколько мерил).
-      const groundRef = 0.1 * SAND_RATE * Math.max(1e-6, world.params.terrainSpeed) / MINERAL_PERIOD;
+      const groundRef = 0.1 * SAND_RATE / MINERAL_PERIOD;
       const { sand, tectonic } = ground.rates;
       const C = PROCESS_COLORS;
       let weight = 0, r = 0, g = 0, b = 0;

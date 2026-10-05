@@ -11,7 +11,7 @@ import { funnelFromNumbers, funnelNumbers, volcanoFromNumbers, volcanoNumbers } 
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 23;
+export const WORLD_FORMAT_VERSION = 24;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -37,6 +37,7 @@ const OLD_FORMATS: Record<number, string> = {
   20: 'тогда пятна света были эллипсами, отскакивавшими от стенок',
   21: 'тогда свет был полем шума, а не пятнами',
   22: 'тогда сопротивление сред, мутность и давление извержения не были параметрами',
+  23: 'тогда была «скорость местности», а пороги срыва зависели от солнца',
 };
 
 export interface MineralFile {

@@ -7,7 +7,7 @@
 import { PROCESS_COLORS } from './render/processes.ts';
 import { createLightMap, dishCoverage, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type RhythmShape, type WorldParams } from '../core/index.ts';
 import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render/palette.ts';
-import { formatArea, formatLength, formatMass, formatMultiplier, formatNumber, formatPercent, formatWorldAge } from './units.ts';
+import { formatArea, formatLength, formatMass, formatNumber, formatPercent, formatWorldAge } from './units.ts';
 import { Sidebar } from './sidebar.ts';
 
 export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
@@ -48,7 +48,7 @@ export const SPEED_KEYS = SPEEDS.map((_, i) => String(i + 1));
 
 const OPEN_GROUPS_KEY = 'ecobugs.params.open';
 
-type NumberKey = 'lightShadow' | 'lightExtra' | 'spotCount' | 'spotAreaMin' | 'spotAreaMax' | 'driftCross' | 'driftTurn' | 'sunRhythm' | 'sunPeriod' | 'rhythmTransition' | 'rhythmRise' | 'viscosityZoneSize' | 'terrainSpeed' | 'quakeInterval' | 'mineralStock' | 'eruptionPressure' | 'driftResponse' | 'resistanceShallows' | 'resistanceLand' | 'turbidityLoss' | 'spotWobble' | 'spotBreath';
+type NumberKey = 'lightShadow' | 'lightExtra' | 'spotCount' | 'spotAreaMin' | 'spotAreaMax' | 'driftCross' | 'driftTurn' | 'sunRhythm' | 'sunPeriod' | 'rhythmTransition' | 'rhythmRise' | 'viscosityZoneSize' | 'quakeInterval' | 'groundThreshold' | 'slopeLimit' | 'settleHalf' | 'mineralStock' | 'eruptionPressure' | 'driftResponse' | 'resistanceShallows' | 'resistanceLand' | 'turbidityLoss' | 'spotWobble' | 'spotBreath';
 
 /** Ползунок параметра: значение — в единицах параметра, шкала — линейная или логарифмическая. */
 interface SliderSpec {
@@ -87,7 +87,6 @@ const nice = (v: number) => {
 
 /** Прежние параметры местности — до генератора суши. */
 const ZONE_SIZE: SliderSpec = { key: 'viscosityZoneSize', label: 'Размер зон', hint: 'Средний размер зон воды, отмели и суши. Заменится генератором суши (массивы, изрезанность, внутренние моря).', min: 80, max: 300, step: 5, format: (v) => formatLength(v) };
-const TERRAIN_SPEED: SliderSpec = { key: 'terrainSpeed', label: 'Скорость местности', hint: 'Пока — общий множитель процессов дна: оседания и размыва, переноса и осыпания грунта, воронок, тектоники. Уйдёт: темп дна станет следствием течений и свойств дна.', min: 0, max: 5, step: 0.1, format: (v) => formatMultiplier(v) };
 const QUAKES: SliderSpec = { key: 'quakeInterval', label: 'Толчки', hint: 'В среднем раз в сколько часов случается толчок — короткий подъём или провал небольшого участка. Заменится «Тектоникой»: объём за час и высоты.', min: 1.5, max: 55, log: true, view: hoursOf, store: stepsOf, format: (v) => `раз в ${hoursText(v)}` };
 const STOCK: SliderSpec = { key: 'mineralStock', label: 'Запас минерала', hint: 'Сколько минерала в недрах при сотворении, на квадратный метр свободной площади. Дальше масса постоянна: минерал ходит между недрами, средой и залежами. Больше запас — крупнее извержения и воронки, а не чаще.', min: 200, max: 5000, log: true, view: (v) => v * 1000, store: (v) => v / 1000, format: (v) => `${formatNumber(v)} г/м²` };
 
@@ -533,7 +532,7 @@ export class Panel {
         group('Чаша', 'форма, пропорции, стартовая картина', [sub('Форма'), world[0], world[1], sub('Стартовая картина'), world[2], world[3]], true),
         group('Свет', 'пятна, яркость и их движение', this.lightFields(sub), true),
         group('Ритм солнца', 'как свет нарастает и спадает', this.rhythmFields(), false),
-        group('Местность', 'прежние ручки — до генератора суши', [this.slider(ZONE_SIZE), ...this.sharesRows(), this.slider(TERRAIN_SPEED), this.slider(QUAKES)], false),
+        group('Местность', 'прежние ручки — до генератора суши', [this.slider(ZONE_SIZE), ...this.sharesRows(), this.slider(QUAKES)], false),
         group('Минерал', 'запас недр и извержения', [
           this.slider(STOCK), this.consequence(() => `Всего в недрах ≈ ${formatMass(this.draft.mineralStock * 1_920_000)} — без перегородок.`),
           this.slider({ key: 'eruptionPressure', label: 'Давление извержения', hint: 'Сколько минерала (доля всего запаса) должно накопиться в недрах, чтобы вулкан извергся. Выше — извержения реже и крупнее; ниже — чаще и мельче. Как часто они случаются на деле, покажет сводка.', min: 0.03, max: 0.5, step: 0.01, format: (v) => formatPercent(v) }),
@@ -830,6 +829,9 @@ export class Panel {
       this.slider({ key: 'resistanceShallows', label: 'Сопротивление отмели', hint: 'Во сколько раз отмель хуже воды пропускает течение и минерал (вода — 1).', min: 1, max: 30, log: true, format: (v) => `×${formatNumber(v)}` }),
       this.slider({ key: 'resistanceLand', label: 'Сопротивление суши', hint: 'Во сколько раз суша хуже воды пропускает течение и минерал (вода — 1). Больше — острова почти как стены.', min: 1, max: 100, log: true, format: (v) => `×${formatNumber(v)}` }),
       this.slider({ key: 'turbidityLoss', label: 'Мутность', hint: 'Сколько света гасит растворённый минерал: доля света, теряемая при 1000 г/м² раствора.', min: 0, max: 0.9, step: 0.01, format: (v) => `${formatPercent(v)} на 1000 г/м²` }),
+      this.slider({ key: 'groundThreshold', label: 'Порог срыва грунта', hint: 'Течение быстрее этого срывает и несёт грунт; залежи минерала размывает течение вдвое быстрее. Ниже порог — дно меняется быстрее.', min: 0.3, max: 20, log: true, format: (v) => `${formatNumber(v)} мм/с` }),
+      this.slider({ key: 'slopeLimit', label: 'Устойчивый склон', hint: 'Склон круче этого осыпается: грунт сползает вниз. Меньше — берега пологие, больше — крутые.', min: 0.05, max: 2, log: true, format: (v) => `${formatNumber(v)} ур./см` }),
+      this.slider({ key: 'settleHalf', label: 'Оседание минерала', hint: 'За сколько времени в стоячей воде оседает половина растворённого минерала. Быстрее — вода чище, залежи растут.', min: 1, max: 1440, log: true, format: (v) => `½ за ${hoursText(v / 60)}` }),
       this.slider({ key: 'spotWobble', label: 'Неровность края пятна', hint: 'Насколько край пятна отходит от круга. 0 — круглые пятна.', min: 0, max: 0.35, step: 0.01, format: (v) => formatPercent(v) }),
       this.slider({ key: 'spotBreath', label: 'Дыхание края пятна', hint: 'За сколько времени мира форма края проходит полный цикл; площадь пятна при этом не меняется.', min: 0.5, max: 72, log: true, format: (v) => hoursText(v) }),
     ];

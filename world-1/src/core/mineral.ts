@@ -11,17 +11,18 @@
  * сохраняет количество: минерал клетки делится между клетками вокруг точки
  * назначения; в перегородки не попадает.
  */
+import { STEPS_PER_SECOND, stepsFromSeconds } from './units.ts';
 import { medium } from './laws.ts';
 import { traceThrow, type ThrowWorld } from './throw.ts';
 import { finishCalculation, type Calculation } from './task.ts';
 import {
   ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_BURST, ERUPTION_TAIL_AREA, ERUPTION_BURSTS_MAX, BURST_WIDTH, BURST_FROM, THROW_RAYS, THROW_SAMPLES, MINERAL_SPREAD,
-  MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_SINK_SETTLE, MINERAL_LAYER, MINERAL_MOBILITY, TRANSPORT_SUBSTEPS, DRIFT_REFERENCE, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, SAND_RATE, SAND_THRESHOLD, SAND_TOP, SAND_UNDER, SLUMP_RATE, SLUMP_SLOPE,
+  MINERAL_CELL, MINERAL_PERIOD, MINERAL_SINK_SETTLE, MINERAL_LAYER, MINERAL_MOBILITY, TRANSPORT_SUBSTEPS, DRIFT_REFERENCE, EROSION, EROSION_RATIO, GROUND_PER_LEVEL, RUNOFF, SAND_RATE, SAND_TOP, SAND_UNDER, SLUMP_RATE,
   FUNNEL_DEPOSIT, FUNNEL_SHAPE, FUNNEL_CORE_LEVEL, FUNNEL_MIN_CELLS, FUNNEL_HOLE_SHARE, FUNNEL_RAMP, FUNNEL_REACH, FUNNEL_DRAW, FUNNEL_LIFT, FUNNEL_SINK, DEPOSIT_DISSOLVE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
   VOLCANO_MIN_GAP, VOLCANO_POWER, VOLCANO_BIRTH, VOLCANO_MATURE, VOLCANO_EXTINCT_CHANCE, VOLCANO_WAKE_CHANCE, VOLCANO_DORMANT_LIFE, VOLCANO_FADE, VOLCANO_DEPOSIT_AVOID,
 } from './constants.ts';
 import type { Drift } from './drift.ts';
-import { sunAt, type LightMap } from './light.ts';
+import type { LightMap } from './light.ts';
 import { moveGround, type TerrainState } from './terrain.ts';
 import type { WorldParams } from './params.ts';
 import { cellInsideDish, dishOf } from './dish.ts';
@@ -367,12 +368,12 @@ function settleRange(m: MineralState, params: WorldParams, terrain: TerrainState
     const i = k % cols, j = (k - i) / cols;
     const div = ((i < cols - 1 && !blocked[k + 1] ? flowX[k + 1] : flowX[k]) - (i > 0 && !blocked[k - 1] ? flowX[k - 1] : flowX[k])
       + (j < rows - 1 && !blocked[k + cols] ? flowY[k + cols] : flowY[k]) - (j > 0 && !blocked[k - cols] ? flowY[k - cols] : flowY[k])) / (2 * cell);
-    const sink = Math.min(0.9, Math.max(0, -div) * MINERAL_SINK_SETTLE * P * params.terrainSpeed);
+    const sink = Math.min(0.9, Math.max(0, -div) * MINERAL_SINK_SETTLE * P);
     const settled = dst[k] * (1 - (1 - settle * calm * calm) * (1 - sink)) * room;
     // Размыв: заметное течение срывает залежи обратно в среду (грунт под ними
     // не растворяется — его переносит moveSand).
-    const over = speed[k] - EROSION_THRESHOLD * sMax;
-    const erode = Math.min(dep[k], over > 0 ? EROSION * over * P * area * params.terrainSpeed : 0);
+    const over = speed[k] - EROSION_RATIO * groundThreshold(params);
+    const erode = Math.min(dep[k], over > 0 ? EROSION * over * P * area : 0);
     // Залежи понемногу растворяются обратно — на месте.
     const dissolved = (dep[k] - erode) * dissolve;
     dst[k] += erode - settled + dissolved;
@@ -400,12 +401,12 @@ function sandRows(m: MineralState, params: WorldParams, terrain: TerrainState, w
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
       if (blocked[k] || gr[k] <= 0 || dep[k] > SAND_UNDER * perLvl || !open(k)) continue;
-      const over = (speed[k] - SAND_THRESHOLD * sMax) / sMax;
+      const over = (speed[k] - groundThreshold(params)) / sMax;
       if (!(over > 0)) continue;
       const vx = flowX[k], vy = flowY[k];
       const ax = Math.abs(vx), ay = Math.abs(vy), sum = ax + ay;
       if (sum === 0) continue;
-      const amount = Math.min(gr[k], SAND_RATE * over * perLvl * params.terrainSpeed);
+      const amount = Math.min(gr[k], SAND_RATE * over * perLvl);
       const tx = vx > 0 ? (i < cols - 1 ? k + 1 : -1) : (i > 0 ? k - 1 : -1);
       const ty = vy > 0 ? (j < rows - 1 ? k + cols : -1) : (j > 0 ? k - cols : -1);
       if (tx >= 0 && ax > 0 && open(tx)) { const a = amount * ax / sum; out[k] -= a; out[tx] += a; lift[k] += a; }
@@ -414,8 +415,11 @@ function sandRows(m: MineralState, params: WorldParams, terrain: TerrainState, w
   }
 }
 
+/** Порог срыва грунта, единиц мира за шаг (параметр — в мм/с). */
+const groundThreshold = (params: WorldParams) => params.groundThreshold / STEPS_PER_SECOND;
+
 /**
- * Осыпание за обновление (строки first…last): склон круче SLUMP_SLOPE
+ * Осыпание за обновление (строки first…last): склон круче устойчивого
  * осыпается — грунт сползает к нижним соседям, SLUMP_RATE от превышения,
  * поровну по превышению; ровная середина суши стоит. От снимка, в `out`.
  */
@@ -423,16 +427,16 @@ function slumpRows(m: MineralState, params: WorldParams, terrain: TerrainState, 
   const { cols, rows, blocked } = m;
   const gr = terrain.ground, dep = terrain.deposits;
   const h = (n: number) => (gr[n] + dep[n]) / perLvl;
-  const rate = SLUMP_RATE * params.terrainSpeed;
+  const rate = SLUMP_RATE, slope = params.slopeLimit * m.cell / 10;
   for (let j = first; j < last; j++) {
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
       if (blocked[k] || gr[k] <= 0) continue;
       const hk = h(k);
-      const dl = i > 0 && !blocked[k - 1] ? Math.max(0, hk - h(k - 1) - SLUMP_SLOPE) : 0;
-      const dr = i < cols - 1 && !blocked[k + 1] ? Math.max(0, hk - h(k + 1) - SLUMP_SLOPE) : 0;
-      const du = j > 0 && !blocked[k - cols] ? Math.max(0, hk - h(k - cols) - SLUMP_SLOPE) : 0;
-      const dd = j < rows - 1 && !blocked[k + cols] ? Math.max(0, hk - h(k + cols) - SLUMP_SLOPE) : 0;
+      const dl = i > 0 && !blocked[k - 1] ? Math.max(0, hk - h(k - 1) - slope) : 0;
+      const dr = i < cols - 1 && !blocked[k + 1] ? Math.max(0, hk - h(k + 1) - slope) : 0;
+      const du = j > 0 && !blocked[k - cols] ? Math.max(0, hk - h(k - cols) - slope) : 0;
+      const dd = j < rows - 1 && !blocked[k + cols] ? Math.max(0, hk - h(k + cols) - slope) : 0;
       const total = dl + dr + du + dd;
       if (total === 0) continue;
       // Не больше четверти превышения: осыпание не перекидывает склон в обратный.
@@ -496,7 +500,7 @@ function spreadRows(field: Float64Array, mobility: Float64Array, blocked: Uint8A
   }
 }
 
-export function* updateMineralTask(m: MineralState, params: WorldParams, drift: Drift, partitions: PartitionLayout, terrain: TerrainState, light: LightMap, step: number): Calculation {
+export function* updateMineralTask(m: MineralState, params: WorldParams, drift: Drift, partitions: PartitionLayout, terrain: TerrainState, _light: LightMap, step: number): Calculation {
   const { cols, rows, cell, blocked } = m;
   const P = MINERAL_PERIOD;
   const tMid = step - P / 2;
@@ -566,9 +570,10 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
 
   // 2. Местность и залежи.
   phase('оседание и размыв');
-  const sMax = DRIFT_REFERENCE * sunAt(light, tMid);
-  const settle = (1 - (1 - MINERAL_SETTLE) ** P) * params.terrainSpeed;
-  const dissolve = (1 - (1 - DEPOSIT_DISSOLVE) ** P) * params.terrainSpeed;
+  // Мерило «спокойной» воды и шкала превышения порогов — постоянная скорость, от света не зависит.
+  const sMax = DRIFT_REFERENCE;
+  const settle = 1 - 0.5 ** (P / stepsFromSeconds(params.settleHalf * 60));
+  const dissolve = (1 - (1 - DEPOSIT_DISSOLVE) ** P);
   const area = cell * cell;
   const perLvl = GROUND_PER_LEVEL * area;
   const dep = terrain.deposits;
@@ -1046,7 +1051,7 @@ function* updateFunnels(m: MineralState, params: WorldParams, terrain: TerrainSt
   const area = cell * cell;
   const { core, limit } = funnelThresholds(params, area);
   const dep = terrain.deposits;
-  const ramp = (P / FUNNEL_RAMP) * params.terrainSpeed;
+  const ramp = (P / FUNNEL_RAMP);
   for (const f of m.funnels) {
     f.forming = basinCells(m, f).some((k) => dep[k] > core);
     f.strength = Math.max(0, Math.min(1, f.strength + (f.forming ? ramp : -ramp)));
@@ -1131,7 +1136,7 @@ function* pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, 
   // Тяга воронки — сила × единичное течение её отверстия (место и форма постоянны — кеш по номеру).
   for (const f of m.funnels) {
     if (f.strength <= 0) continue;
-    add(yield* pushFieldTask(m, terrain.applied, `f${f.id}`, f.cells), -FUNNEL_DRAW * params.terrainSpeed * Math.PI * f.reach * f.reach * f.strength);
+    add(yield* pushFieldTask(m, terrain.applied, `f${f.id}`, f.cells), -FUNNEL_DRAW * Math.PI * f.reach * f.reach * f.strength);
   }
   return { vx, vy };
 }
@@ -1145,8 +1150,8 @@ function* pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, 
 function sinkFunnel(m: MineralState, params: WorldParams, terrain: TerrainState, f: Funnel, P: number): number {
   if (f.strength <= 0) return 0;
   const { limit } = funnelThresholds(params, m.cell * m.cell);
-  const lift = (1 - (1 - FUNNEL_LIFT) ** P) * params.terrainSpeed * f.strength;
-  const take = (1 - (1 - FUNNEL_SINK) ** P) * params.terrainSpeed * f.strength;
+  const lift = (1 - (1 - FUNNEL_LIFT) ** P) * f.strength;
+  const take = (1 - (1 - FUNNEL_SINK) ** P) * f.strength;
   const dep = terrain.deposits;
   for (const k of basinCells(m, f)) {
     const g = Math.max(0, dep[k] - limit) * lift;

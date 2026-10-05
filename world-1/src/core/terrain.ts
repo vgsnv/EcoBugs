@@ -186,7 +186,7 @@ export function moveGround(
     t.nextQuake++;
     t.nextQuakeStep += gap(seed, true, t.nextQuake, params.quakeInterval);
   }
-  const scale = params.terrainSpeed * GROUND_PER_LEVEL * cell * cell;
+  const scale = GROUND_PER_LEVEL * cell * cell;
   let drowned = 0;
   for (const m of t.active) {
     let step = (progress(m, to) - progress(m, from)) * m.amp * scale;

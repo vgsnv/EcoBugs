@@ -73,7 +73,7 @@ export class GroundLayer {
     const keep = Math.exp(-changes.steps / LIFT_STEPS);
     const average = Math.exp(-changes.steps / RATE_STEPS);
     // Мерило переноса (уровень за шаг) — около 95-го процентиля в чашке.
-    const ref = LIFT_REFERENCE * SAND_RATE * Math.max(1e-6, w.params.terrainSpeed) / MINERAL_PERIOD;
+    const ref = LIFT_REFERENCE * SAND_RATE / MINERAL_PERIOD;
     const { fresh, lift } = this;
     for (let k = 0; k < fresh.length; k++) {
       if (m.blocked[k]) continue;

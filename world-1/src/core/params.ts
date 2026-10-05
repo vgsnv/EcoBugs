@@ -61,8 +61,10 @@ export interface WorldParams {
   turbidityLoss: number;
   spotWobble: number;
   spotBreath: number;
-  /** Скорость местности: множитель намыва, размыва, подвижек и толчков; 0 — местность неподвижна. */
-  terrainSpeed: number;
+  /** Для знатоков — свойства дна: порог срыва грунта, мм/с (залежи размываются вдвое более быстрым течением); устойчивый склон, уровней на см; за сколько минут оседает половина минерала в стоячей воде. */
+  groundThreshold: number;
+  slopeLimit: number;
+  settleHalf: number;
   /** Средний промежуток между толчками, шагов. */
   quakeInterval: number;
 }
@@ -95,7 +97,9 @@ export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
   turbidityLoss: 0.1,
   spotWobble: 0.15,
   spotBreath: 6,
-  terrainSpeed: 1,
+  groundThreshold: 1.8,
+  slopeLimit: 0.44,
+  settleHalf: 29,
   quakeInterval: 400000,
 });
 
@@ -137,7 +141,9 @@ export const PARAM_LABELS: Readonly<Record<string, string>> = {
   'turbidityLoss': 'Мутность',
   'spotWobble': 'Неровность края пятна',
   'spotBreath': 'Дыхание края пятна',
-  'terrainSpeed': 'Скорость местности',
+  'groundThreshold': 'Порог срыва грунта',
+  'slopeLimit': 'Устойчивый склон',
+  'settleHalf': 'Оседание минерала',
   'quakeInterval': 'Промежуток между толчками',
   'viscosityShares': 'Доли вязкости',
   'viscosityShares.water': 'Доля воды',
@@ -196,7 +202,9 @@ export function validateParams(p: WorldParams): string[] {
   inRange('turbidityLoss', p.turbidityLoss, 0, 0.95);
   inRange('spotWobble', p.spotWobble, 0, 0.35);
   inRange('spotBreath', p.spotBreath, 0.1, 1000);
-  inRange('terrainSpeed', p.terrainSpeed, 0, 100);
+  inRange('groundThreshold', p.groundThreshold, 0.01, 1000);
+  inRange('slopeLimit', p.slopeLimit, 0.01, 100);
+  inRange('settleHalf', p.settleHalf, 0.1, 100000);
   inRange('quakeInterval', p.quakeInterval, 1000, 1e9);
 
   const s = p.viscosityShares;
