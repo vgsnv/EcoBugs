@@ -16,7 +16,7 @@ import { finishCalculation, type Calculation } from './task.ts';
 import {
   ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_BURST, ERUPTION_TAIL_AREA, ERUPTION_BURSTS_MAX, BURST_WIDTH, BURST_FROM, THROW_RAYS, THROW_SAMPLES, MINERAL_SPREAD,
   MINERAL_CELL, MINERAL_PERIOD, MINERAL_SETTLE, MINERAL_SINK_SETTLE, MINERAL_LAYER, MINERAL_MOBILITY, TRANSPORT_SUBSTEPS, DRIFT_REFERENCE, TURBIDITY, EROSION, EROSION_THRESHOLD, GROUND_PER_LEVEL, RUNOFF, SAND_RATE, SAND_THRESHOLD, SAND_TOP, SAND_UNDER, SLUMP_RATE, SLUMP_SLOPE,
-  FUNNEL_DEPOSIT, FUNNEL_SHAPE, FUNNEL_MIN_CELLS, FUNNEL_HOLE_SHARE, FUNNEL_RAMP, FUNNEL_REACH, FUNNEL_DRAW, FUNNEL_LIFT, FUNNEL_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
+  FUNNEL_DEPOSIT, FUNNEL_SHAPE, FUNNEL_CORE_LEVEL, FUNNEL_MIN_CELLS, FUNNEL_HOLE_SHARE, FUNNEL_RAMP, FUNNEL_REACH, FUNNEL_DRAW, FUNNEL_LIFT, FUNNEL_SINK, DEPOSIT_DISSOLVE, ERUPTION_MAX, ERUPTION_PRESSURE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
   VOLCANO_MIN_GAP, VOLCANO_POWER, VOLCANO_BIRTH, VOLCANO_MATURE, VOLCANO_EXTINCT_CHANCE, VOLCANO_WAKE_CHANCE, VOLCANO_DORMANT_LIFE, VOLCANO_FADE, VOLCANO_DEPOSIT_AVOID,
 } from './constants.ts';
 import type { Drift } from './drift.ts';
@@ -1030,11 +1030,19 @@ function basinCells(m: MineralState, f: Funnel): Int32Array {
  * воронки (сначала самые массивные). Ареол — радиус скопления + FUNNEL_REACH;
  * отверстие — FUNNEL_HOLE_SHARE скопления вокруг самой густой клетки.
  */
+/**
+ * Пороги воронки на клетку: ядро и скопление — в средних плотностях запаса,
+ * но ядро не толще FUNNEL_CORE_LEVEL уровня залежей (иначе при большом запасе недостижимо).
+ */
+function funnelThresholds(params: WorldParams, area: number): { core: number; limit: number } {
+  const core = Math.min(FUNNEL_DEPOSIT * params.mineralStock, FUNNEL_CORE_LEVEL * GROUND_PER_LEVEL) * area;
+  return { core, limit: core * (FUNNEL_SHAPE / FUNNEL_DEPOSIT) };
+}
+
 function* updateFunnels(m: MineralState, params: WorldParams, terrain: TerrainState, P: number): Calculation {
   const { cols, rows, cell, blocked } = m;
   const area = cell * cell;
-  const core = FUNNEL_DEPOSIT * params.mineralStock * area;
-  const limit = FUNNEL_SHAPE * params.mineralStock * area;
+  const { core, limit } = funnelThresholds(params, area);
   const dep = terrain.deposits;
   const ramp = (P / FUNNEL_RAMP) * params.terrainSpeed;
   for (const f of m.funnels) {
@@ -1134,7 +1142,7 @@ function* pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, 
  */
 function sinkFunnel(m: MineralState, params: WorldParams, terrain: TerrainState, f: Funnel, P: number): number {
   if (f.strength <= 0) return 0;
-  const limit = FUNNEL_SHAPE * params.mineralStock * m.cell * m.cell;
+  const { limit } = funnelThresholds(params, m.cell * m.cell);
   const lift = (1 - (1 - FUNNEL_LIFT) ** P) * params.terrainSpeed * f.strength;
   const take = (1 - (1 - FUNNEL_SINK) ** P) * params.terrainSpeed * f.strength;
   const dep = terrain.deposits;

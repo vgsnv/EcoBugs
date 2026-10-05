@@ -102,6 +102,13 @@ export const MINERAL_MOBILITY = 20;
  */
 export const FUNNEL_DEPOSIT = 6;
 export const FUNNEL_SHAPE = 1.5;
+/**
+ * Предел ядра воронки, уровень местности: залежи оседают только ниже верха
+ * отмели, поэтому ядро в FUNNEL_DEPOSIT средних при большом запасе недостижимо —
+ * воронки не рождались бы, и круговорот минерала вставал. Ядро не толще этого
+ * уровня залежей, порог скопления — в той же пропорции.
+ */
+export const FUNNEL_CORE_LEVEL = 0.75;
 export const FUNNEL_MIN_CELLS = 30;
 export const FUNNEL_HOLE_SHARE = 0.1;
 /** Воронка сгущается от нуля до полной силы (и тает обратно) за столько шагов. */
