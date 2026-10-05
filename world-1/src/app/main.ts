@@ -8,7 +8,7 @@ import {
 } from '../core/index.ts';
 import { MinimapOverlay } from './minimap-overlay.ts';
 import { WorldSummary } from './world-summary.ts';
-import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
+import { MAX_SPEED, Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
 import { WorldRenderer } from './render.ts';
 import { installRenderCheck } from './render-check.ts';
 import { formatDuration, formatLength, formatMass, formatNumber, formatPercent } from './units.ts';
@@ -59,7 +59,7 @@ function control(): void {
   send({ type: 'control', epoch, paused, speed, active: document.visibilityState === 'visible' });
 }
 function togglePause(): void { if (drafting) return; paused = !paused; control(); }
-function changeSpeed(next: number): void { speed = next; control(); }
+function changeSpeed(next: number): void { speed = Math.min(MAX_SPEED, Math.max(1, Math.round(next))); control(); }
 function create(params: WorldParams): void {
   epoch++;
   send({ type: 'create', epoch, params });

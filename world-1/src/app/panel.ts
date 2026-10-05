@@ -10,7 +10,12 @@ import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE,
 import { formatArea, formatLength, formatMass, formatNumber, formatPercent, formatWorldAge } from './units.ts';
 import { PanelTabs, type PanelTab } from './tabs.ts';
 
-export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
+/**
+ * Быстрые скорости — кнопки под ползунком и клавиши 1–6. Наибольшая ×100 —
+ * режим «эволюция»; ×1 — жизнь одной клетки, ×10–×30 — популяции.
+ */
+export const SPEEDS = [1, 2, 5, 10, 30, 100] as const;
+export const MAX_SPEED = 100;
 
 export interface PanelHandlers {
   onLayoutChange(): void;
@@ -171,7 +176,7 @@ export class Panel {
   private readonly runLabel = el('span', { className: 'desktop-control-label', textContent: 'Пауза' });
   private readonly speedPresets: { speed: number; button: HTMLButtonElement }[] = [];
   private readonly pauseButton = el('button', { className: 'run-toggle', ariaLabel: 'Пауза', title: 'Пауза (Пробел)' });
-  private readonly speedSlider = el('input', { type: 'range', min: '0', max: '4', step: '0.001', value: '0', ariaLabel: 'Скорость мира', className: 'speed-slider', title: '×1 — реальное время; ×10 — в 10 раз быстрее; клавиши 1–7' });
+  private readonly speedSlider = el('input', { type: 'range', min: '1', max: String(MAX_SPEED), step: '1', value: '1', ariaLabel: 'Скорость мира', className: 'speed-slider', title: '×1 — реальное время; ×10 — в 10 раз быстрее; клавиши 1–6, стрелки — по единице' });
   private readonly speedValue = el('output', { className: 'speed-value', textContent: '×1' });
   private readonly paramsToggle = el('button', { textContent: 'Новый мир', ariaLabel: 'Новый мир', ariaExpanded: 'false', title: 'Открыть настройки нового мира', className: 'params-toggle' });
   private readonly focusToggle = el('button', { className: 'focus-toggle', ariaLabel: 'На весь экран', ariaPressed: 'false', title: 'На весь экран (F)' });
@@ -387,14 +392,14 @@ export class Panel {
       if (e.key === ' ' || e.key === 'Enter') e.stopPropagation();
     });
     const speedTicks = el('div', { className: 'speed-ticks' });
-    for (const s of [1, 10, 100, 1000, 10000]) {
-      const tick = el('button', { type: 'button', textContent: s.toLocaleString('ru'), title: `Скорость ×${s.toLocaleString('ru')}`, ariaLabel: `Скорость ×${s.toLocaleString('ru')}`, ariaPressed: 'false' });
-      tick.style.left = `${Math.log10(s) / 4 * 100}%`;
+    // Ползунок линейный — малые скорости (×2, ×5) берутся кнопками или клавишами.
+    for (const [i, s] of SPEEDS.entries()) {
+      const tick = el('button', { type: 'button', textContent: `×${s}`, title: `Скорость ×${s} (клавиша ${i + 1})`, ariaLabel: `Скорость ×${s}`, ariaPressed: 'false' });
       tick.addEventListener('click', () => this.handlers.onSpeed(s));
       speedTicks.append(tick);
       this.speedPresets.push({ speed: s, button: tick });
     }
-    this.speedSlider.addEventListener('input', () => this.handlers.onSpeed(10 ** Number(this.speedSlider.value)));
+    this.speedSlider.addEventListener('input', () => this.handlers.onSpeed(Number(this.speedSlider.value)));
     const speedControl = el('div', { className: 'speed-control' },
       el('div', { className: 'speed-head' }, el('span', { textContent: 'Скорость' }), this.speedValue),
       this.speedSlider, speedTicks);
@@ -939,7 +944,7 @@ export class Panel {
       sub('Движение'),
       this.slider({ key: 'driftCross', label: 'Пятна пересекают чашу', hint: 'Дрейф: за сколько времени мира пятна пересекают чашу. Все плывут вместе, в одну сторону.', min: 6, max: 1440, log: true, format: (v) => `за ${hoursText(v)}`, toggle: { label: 'свет стоит', value: 0 } }),
       this.slider({ key: 'driftTurn', label: 'Смена направления', hint: 'В среднем раз в сколько времени дрейф поворачивает в случайную сторону; поворот плавный, за час.', min: 1, max: 240, log: true, format: (v) => `раз в ${hoursText(v)}`, toggle: { label: 'не поворачивает', value: 0 } }),
-      this.consequence(() => this.draft.driftCross > 0 ? `Просмотр: ×1000 — ${hoursText(this.draft.driftCross / 1000)}, ×10000 — ${hoursText(this.draft.driftCross / 10000)}` : 'Пятна стоят на месте'),
+      this.consequence(() => this.draft.driftCross > 0 ? `Просмотр: ×10 — ${hoursText(this.draft.driftCross / 10)}, ×100 — ${hoursText(this.draft.driftCross / 100)}` : 'Пятна стоят на месте'),
     ];
   }
 
@@ -1072,12 +1077,11 @@ export class Panel {
       this.runLabel.textContent = this.pauseButton.ariaLabel;
       this.pauseButton.title = `${this.pauseButton.ariaLabel} (Пробел)`;
     }
-    const position = Math.log10(speed);
-    if (Math.abs(Number(this.speedSlider.value) - position) > 0.00051) this.speedSlider.value = String(position);
+    if (Number(this.speedSlider.value) !== speed) this.speedSlider.value = String(speed);
     const selected = `×${speed.toLocaleString('ru', { maximumFractionDigits: speed < 10 ? 2 : speed < 100 ? 1 : 0 })}`;
     if (this.speedValue.textContent !== selected) this.speedValue.textContent = selected;
     this.speedSlider.setAttribute('aria-valuetext', selected);
-    this.speedSlider.style.setProperty('--speed-progress', `${position / 4 * 100}%`);
+    this.speedSlider.style.setProperty('--speed-progress', `${(speed - 1) / (MAX_SPEED - 1) * 100}%`);
     for (const preset of this.speedPresets) {
       const pressed = String(Math.abs(speed - preset.speed) < preset.speed * 1e-9);
       if (preset.button.getAttribute('aria-pressed') !== pressed) preset.button.setAttribute('aria-pressed', pressed);

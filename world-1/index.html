@@ -140,10 +140,8 @@
       .speed-slider::-moz-range-track { height: 3px; border-radius: 2px; background: var(--line-strong); }
       .speed-slider::-moz-range-progress { height: 3px; background: var(--accent); }
       .speed-slider::-moz-range-thumb { width: 9px; height: 9px; background: var(--raised); border: 2px solid var(--accent); border-radius: 50%; }
-      .speed-ticks { position: relative; display: block; height: 14px; margin: 0 6px; }
-      .speed-ticks button { position: absolute; top: 0; transform: translateX(-50%); height: 14px; min-height: 0; padding: 0 3px; border: 0; background: transparent; color: var(--faint); font: 10px var(--mono); }
-      .speed-ticks button:first-child { transform: none; padding-left: 0; }
-      .speed-ticks button:last-child { transform: translateX(-100%); padding-right: 0; }
+      .speed-ticks { display: flex; justify-content: space-between; height: 15px; }
+      .speed-ticks button { height: 15px; min-height: 0; padding: 0 4px; border: 0; background: transparent; color: var(--faint); font: 10.5px var(--mono); }
       .speed-ticks button[aria-pressed=true] { color: var(--accent); background: transparent; }
       .status { font-size: 12px; color: var(--muted); padding: 0 10px 6px; flex-shrink: 0; }
       .status:empty { display: none; }
