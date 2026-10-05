@@ -6,16 +6,18 @@ import { dishOf, insideDish } from './dish.ts';
  * суша; названия условны. Градация задаёт месту два свойства: сопротивление
  * движению (базовая вязкость × множитель градации) и долю усваиваемого света.
  *
- * Суша отделена от воды отмелью; границы плавные; доли градаций и средний
- * размер зон — параметры стартовой местности. Карта строится из сида и не
+ * Стартовую карту строит генератор суши: массивы заданного числа и площади
+ * с изрезанным берегом и внутренними морями, вокруг — полоса отмели заданной
+ * ширины, остальное — вода. Налегающие массивы сливаются, поэтому генератор
+ * не отказывает; доли градаций — следствие. Карта строится из сида и не
  * зависит от перегородок; дальше её меняет местность (грунт): раз в
  * TERRAIN_PERIOD шагов карта пересобирается из уровня грунта (applyLevels).
  */
 import {
-  LIGHT_ABSORPTION, MINERAL_CELL, SHALLOWS_RING_MIN, VISCOSITY_BLUR, VISCOSITY_CELL,
+  LIGHT_ABSORPTION, SHALLOWS_RING_MIN, VISCOSITY_BLUR, VISCOSITY_CELL,
 } from './constants.ts';
 import { periodicFbm } from './noise.ts';
-import { deriveSeed } from './prng.ts';
+import { deriveSeed, hash3 } from './prng.ts';
 import type { ViscosityShares, WorldParams } from './params.ts';
 
 export const WATER = 0;
@@ -37,14 +39,6 @@ export interface ViscosityMap {
   shares: ViscosityShares;
   /** Растёт при каждой пересборке — чтобы показ знал, что пора перерисовать местность. */
   version: number;
-}
-
-/** Порог, выше которого лежит доля `share` значений. */
-function thresholdForShare(sorted: Float32Array, share: number): number {
-  if (share <= 0) return Infinity;
-  if (share >= 1) return -Infinity;
-  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * (1 - share))));
-  return sorted[idx];
 }
 
 /** Чебышёвское расстояние (в ячейках) до ближайшей ячейки суши; BFS по 8 соседям. */
@@ -101,105 +95,105 @@ function boxBlur(src: Float32Array, cols: number, rows: number, radius: number):
   return out;
 }
 
-/** Максимальная погрешность стартовых долей — половина процентного пункта. */
-export const INITIAL_SHARE_TOLERANCE = 0.005;
+/** Сколько мест пробует генератор для каждого массива суши. */
+const PLACE_TRIES = 4;
 
-export class IncompatibleSharesError extends Error {
-  constructor(message: string) { super(message); this.name = 'Невозможно создать местность'; }
+/** Генератор суши (параметры — в см и см²; внутри — мм). */
+function landLevels(params: WorldParams, cols: number, rows: number, cell: number, active: Uint8Array): Uint8Array {
+  const dish = dishOf(params);
+  const n = cols * rows;
+  const levels = new Uint8Array(n);
+  const s = deriveSeed(params.seed, 'land');
+  const u = (a: number, b: number) => hash3(s, a, b) / 4294967296;
+  // Шум изрезанности: крупность форм — от размера массива (полуострова соразмерны ему).
+  const noise = periodicFbm(deriveSeed(params.seed, 'coast'), 64, 64, 4);
+  const rough = params.coastRoughness;
+  // Массив целиком в чаше, если влезает: иначе край чаши срезал бы заданную площадь.
+  const place = (k: number, i: number, R: number): [number, number] => {
+    if (dish.shape !== 'circle') {
+      const mx = Math.max(0, dish.width / 2 - R), my = Math.max(0, dish.height / 2 - R);
+      return [dish.width / 2 + (2 * u(k, i) - 1) * mx, dish.height / 2 + (2 * u(k, i + 1) - 1) * my];
+    }
+    const r = Math.max(0, dish.width / 2 - R) * Math.sqrt(u(k, i)), a = u(k, i + 1) * Math.PI * 2;
+    return [dish.width / 2 + r * Math.cos(a), dish.height / 2 + r * Math.sin(a)];
+  };
+  /** Пятно с изрезанным краем: true там, где поле > 0. */
+  const blob = (cx: number, cy: number, R: number, salt: number, skip: number, paint: (k: number) => void) => {
+    const swing = rough * 0.8;
+    const reach = R * (1 + swing) + cell;
+    const i0 = Math.max(0, Math.floor((cx - reach) / cell)), i1 = Math.min(cols - 1, Math.ceil((cx + reach) / cell));
+    const j0 = Math.max(0, Math.floor((cy - reach) / cell)), j1 = Math.min(rows - 1, Math.ceil((cy + reach) / cell));
+    const ox = 7 + (salt % 13) * 3.7, oy = 5 + (salt % 11) * 4.3;
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const k = j * cols + i;
+      if (!active[k] || levels[k] === skip) continue;
+      const x = (i + 0.5) * cell - cx, y = (j + 0.5) * cell - cy;
+      // Шум в [-1, 1] со средним 0: край гуляет, площадь в среднем остаётся заданной.
+      // Дальше размаха шума от кромки знак ясен и без него.
+      const base = 1 - Math.hypot(x, y) / R;
+      if (base > swing) { paint(k); continue; }
+      if (base < -swing) continue;
+      if (base + rough * 0.8 * noise(ox + (x / R) * 1.6, oy + (y / R) * 1.6) > 0) paint(k);
+    }
+  };
+  // Массивы суши: площадь — случайная в диапазоне; налегающие сливаются.
+  const masses: { x: number; y: number; R: number }[] = [];
+  for (let m = 0; m < params.landCount; m++) {
+    const area = (params.landAreaMin + (params.landAreaMax - params.landAreaMin) * u(m, 0)) * 100;
+    const R = Math.sqrt(area / Math.PI);
+    // Из нескольких мест — то, где массив меньше налегает на прежние: так крупные
+    // массивы не сбиваются в кучу, а сливаются, лишь когда им тесно.
+    let x = 0, y = 0, best = -Infinity;
+    for (let c = 0; c < PLACE_TRIES; c++) {
+      const [px, py] = place(m, 1 + 2 * c, R);
+      let room = Infinity;
+      for (const o of masses) room = Math.min(room, Math.hypot(px - o.x, py - o.y) - R - o.R);
+      if (room > best) { best = room; x = px; y = py; }
+    }
+    masses.push({ x, y, R });
+    blob(x, y, R, m, LAND, (k) => { levels[k] = LAND; });
+  }
+  // Внутренние моря — в массивах, от крупных к мелким; размер — доля площади своего массива.
+  const order = masses.map((_, i) => i).sort((a, b) => masses[b].R - masses[a].R);
+  for (let q = 0; q < params.seaCount && order.length > 0; q++) {
+    const m = masses[order[q % order.length]];
+    const R = m.R * Math.sqrt(params.seaShare * (0.7 + 0.6 * u(1000 + q, 0)));
+    if (R <= cell) continue;
+    // Моря одного массива расходятся по кругу, иначе ложатся друг на друга.
+    const own = order[q % order.length], k = Math.floor(q / order.length);
+    const count = Math.ceil((params.seaCount - (q % order.length)) / order.length);
+    const a = u(2000 + own, 0) * Math.PI * 2 + (k * Math.PI * 2) / count + (u(1000 + q, 1) - 0.5) * 0.5;
+    const off = (m.R - R) * (count > 1 ? 0.65 + 0.3 * u(1000 + q, 2) : 0.5 * u(1000 + q, 2));
+    blob(m.x + off * Math.cos(a), m.y + off * Math.sin(a), R, 1000 + q, WATER, (k) => { if (levels[k] === LAND) levels[k] = WATER; });
+  }
+  // Отмель — вода ближе ширины отмели к суше (не меньше обязательного кольца).
+  const shelf = Math.max(SHALLOWS_RING_MIN, Math.round((params.shelfWidth * 10) / cell));
+  const dist = distanceToLand(levels, cols, rows);
+  for (let k = 0; k < n; k++) if (levels[k] !== LAND && dist[k] > 0 && dist[k] <= shelf) levels[k] = SHALLOWS;
+  return levels;
 }
 
-/** При восстановлении файла стартовые доли не проверяются: местность берётся из файла. */
-export function createViscosityMap(params: WorldParams, enforceShares = true): ViscosityMap {
+/** Стартовая карта: генератор суши, затем плавные границы. */
+export function createViscosityMap(params: WorldParams): ViscosityMap {
   const dish = dishOf(params);
-  const { width, height } = dish;
   const cell = VISCOSITY_CELL;
-  const cols = Math.ceil(width / cell);
-  const rows = Math.ceil(height / cell);
+  const cols = Math.ceil(dish.width / cell);
+  const rows = Math.ceil(dish.height / cell);
   const n = cols * rows;
-
-  // Плавное поле с масштабом «размера зон»: одна ячейка решётки шума ≈ две зоны.
-  const cellsX = Math.max(1, Math.round(width / (params.viscosityZoneSize * 2)));
-  const cellsY = Math.max(1, Math.round(height / (params.viscosityZoneSize * 2)));
-  const noise = periodicFbm(deriveSeed(params.seed, 'viscosity'), cellsX, cellsY, 4);
-  const field = new Float32Array(n);
-  for (let j = 0; j < rows; j++) {
-    for (let i = 0; i < cols; i++) {
-      field[j * cols + i] = noise(((i + 0.5) * cell / width) * cellsX, ((j + 0.5) * cell / height) * cellsY);
-    }
-  }
-  const active = Uint8Array.from(field, (_, k) => insideDish(dish, (k % cols + 0.5) * cell, (Math.floor(k / cols) + 0.5) * cell) ? 1 : 0);
-  const activeCount = active.reduce((a, b) => a + b, 0);
-  const sorted = Float32Array.from(field.filter((_, k) => active[k])).sort();
-  const build = (land: number, shallows: number): ViscosityMap => {
-    // 1. Суша — самые высокие места поля.
-    const levels = new Uint8Array(n);
-    const landThr = thresholdForShare(sorted, land);
-    for (let k = 0; k < n; k++) if (field[k] >= landThr) levels[k] = LAND;
-
-    // 2. Обязательное кольцо отмели вокруг суши: вода и суша не граничат напрямую.
-    const dist = distanceToLand(levels, cols, rows);
-    const ring = (k: number) => levels[k] !== LAND && dist[k] > 0 && dist[k] <= SHALLOWS_RING_MIN;
-
-    // 3. Остальная отмель — следующие по высоте места; порог подбирается так,
-    //    чтобы кольцо вместе с ними дало нужную долю.
-    const target = Math.round(activeCount * shallows);
-    let ringCount = 0;
-    for (let k = 0; k < n; k++) if (active[k] && ring(k)) ringCount++;
-    if (enforceShares && ringCount / activeCount > params.viscosityShares.shallows + INITIAL_SHARE_TOLERANCE) {
-      const minimum = Math.ceil(ringCount / activeCount * 100);
-      throw new IncompatibleSharesError(`Для этой формы, сида и размера зон кольцу вокруг суши нужно не менее ${minimum}% отмели. Увеличьте долю отмели, уменьшите долю суши или увеличьте размер зон.`);
-    }
-    let lo = -2;
-    let hi = landThr === Infinity ? 2 : landThr;
-    const countShallows = (thr: number) => {
-      let c = 0;
-      for (let k = 0; k < n; k++) if (active[k] && levels[k] !== LAND && (ring(k) || field[k] >= thr)) c++;
-      return c;
-    };
-    if (shallows <= 0) {
-      lo = hi = Infinity;
-    } else {
-      for (let it = 0; it < 40; it++) {
-        const mid = (lo + hi) / 2;
-        if (countShallows(mid) > target) lo = mid; else hi = mid;
-      }
-    }
-    const shallowThr = hi;
-    for (let k = 0; k < n; k++) {
-      if (levels[k] !== LAND && (ring(k) || field[k] >= shallowThr)) levels[k] = SHALLOWS;
-    }
-
-    // 4. Плавные границы.
-    const raw = new Float32Array(n);
-    for (let k = 0; k < n; k++) raw[k] = levels[k];
-    const smooth = boxBlur(boxBlur(raw, cols, rows, VISCOSITY_BLUR), cols, rows, VISCOSITY_BLUR);
-
-    const counts = [0, 0, 0];
-    for (let k = 0; k < n; k++) if (active[k]) counts[levels[k]]++;
-    return {
-      active, cols, rows, cell, levels, smooth,
-      shares: { water: counts[0] / activeCount, shallows: counts[1] / activeCount, land: counts[2] / activeCount },
-      version: 0,
-    };
+  const active = new Uint8Array(n);
+  for (let k = 0; k < n; k++) active[k] = insideDish(dish, (k % cols + 0.5) * cell, (Math.floor(k / cols) + 0.5) * cell) ? 1 : 0;
+  const levels = landLevels(params, cols, rows, cell, active);
+  const raw = new Float32Array(n);
+  for (let k = 0; k < n; k++) raw[k] = levels[k];
+  const smooth = boxBlur(boxBlur(raw, cols, rows, VISCOSITY_BLUR), cols, rows, VISCOSITY_BLUR);
+  const counts = [0, 0, 0];
+  let activeCount = 0;
+  for (let k = 0; k < n; k++) if (active[k]) { counts[levels[k]]++; activeCount++; }
+  return {
+    active, cols, rows, cell, levels, smooth,
+    shares: { water: counts[0] / activeCount, shallows: counts[1] / activeCount, land: counts[2] / activeCount },
+    version: 0,
   };
-  if (!enforceShares) return build(params.viscosityShares.land, params.viscosityShares.shallows);
-
-  const groundCols = Math.ceil(width / MINERAL_CELL), groundRows = Math.ceil(height / MINERAL_CELL);
-  let land = params.viscosityShares.land;
-  let shallows = params.viscosityShares.shallows;
-  for (let attempt = 0; attempt < 12; attempt++) {
-    const map = build(land, shallows);
-    // Доли должны совпасть у готового мира, после усреднения на сетку грунта
-    // и обратной интерполяции, а не только у исходных категорий.
-    const applied = levelsOnGrid(map, groundCols, groundRows, MINERAL_CELL);
-    const measured: ViscosityMap = { ...map, levels: new Uint8Array(n), smooth: new Float32Array(n) };
-    applyLevels(measured, applied, groundCols, groundRows, MINERAL_CELL);
-    const wanted = params.viscosityShares;
-    if (Math.max(...(['water', 'shallows', 'land'] as const).map(key => Math.abs(measured.shares[key] - wanted[key]))) <= INITIAL_SHARE_TOLERANCE) return map;
-    land = Math.max(0, Math.min(1, land + wanted.land - measured.shares.land));
-    shallows = Math.max(0, Math.min(1 - land, shallows + wanted.shallows - measured.shares.shallows));
-  }
-  throw new IncompatibleSharesError('Не удалось выдержать заданные доли после сглаживания границ. Увеличьте долю отмели, уменьшите долю суши или увеличьте размер зон.');
 }
 
 /**

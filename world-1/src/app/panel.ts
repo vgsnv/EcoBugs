@@ -5,7 +5,7 @@
  * применяются кнопкой «Создать мир».
  */
 import { PROCESS_COLORS } from './render/processes.ts';
-import { createLightMap, dishCoverage, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type RhythmShape, type WorldParams } from '../core/index.ts';
+import { createLightMap, createViscosityMap, dishCoverage, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type RhythmShape, type WorldParams } from '../core/index.ts';
 import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render/palette.ts';
 import { formatArea, formatLength, formatMass, formatNumber, formatPercent, formatWorldAge } from './units.ts';
 import { Sidebar } from './sidebar.ts';
@@ -48,7 +48,7 @@ export const SPEED_KEYS = SPEEDS.map((_, i) => String(i + 1));
 
 const OPEN_GROUPS_KEY = 'ecobugs.params.open';
 
-type NumberKey = 'lightShadow' | 'lightExtra' | 'spotCount' | 'spotAreaMin' | 'spotAreaMax' | 'driftCross' | 'driftTurn' | 'sunRhythm' | 'sunPeriod' | 'rhythmTransition' | 'rhythmRise' | 'viscosityZoneSize' | 'tectonicVolume' | 'heightMin' | 'heightMax' | 'groundThreshold' | 'slopeLimit' | 'settleHalf' | 'mineralStock' | 'eruptionPressure' | 'driftResponse' | 'resistanceShallows' | 'resistanceLand' | 'turbidityLoss' | 'spotWobble' | 'spotBreath';
+type NumberKey = 'lightShadow' | 'lightExtra' | 'spotCount' | 'spotAreaMin' | 'spotAreaMax' | 'driftCross' | 'driftTurn' | 'sunRhythm' | 'sunPeriod' | 'rhythmTransition' | 'rhythmRise' | 'landCount' | 'landAreaMin' | 'landAreaMax' | 'coastRoughness' | 'seaCount' | 'seaShare' | 'shelfWidth' | 'tectonicVolume' | 'heightMin' | 'heightMax' | 'groundThreshold' | 'slopeLimit' | 'settleHalf' | 'mineralStock' | 'eruptionPressure' | 'driftResponse' | 'resistanceShallows' | 'resistanceLand' | 'turbidityLoss' | 'spotWobble' | 'spotBreath';
 
 /** Ползунок параметра: значение — в единицах параметра, шкала — линейная или логарифмическая. */
 interface SliderSpec {
@@ -86,7 +86,6 @@ const nice = (v: number) => {
 };
 
 /** Прежние параметры местности — до генератора суши. */
-const ZONE_SIZE: SliderSpec = { key: 'viscosityZoneSize', label: 'Размер зон', hint: 'Средний размер зон воды, отмели и суши. Заменится генератором суши (массивы, изрезанность, внутренние моря).', min: 80, max: 300, step: 5, format: (v) => formatLength(v) };
 const STOCK: SliderSpec = { key: 'mineralStock', label: 'Запас минерала', hint: 'Сколько минерала в недрах при сотворении, на квадратный метр свободной площади. Дальше масса постоянна: минерал ходит между недрами, средой и залежами. Больше запас — крупнее извержения и воронки, а не чаще.', min: 200, max: 5000, log: true, view: (v) => v * 1000, store: (v) => v / 1000, format: (v) => `${formatNumber(v)} г/м²` };
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLElementTagNameMap[K]> = {}, ...children: (Node | string)[]): HTMLElementTagNameMap[K] {
@@ -152,7 +151,6 @@ export class Panel {
   private readonly handlers: PanelHandlers;
   private readonly errorsBox = el('div', { className: 'errors', ariaLive: 'polite' });
   private readonly dirtyNote = el('div', { className: 'note' });
-  private readonly waterValue = el('span', { className: 'value' });
   private readonly timeLabel = el('button', { type: 'button', className: 'time' });
   private showSteps = false;
   private displayedStep = 0;
@@ -531,7 +529,7 @@ export class Panel {
         group('Чаша', 'форма, пропорции, стартовая картина', [sub('Форма'), world[0], world[1], sub('Стартовая картина'), world[2], world[3]], true),
         group('Свет', 'пятна, яркость и их движение', this.lightFields(sub), true),
         group('Ритм солнца', 'как свет нарастает и спадает', this.rhythmFields(), false),
-        group('Местность', 'прежние ручки — до генератора суши', [this.slider(ZONE_SIZE), ...this.sharesRows()], false),
+        group('Суша', 'массивы, берега, внутренние моря', this.landFields(sub), false),
         group('Тектоника', 'как дно поднимается и опускается', this.tectonicFields(), false),
         group('Минерал', 'запас недр и извержения', [
           this.slider(STOCK), this.consequence(() => `Всего в недрах ≈ ${formatMass(this.draft.mineralStock * 1_920_000)} — без перегородок.`),
@@ -821,6 +819,34 @@ export class Panel {
     return node;
   }
 
+  /**
+   * Доли местности черновика. Сборка карты — около десятой секунды, поэтому
+   * считается только после изменения ручек суши, когда они успокоятся; до тех
+   * пор видна прежняя строка.
+   */
+  private sharesNote(): HTMLElement {
+    let key = '';
+    let timer = 0;
+    const node = el('div', { className: 'note consequence' });
+    const show = () => {
+      const s = createViscosityMap(this.draft).shares;
+      node.textContent = `Вода ${Math.round(s.water * 100)}% · отмель ${Math.round(s.shallows * 100)}% · суша ${Math.round(s.land * 100)}%`;
+    };
+    const update = () => {
+      const d = this.draft;
+      const next = JSON.stringify([d.seed, d.shape, d.aspectRatio, d.landCount, d.landAreaMin, d.landAreaMax, d.coastRoughness, d.seaCount, d.seaShare, d.shelfWidth]);
+      if (next === key) return;
+      const first = key === '';
+      key = next;
+      window.clearTimeout(timer);
+      if (first) show();
+      else timer = window.setTimeout(() => { try { show(); } catch { node.textContent = ''; } }, 250);
+    };
+    this.consequences.push(update);
+    update();
+    return node;
+  }
+
   private tectonicFields(): HTMLElement[] {
     // Средняя площадь подвижки, см² (как в ядре: 40–3000 см², равномерно в логарифме).
     const meanArea = (3000 - 40) / Math.log(3000 / 40);
@@ -885,28 +911,30 @@ export class Panel {
     ];
   }
 
-  private sharesRows(): HTMLElement[] {
-    const make = (key: 'land' | 'shallows', label: string, text: string) => {
-      const input = el('input', { type: 'range', min: '0', max: '0.6', step: '0.01' });
-      const value = el('span', { className: 'value' });
-      input.addEventListener('input', () => {
-        this.draft.viscosityShares[key] = Number(input.value);
-        value.textContent = formatPercent(this.draft.viscosityShares[key]);
-        input.setAttribute('aria-valuetext', value.textContent);
-        this.refresh();
-      });
-      this.inputs.push(() => {
-        input.value = String(this.draft.viscosityShares[key]);
-        value.textContent = formatPercent(this.draft.viscosityShares[key]);
-        input.setAttribute('aria-valuetext', value.textContent);
-      });
-      return this.mark(el('label', {}, this.caption(label, text, value), input),
-        () => this.draft.viscosityShares[key] !== this.current.viscosityShares[key]);
-    };
+  /** Заготовки суши только выставляют ручки генератора — дальше их можно подправить. */
+  private landFields(sub: (text: string) => HTMLElement): HTMLElement[] {
+    const presets: [string, Partial<WorldParams>][] = [
+      ['Архипелаг', { landCount: 24, landAreaMin: 40, landAreaMax: 400, coastRoughness: 0.45, seaCount: 0, shelfWidth: 4 }],
+      ['Континенты', { landCount: 3, landAreaMin: 800, landAreaMax: 2000, coastRoughness: 0.4, seaCount: 1, seaShare: 0.15, shelfWidth: 5 }],
+      ['Пангея', { landCount: 1, landAreaMin: 7000, landAreaMax: 8000, coastRoughness: 0.5, seaCount: 2, seaShare: 0.12, shelfWidth: 6 }],
+      ['Внутреннее море', { landCount: 1, landAreaMin: 11000, landAreaMax: 12000, coastRoughness: 0.3, seaCount: 1, seaShare: 0.45, shelfWidth: 5 }],
+    ];
+    const buttons = presets.map(([name, values]) => {
+      const b = el('button', { type: 'button', className: 'preset', textContent: name });
+      b.addEventListener('click', () => this.replaceDraft({ ...this.draft, ...values }));
+      return b;
+    });
     return [
-      make('land', 'Доля суши', 'Высокая вязкость: двигаться дороже всего, свет усваивается лучше всего.'),
-      make('shallows', 'Доля отмели', 'Средняя вязкость. Суша всегда отделена от воды отмелью.'),
-      el('label', {}, this.caption('Доля воды', 'Остаток чашки. Низкая вязкость: двигаться дешевле всего, свет усваивается хуже всего.', this.waterValue)),
+      el('div', { className: 'field' }, this.caption('Заготовки', 'Готовые наборы ручек ниже: острова, несколько континентов, один материк, материк с морем внутри. Названия — образы формы; дальше всё можно подправить.'), el('div', { className: 'presets' }, ...buttons)),
+      sub('Массивы'),
+      this.slider({ key: 'landCount', label: 'Число массивов', hint: 'Сколько массивов суши. Налегающие сливаются: так из островов складываются континенты.', min: 0, max: 60, step: 1, format: (v) => `${v} шт.` }),
+      this.range({ keys: ['landAreaMin', 'landAreaMax'], label: 'Площадь массива', hint: 'Самый маленький и самый большой массив, см²; размер каждого — случайный в диапазоне. Вся чаша — 19 200 см².', min: 10, max: DISH_CM2, log: true, format: (v) => `${formatNumber(v)} см²`, formatRange: (a, b) => `${formatNumber(a)}–${formatNumber(b)} см²` }),
+      this.slider({ key: 'coastRoughness', label: 'Изрезанность берега', hint: 'Насколько берег отходит от круга: 0 — гладкий, больше — полуострова и заливы.', min: 0, max: 1, step: 0.05, format: (v) => formatPercent(v) }),
+      sub('Моря и отмель'),
+      this.slider({ key: 'seaCount', label: 'Внутренние моря', hint: 'Сколько морей внутри суши — в крупнейших массивах.', min: 0, max: 10, step: 1, format: (v) => `${v} шт.` }),
+      this.slider({ key: 'seaShare', label: 'Размер моря', hint: 'Какую долю площади своего массива занимает внутреннее море.', min: 0.05, max: 0.8, step: 0.05, format: (v) => `${formatPercent(v)} массива` }),
+      this.slider({ key: 'shelfWidth', label: 'Ширина отмели', hint: 'Полоса отмели вокруг суши. Отмели соседних массивов смыкаются.', min: 1, max: 30, log: true, format: (v) => `${formatNumber(v)} см` }),
+      this.sharesNote(),
     ];
   }
 
@@ -1051,9 +1079,6 @@ export class Panel {
     this.showLayout();
     if (rebuild) this.scheduleDraft();
     for (const update of this.consequences) update();
-    const s = this.draft.viscosityShares;
-    s.water = Math.round((1 - s.land - s.shallows) * 100) / 100;
-    this.waterValue.textContent = formatPercent(s.water);
     const errors = validateParams(this.draft);
     this.errorsBox.replaceChildren(...errors.map((e) => el('div', { textContent: e })));
     this.createButton.disabled = errors.length > 0;

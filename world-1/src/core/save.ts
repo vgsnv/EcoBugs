@@ -11,7 +11,7 @@ import { funnelFromNumbers, funnelNumbers, volcanoFromNumbers, volcanoNumbers } 
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 25;
+export const WORLD_FORMAT_VERSION = 26;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -39,6 +39,7 @@ const OLD_FORMATS: Record<number, string> = {
   22: 'тогда сопротивление сред, мутность и давление извержения не были параметрами',
   23: 'тогда была «скорость местности», а пороги срыва зависели от солнца',
   24: 'тогда толчки и подвижки шли двумя отдельными потоками',
+  25: 'тогда суша задавалась долями и размером зон',
 };
 
 export interface MineralFile {
@@ -221,9 +222,8 @@ export function parseWorldFile(text: string): World {
   }
   if (problems.length > 0 || !params) throw new WorldFileError(problems);
 
-  // Стартовая местность будет заменена сохранённой, даже если новые правила
-  // создания больше не допускают исходное сочетание долей.
-  const world = createWorld(params, true);
+  // Стартовая местность будет заменена сохранённой.
+  const world = createWorld(params);
   world.step = step as number;
   const mineralProblems = [...restoreLight(world, data.light), ...restoreMineral(world, data.mineral), ...restoreTerrain(world, data.terrain)];
   if (mineralProblems.length > 0) throw new WorldFileError(mineralProblems);

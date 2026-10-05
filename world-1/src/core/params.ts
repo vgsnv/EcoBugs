@@ -46,10 +46,14 @@ export interface WorldParams {
   baseTemperature: number;
   /** Насколько в пятне теплее, чем на фоне. */
   spotHeat: number;
-  /** Какую часть чашки занимают вода, отмель и суша. */
-  viscosityShares: ViscosityShares;
-  /** Средний размер зон вязкости в единицах мира. */
-  viscosityZoneSize: number;
+  /** Генератор суши: массивы (сколько и какой площади, см²), изрезанность берега 0…1, внутренние моря (сколько и какую долю площади своего массива занимают), ширина отмели, см. */
+  landCount: number;
+  landAreaMin: number;
+  landAreaMax: number;
+  coastRoughness: number;
+  seaCount: number;
+  seaShare: number;
+  shelfWidth: number;
   /** Запас минерала: общее количество в мире — в среднем на единицу свободной площади чашки. */
   mineralStock: number;
   /** Средний порог давления недр — доля запаса: выше — извержения реже и крупнее. */
@@ -89,8 +93,13 @@ export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
   rhythmRise: 0.5,
   baseTemperature: 1,
   spotHeat: 1,
-  viscosityShares: Object.freeze({ water: 0.6, shallows: 0.25, land: 0.15 }),
-  viscosityZoneSize: 120,
+  landCount: 12,
+  landAreaMin: 100,
+  landAreaMax: 500,
+  coastRoughness: 0.35,
+  seaCount: 0,
+  seaShare: 0.25,
+  shelfWidth: 5,
   mineralStock: 1,
   eruptionPressure: 0.15,
   driftResponse: 1,
@@ -113,7 +122,6 @@ export function makeParams(overrides: Partial<WorldParams> = {}): WorldParams {
     ...DEFAULT_PARAMS,
     ...overrides,
     ...(overrides.shape === 'circle' ? { aspectRatio: 1 } : {}),
-    viscosityShares: { ...DEFAULT_PARAMS.viscosityShares, ...overrides.viscosityShares },
   };
 }
 
@@ -134,7 +142,13 @@ export const PARAM_LABELS: Readonly<Record<string, string>> = {
   'rhythmRise': 'Доля роста ритма',
   'baseTemperature': 'Базовая температура',
   'spotHeat': 'Нагрев в пятнах',
-  'viscosityZoneSize': 'Размер зон вязкости',
+  'landCount': 'Массивы суши',
+  'landAreaMin': 'Площадь массивов от',
+  'landAreaMax': 'Площадь массивов до',
+  'coastRoughness': 'Изрезанность берега',
+  'seaCount': 'Внутренние моря',
+  'seaShare': 'Размер внутренних морей',
+  'shelfWidth': 'Ширина отмели',
   'sunRhythm': 'Размах ритма солнца',
   'sunPeriod': 'Период ритма солнца',
   'mineralStock': 'Запас минерала',
@@ -151,10 +165,6 @@ export const PARAM_LABELS: Readonly<Record<string, string>> = {
   'tectonicVolume': 'Тектоника: объём',
   'heightMin': 'Тектоника: высоты от',
   'heightMax': 'Тектоника: высоты до',
-  'viscosityShares': 'Доли вязкости',
-  'viscosityShares.water': 'Доля воды',
-  'viscosityShares.shallows': 'Доля отмели',
-  'viscosityShares.land': 'Доля суши',
 };
 
 /**
@@ -197,7 +207,14 @@ export function validateParams(p: WorldParams): string[] {
   // Строго больше нуля: сила мутаций «не до нуля» даже на фоне.
   inRange('baseTemperature', p.baseTemperature, 0, 100, true);
   inRange('spotHeat', p.spotHeat, 0, 100);
-  inRange('viscosityZoneSize', p.viscosityZoneSize, 1, 10000);
+  if (!Number.isInteger(p.landCount) || p.landCount < 0 || p.landCount > 200) errors.push('Массивы суши: ожидается целое от 0 до 200');
+  inRange('landAreaMin', p.landAreaMin, 1, DISH_AREA / 100);
+  inRange('landAreaMax', p.landAreaMax, 1, DISH_AREA / 100);
+  if (p.landAreaMax < p.landAreaMin) errors.push('Площадь массивов: «до» меньше, чем «от»');
+  inRange('coastRoughness', p.coastRoughness, 0, 1);
+  if (!Number.isInteger(p.seaCount) || p.seaCount < 0 || p.seaCount > 50) errors.push('Внутренние моря: ожидается целое от 0 до 50');
+  inRange('seaShare', p.seaShare, 0, 0.9);
+  inRange('shelfWidth', p.shelfWidth, 0, 100);
   inRange('sunRhythm', p.sunRhythm, 0, 0.9);
   inRange('sunPeriod', p.sunPeriod, 1000, 100_000_000);
   inRange('mineralStock', p.mineralStock, 0, 100, true);
@@ -216,16 +233,5 @@ export function validateParams(p: WorldParams): string[] {
   inRange('heightMax', p.heightMax, 0, 5);
   if (p.heightMax < p.heightMin) errors.push('Тектоника: высоты «до» ниже, чем «от»');
 
-  const s = p.viscosityShares;
-  if (typeof s !== 'object' || s === null) {
-    errors.push('Доли вязкости: ожидается объект');
-  } else {
-    inRange('viscosityShares.water', s.water, 0, 1);
-    inRange('viscosityShares.shallows', s.shallows, 0, 1);
-    inRange('viscosityShares.land', s.land, 0, 1);
-    const sum = s.water + s.shallows + s.land;
-    if (Math.abs(sum - 1) > 1e-6) errors.push(`Доли вязкости: сумма долей ${sum}, а должна быть 1`);
-    if (s.land > 0 && !(s.shallows > 0)) errors.push('Доли вязкости: суша без отмели невозможна — суша отделена от воды отмелью');
-  }
   return errors;
 }
