@@ -12,7 +12,8 @@
     "benchmark": "node --experimental-strip-types scripts/benchmark.mjs",
     "profile": "node --experimental-strip-types scripts/profile.mjs",
     "landscape": "node --experimental-strip-types scripts/landscape.mjs",
-    "light": "node --experimental-strip-types scripts/light.mjs"
+    "light": "node --experimental-strip-types scripts/light.mjs",
+    "bench": "node --experimental-strip-types scripts/bench.mjs"
   },
   "overrides": {
     "source-map-js": "1.2.1"
