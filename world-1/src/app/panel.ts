@@ -224,7 +224,10 @@ export class Panel {
       this.navigationToggle.setAttribute('aria-pressed', String(!this.roots.navigation.hidden));
     });
     document.querySelector('.probe-point-release')!.addEventListener('click', () => this.handlers.onUnpinProbe());
-    this.roots.summary.querySelector('.legend-head')!.after(el('section', { className: 'summary-section summary-light' },
+    // Дрейф и ритм — первой строкой в группе «Свет» сводки.
+    const lightGroup = this.roots.summary.querySelector<HTMLElement>('[data-group="Свет"]');
+    if (lightGroup) { lightGroup.classList.add('summary-light'); lightGroup.querySelector('h3')!.after(document.querySelector<HTMLElement>('.light-drift')!); }
+    else this.roots.summary.querySelector('.legend-head')!.after(el('section', { className: 'summary-section summary-light' },
       el('h3', { textContent: 'Свет' }), document.querySelector<HTMLElement>('.light-drift')!));
     this.summaryToggle.setAttribute('aria-controls', 'world-summary');
     this.summaryToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3v14h14 M6 13V9 M10 13V5 M14 13V7"/></svg>';

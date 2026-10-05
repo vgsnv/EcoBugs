@@ -1,5 +1,9 @@
-import { flowAt, insideDish, isBlocked, mineralInDeposits, mineralInEruptions, mineralInMedium, millimetresPerSecond, type MineralExchanges, type World } from '../core/index.ts';
+import { flowAt, insideDish, isBlocked, LIGHT_REFERENCE, lightFromIntensity, mineralInDeposits, mineralInEruptions, mineralInMedium, millimetresPerSecond, rasterizeSpotIntensity, type MineralExchanges, type World } from '../core/index.ts';
 import { formatArea, formatDuration, formatLength, formatMass, formatNumber, formatPercent, formatWorldAge } from './units.ts';
+
+/** Долгая история — для темпов редких событий: снимок раз в час мира, за последние сутки. */
+const LONG_EVERY = 36_000, LONG_KEEP = 25, DAY = 864_000;
+type LongSample = { step: number; eruptions: number; levels: Uint8Array };
 
 type Sample = { step: number; water: number; shallows: number; land: number; depths: number; medium: number; deposits: number; eruptions: number; emitted: number; funnelSunk: number };
 
@@ -7,6 +11,8 @@ type Sample = { step: number; water: number; shallows: number; land: number; dep
 export class WorldSummary {
   private exchanges: MineralExchanges = { emitted: 0, funnelSunk: 0 };
   private history: Sample[] = [];
+  private long: LongSample[] = [];
+  private intensity: Float32Array<ArrayBufferLike> = new Float32Array(0);
   private lastRender = -Infinity;
   private lastStep = -1;
   private readonly values = new Map<string, HTMLElement>();
@@ -14,13 +20,14 @@ export class WorldSummary {
     this.root = privateRoot;
     privateRoot.innerHTML = '<div class="legend-head"><h2>Сводка мира</h2></div>';
     const groups: [string, [string, string][]][] = [
+      ['Свет', [['lit', 'Под пятнами'], ['lightNow', 'В пятне / в тени'], ['lightMean', 'В среднем по чаше']]],
       ['Мир', [['size', 'Размеры'], ['area', 'Площадь'], ['age', 'Возраст'], ['water', 'Вода'], ['shallows', 'Отмель'], ['land', 'Суша']]],
       ['Минерал', [['total', 'Всего'], ['depths', 'В недрах'], ['medium', 'В среде'], ['deposits', 'В залежах'], ['transit', 'В извержениях']]],
-      ['Сейчас', [['volcanoes', 'Активные вулканы'], ['funnels', 'Воронки'], ['movements', 'Подвижки / толчки'], ['flow', 'Среднее течение']]],
+      ['Сейчас', [['volcanoes', 'Активные вулканы'], ['funnels', 'Воронки'], ['movements', 'Подвижки / толчки'], ['flow', 'Среднее течение'], ['eruptionRate', 'Извержения'], ['shoreRate', 'Смена берега']]],
       ['Изменения', [['period', 'Период наблюдения'], ['deltaWater', 'Вода'], ['deltaShallows', 'Отмель'], ['deltaLand', 'Суша'], ['deltaDepths', 'Недра'], ['deltaMedium', 'Среда'], ['deltaDeposits', 'Залежи'], ['deltaEruptions', 'Извержений началось'], ['emitted', 'Выброшено вулканами'], ['funnelSunk', 'Воронки → недра']]],
     ];
     for (const [title, rows] of groups) {
-      const section = document.createElement('section'); section.className = 'summary-section';
+      const section = document.createElement('section'); section.className = 'summary-section'; section.dataset.group = title;
       const heading = document.createElement('h3'); heading.textContent = title; section.append(heading);
       const list = document.createElement('dl');
       for (const [key, label] of rows) {
@@ -36,7 +43,7 @@ export class WorldSummary {
   }
   private readonly root: HTMLElement;
 
-  reset(world: World): void { this.history = []; this.exchanges = { emitted: 0, funnelSunk: 0 }; this.lastRender = -Infinity; this.lastStep = -1; this.observe(world); }
+  reset(world: World): void { this.history = []; this.long = []; this.exchanges = { emitted: 0, funnelSunk: 0 }; this.lastRender = -Infinity; this.lastStep = -1; this.observe(world); }
 
   observe(world: World, exchanges = this.exchanges): void {
     this.exchanges = { ...exchanges };
@@ -45,6 +52,11 @@ export class WorldSummary {
     const shares = world.viscosity.shares, mineral = world.mineral;
     this.history.push({ step: world.step, ...shares, depths: mineral.depths, medium: mineralInMedium(mineral), deposits: mineralInDeposits(world.terrain), eruptions: mineral.eruptions, ...this.exchanges });
     if (this.history.length > 128) this.history.shift();
+    const last = this.long.at(-1);
+    if (!last || world.step - last.step >= LONG_EVERY || world.step < last.step) {
+      this.long.push({ step: world.step, eruptions: mineral.eruptions, levels: world.viscosity.levels.slice() });
+      if (this.long.length > LONG_KEEP) this.long.shift();
+    }
   }
 
   render(world: World, now: number): void {
@@ -72,6 +84,8 @@ export class WorldSummary {
     }
     set('flow', count ? `≈ ${formatNumber(millimetresPerSecond(sum / count))} мм/с` : '—');
     this.values.get('flow')!.title = 'Средняя величина скорости по равномерной сетке 20 × 15, без стен и участков вне чашки.';
+    this.renderLight(world, set);
+    this.renderRates(world, set);
     let baseline = this.history[0];
     for (const sample of this.history) { if (sample.step <= world.step - 600) baseline = sample; else break; }
     const elapsed = baseline ? world.step - baseline.step : 0;
@@ -87,5 +101,47 @@ export class WorldSummary {
     set('deltaEruptions', elapsed ? String(m.eruptions - baseline.eruptions) : '—');
     set('emitted', elapsed ? formatMass(this.exchanges.emitted - baseline.emitted) : '—');
     set('funnelSunk', elapsed ? formatMass(this.exchanges.funnelSunk - baseline.funnelSunk) : '—');
+  }
+
+  /** Свет — следствие законов и пятен: доля чаши под пятнами и свет, который падает сейчас (без мутности). */
+  private renderLight(world: World, set: (key: string, text: string) => void): void {
+    const d = world.dish, cell = 20;
+    const cols = Math.ceil(d.width / cell), rows = Math.ceil(d.height / cell);
+    this.intensity = rasterizeSpotIntensity(world.light, world.step, cols, rows, cell, this.intensity);
+    let lit = 0, sum = 0, count = 0;
+    for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+      const x = (i + 0.5) * cell, y = (j + 0.5) * cell;
+      if (!insideDish(d, x, y) || isBlocked(world.partitions, x, y)) continue;
+      const v = this.intensity[j * cols + i];
+      if (v >= 0.5) lit++;
+      sum += lightFromIntensity(world.light, v, world.step); count++;
+    }
+    const lux = (v: number) => formatNumber(Math.round(v * LIGHT_REFERENCE));
+    set('lit', count ? formatPercent(lit / count) : '—');
+    set('lightNow', `${lux(lightFromIntensity(world.light, 1, world.step))} / ${lux(lightFromIntensity(world.light, 0, world.step))} лм/см²`);
+    set('lightMean', count ? `${lux(sum / count)} лм/см²` : '—');
+  }
+
+  /** Темпы редких событий — по долгой истории (до суток): частота извержений и смена градаций местности. */
+  private renderRates(world: World, set: (key: string, text: string) => void): void {
+    const first = this.long[0];
+    const elapsed = first ? world.step - first.step : 0;
+    if (!first || elapsed < LONG_EVERY) {
+      set('eruptionRate', 'через час мира');
+      set('shoreRate', 'через час мира');
+      return;
+    }
+    const window = `за ${formatDuration(elapsed)}`;
+    const perDay = (world.mineral.eruptions - first.eruptions) * DAY / elapsed;
+    set('eruptionRate', `≈ ${formatNumber(Math.round(perDay * 10) / 10)} в сутки · ${window}`);
+    const v = world.viscosity;
+    let changed = 0, active = 0;
+    if (first.levels.length === v.levels.length) for (let k = 0; k < v.levels.length; k++) {
+      if (!v.active[k]) continue;
+      active++;
+      if (v.levels[k] !== first.levels[k]) changed++;
+    }
+    set('shoreRate', active ? `${formatPercent(changed / active * DAY / elapsed)} чаши в сутки · ${window}` : '—');
+    this.values.get('shoreRate')!.title = 'Доля чаши, где градация местности (вода, отмель, суша) стала другой, в пересчёте на сутки.';
   }
 }

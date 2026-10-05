@@ -8,7 +8,7 @@ import type { Dish } from '../../core/index.ts';
 import type { Frame } from './frame.ts';
 import { createProgram, Textures, type Program, type TextureSource } from './gl.ts';
 import { GLARE_STRENGTH, LIGHT_SHADE_GLSL, MINERAL_COLOR, MINERAL_DEEP, SHADE_COLOR, SUN_COLOR, smoothstep, type Rgb } from './palette.ts';
-import { LIGHT_MASK_FS, LIGHT_MASK_SCALE, type LightField } from './light.ts';
+import { LIGHT_MASK_FS, LIGHT_MASK_SCALE, OVERLAP_MAX, type LightField } from './light.ts';
 import { TRAIL_DASH_FS, TRAIL_FADE_FS, TRAIL_SECONDS } from './trails.ts';
 import type { StreamField, StreamView } from './water.ts';
 import { TERRAIN_GLSL, type Grid, type TerrainData } from './terrain.ts';
@@ -153,7 +153,7 @@ ${TABLE_GLSL}
 ${TERRAIN_GLSL}
 ${TECTONICS_GLSL}
 ${LIGHT_SHADE_GLSL}
-uniform sampler2D u_spotMask;    // R — пятна с резким краем, G — с мягким
+uniform sampler2D u_spotMask;    // R — пятна с резким краем, G — с мягким, B — налегание
 uniform sampler2D u_mineral;
 uniform sampler2D u_mineralPrev;  // прошлое состояние дымки — к нынешнему переходим плавно
 uniform float u_mineralMix;
@@ -233,8 +233,11 @@ void main() {
 
   // Свет: яркость — по свету, который доходит (солнце × пятно или фон × прозрачность),
   // по постоянной шкале; тёплый оттенок и высветление пятен, блик сверх полного света.
-  vec2 sp = texture(u_spotMask, gl_FragCoord.xy / u_size).rg;
-  float t = lightTone(u_sunNow * mix(u_background, 1., sp.y) * (1. - held));
+  vec3 spm = texture(u_spotMask, gl_FragCoord.xy / u_size).rgb;
+  vec2 sp = spm.rg;
+  // Где пятна налегают, свет складывается, как в модели: вклад сверх одного пятна — из B.
+  float spotLight = sp.y + spm.b * ${OVERLAP_MAX.toFixed(1)};
+  float t = lightTone(u_sunNow * mix(u_background, 1., spotLight) * (1. - held));
   float mb = sp.y * (1. - held) * min(1., t);
   c *= mix(vec3(1.), u_shade, clamp(1. - t, 0., 1.));
   c *= mix(vec3(1.), u_sun, u_warmth * mb);

@@ -50,8 +50,11 @@ export class LightLayer {
 
 /**
  * Маска света на GPU — то же поле, что в модели: G — свет пятен 0…1 (плавный
- * край), R — то же, но с краем в пару пикселей (для бликов ряби и блёсток).
+ * край), R — то же, но с краем в пару пикселей (для бликов ряби и блёсток),
+ * B — налегание: свет сверх одного пятна в долях OVERLAP_MAX (перекрытия светлее).
  */
+/** Сколько пятен сверх первого различает маска в местах налегания. */
+export const OVERLAP_MAX = 3;
 /** Во сколько раз маска света грубее холста по каждой оси. */
 export const LIGHT_MASK_SCALE = 2;
 
@@ -66,7 +69,8 @@ out vec4 o;
 void main() {
   // Поле плавное — маска в пониженном разрешении, на холст растягивается со сглаживанием.
   vec2 px = vec2(gl_FragCoord.x, u_maskSize.y - gl_FragCoord.y) * u_maskScale;
-  float l = min(1., lightField(worldAt(px)));
+  float sum = lightField(worldAt(px));
+  float l = min(1., sum);
   float sharp = smoothstep(.35, .65, l);
-  o = vec4(sharp, l, 0., 1.);
+  o = vec4(sharp, l, clamp((sum - 1.) / ${OVERLAP_MAX.toFixed(1)}, 0., 1.), 1.);
 }`;
