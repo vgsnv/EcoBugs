@@ -283,6 +283,12 @@ export class WorldRenderer {
     }, full);
   }
 
+  /** Стол — тёмная подложка (полный экран) или лабораторный коврик. */
+  setDarkTable(on: boolean): void {
+    this.field.darkTable = on;
+    this.frameKey = '';
+  }
+
   /** Вся ли чашка в кадре (миникарта тогда не нужна). */
   get fitted(): boolean {
     return this.camera.fitted;

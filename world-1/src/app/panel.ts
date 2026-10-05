@@ -28,6 +28,8 @@ export interface PanelHandlers {
   onZoomIn(): void;
   onZoomOut(): void;
   onZoomFit(): void;
+  /** Полный экран включён или выключен (стол — тёмная подложка). */
+  onFocusMode(on: boolean): void;
   /** Показать или скрыть миникарту в углу карты. */
   onMinimap(): void;
   onProcesses(enabled: boolean): void;
@@ -46,6 +48,11 @@ export interface PanelRoots {
   probe: HTMLElement;
   viewControls: HTMLElement;
 }
+
+/** Полный экран: через сколько мс без движения гаснет управление; у какого края проявляется панель, пикселей. */
+const IDLE_MS = 2500;
+const PEEK_EDGE = 28;
+const PEEK_LEAVE = 120;
 
 /** Горячие клавиши скоростей: 1…7. */
 export const SPEED_KEYS = SPEEDS.map((_, i) => String(i + 1));
@@ -167,8 +174,13 @@ export class Panel {
   private readonly speedSlider = el('input', { type: 'range', min: '0', max: '4', step: '0.001', value: '0', ariaLabel: 'Скорость мира', className: 'speed-slider', title: '×1 — реальное время; ×10 — в 10 раз быстрее; клавиши 1–7' });
   private readonly speedValue = el('output', { className: 'speed-value', textContent: '×1' });
   private readonly paramsToggle = el('button', { textContent: 'Новый мир', ariaLabel: 'Новый мир', ariaExpanded: 'false', title: 'Открыть настройки нового мира', className: 'params-toggle' });
-  private readonly focusToggle = el('button', { className: 'focus-toggle', ariaLabel: 'На весь экран', ariaPressed: 'false', title: 'На весь экран' });
-  private fullscreenPending = false;
+  private readonly focusToggle = el('button', { className: 'focus-toggle', ariaLabel: 'На весь экран', ariaPressed: 'false', title: 'На весь экран (F)' });
+  /** В полном экране: выход и миникарта вверху справа, метка времени вверху слева. */
+  private readonly exitFocus = el('button', { className: 'focus-toggle', ariaLabel: 'Выйти из полноэкранного режима', ariaPressed: 'true' });
+  private readonly minimapButtonFocus = el('button', { className: 'minimap-toggle', ariaLabel: 'Миникарта', title: 'Миникарта — видна, когда карта приближена', ariaPressed: 'true' });
+  private readonly cornerTime = el('div', { className: 'immersive-time', ariaHidden: 'true' });
+  private panelBeforeFocus = false;
+  private idleTimer = 0;
   private readonly legendBody = el('div', { className: 'legend-body' });
   private readonly minimapButton = el('button', { className: 'minimap-toggle', ariaLabel: 'Миникарта', title: 'Миникарта в углу карты — видна, когда карта приближена', ariaPressed: 'true' });
   private readonly fileMenu = el('details', { className: 'file-menu' });
@@ -245,7 +257,7 @@ export class Panel {
 
   /** Миникарта включена — кнопка нажата. */
   setMinimapEnabled(on: boolean): void {
-    this.minimapButton.setAttribute('aria-pressed', String(on));
+    for (const button of [this.minimapButton, this.minimapButtonFocus]) button.setAttribute('aria-pressed', String(on));
   }
 
   /** Мир создан с этими параметрами — черновик совпадает с миром. */
@@ -268,38 +280,84 @@ export class Panel {
     if (!next && this.roots.params.contains(document.activeElement)) this.menuToggle.focus();
   }
 
+  /**
+   * Полный экран: мир от края до края, без шапки и панели. Метка времени
+   * видна всегда; управление (плашка внизу, выход и миникарта вверху)
+   * проявляется по движению мыши и гаснет вместе с курсором; панель — по
+   * требованию, у правого края.
+   */
   toggleFocus(open?: boolean): void {
-    const next = open ?? !this.roots.app.classList.contains('focus-mode');
-    if (!next && document.fullscreenElement === this.roots.app) {
+    const app = this.roots.app;
+    const was = app.classList.contains('focus-mode');
+    const next = open ?? !was;
+    if (!next && document.fullscreenElement === app) {
       void document.exitFullscreen().catch(() => {
         this.toggleFocus(true);
         this.setFileStatus(['Не удалось выйти из полноэкранного режима. Попробуйте Esc.'], true);
       });
     }
-    if (next) this.closeMenu();
-    this.roots.app.classList.toggle('focus-mode', next);
-    this.focusToggle.setAttribute('aria-pressed', String(next));
-    this.focusToggle.ariaLabel = next ? 'Выйти из полноэкранного режима' : 'На весь экран';
-    this.focusToggle.title = next ? 'Выйти из полноэкранного режима (Esc)' : 'На весь экран';
+    if (next === was) return;
+    if (next) {
+      this.closeMenu();
+      // Панель — только по требованию; после выхода — как была.
+      this.panelBeforeFocus = this.tabs.collapsed;
+      this.tabs.collapsed = true;
+      this.tabs.sync(false);
+    } else {
+      this.tabs.collapsed = this.panelBeforeFocus;
+      this.tabs.sync(false);
+      app.classList.remove('idle', 'peek');
+    }
+    app.classList.toggle('focus-mode', next);
+    for (const button of [this.focusToggle, this.exitFocus]) {
+      button.setAttribute('aria-pressed', String(next));
+      button.ariaLabel = next ? 'Выйти из полноэкранного режима' : 'На весь экран';
+      button.title = next ? 'Выйти из полноэкранного режима (Esc · F)' : 'На весь экран (F)';
+    }
+    if (next) this.wake();
+    this.handlers.onFocusMode(next);
     this.handlers.onLayoutChange();
   }
 
-  private async toggleFullscreen(): Promise<void> {
-    if (this.fullscreenPending) return;
-    this.fullscreenPending = true;
-    try {
-      if (document.fullscreenElement === this.roots.app) await document.exitFullscreen();
-      else await this.roots.app.requestFullscreen({ navigationUI: 'hide' });
-    } catch {
-      this.toggleFocus(!this.roots.app.classList.contains('focus-mode'));
-      this.setFileStatus(['Полноэкранный режим недоступен в этом браузере.'], false);
-    } finally {
-      this.fullscreenPending = false;
+  /** Движение мыши в полном экране: проявить управление, у правого края — значки панели. */
+  private wake(clientX?: number): void {
+    const app = this.roots.app;
+    if (!app.classList.contains('focus-mode')) return;
+    app.classList.remove('idle');
+    clearTimeout(this.idleTimer);
+    this.idleTimer = window.setTimeout(() => {
+      // Над управлением или открытой панелью — не гасить.
+      if (app.querySelector('.world-footer:hover, .immersive-top:hover, .right-panel:hover') || !this.tabs.collapsed) return;
+      app.classList.add('idle');
+    }, IDLE_MS);
+    if (clientX !== undefined) {
+      const fromRight = app.getBoundingClientRect().right - clientX;
+      if (fromRight < PEEK_EDGE) app.classList.add('peek');
+      else if (fromRight > PEEK_LEAVE && this.tabs.collapsed) app.classList.remove('peek');
     }
   }
 
+  /** Нажатие на карту: в полном экране закрывает открытую панель. */
+  mapPressed(): void {
+    if (this.roots.app.classList.contains('focus-mode') && !this.tabs.collapsed) this.tabs.collapse();
+  }
+
+  /**
+   * «На весь экран»: полный экран браузера, где он его даёт; иначе — тот же
+   * вид в размер окна. Встроенные окна и строгие браузеры на запрос иногда не
+   * отвечают вовсе — кнопка от этого не зависает. Повторно, F или Esc — выход.
+   */
+  toggleFullscreen(): void {
+    const app = this.roots.app;
+    if (app.classList.contains('focus-mode') || document.fullscreenElement === app) { this.toggleFocus(false); return; }
+    this.toggleFocus(true);
+    if (document.fullscreenEnabled && app.requestFullscreen) app.requestFullscreen({ navigationUI: 'hide' }).catch(() => { /* Остаётся вид в размер окна. */ });
+  }
+
+  /** Esc: в полном экране сначала закрывает панель, потом выходит. */
   closePanels(): void {
-    this.toggleFocus(false);
+    if (this.roots.app.classList.contains('focus-mode') && !this.tabs.collapsed) this.tabs.collapse();
+    else this.toggleFocus(false);
     this.closeMenu();
   }
 
@@ -396,7 +454,13 @@ export class Panel {
       this.newWorldDialog.showModal();
     });
     this.focusToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path class="focus-enter" d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4"/><path class="focus-exit" d="M3 7h4V3M13 3v4h4M17 13h-4v4M7 17v-4H3"/></svg>';
-    this.focusToggle.addEventListener('click', () => { void this.toggleFullscreen(); });
+    this.focusToggle.addEventListener('click', () => this.toggleFullscreen());
+    this.exitFocus.innerHTML = this.focusToggle.innerHTML;
+    this.exitFocus.addEventListener('click', () => this.toggleFullscreen());
+    const stage = document.querySelector<HTMLElement>('.stage')!;
+    stage.append(this.cornerTime, el('div', { className: 'immersive-top' }, this.minimapButtonFocus, this.exitFocus));
+    this.roots.app.addEventListener('pointermove', (e) => this.wake(e.clientX));
+    this.roots.app.addEventListener('pointerdown', (e) => this.wake(e.clientX));
     this.menuToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M10 4v12M4 10h12"/></svg>';
     this.menuToggle.append(el('span', { className: 'desktop-control-label', textContent: 'Мир' }),
       el('span', { className: 'desktop-control-label menu-chevron', textContent: '⌄', ariaHidden: 'true' }));
@@ -447,6 +511,8 @@ export class Panel {
     });
     this.minimapButton.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m2 4 5-2 6 2 5-2v14l-5 2-6-2-5 2Z M7 2v14 M13 4v14"/></svg>';
     this.minimapButton.addEventListener('click', () => this.handlers.onMinimap());
+    this.minimapButtonFocus.innerHTML = this.minimapButton.innerHTML;
+    this.minimapButtonFocus.addEventListener('click', () => this.handlers.onMinimap());
     this.roots.viewControls.append(el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn), this.minimapButton, ...toggles, viewMenu);
     const narrow = matchMedia('(max-width: 980px)');
     const placeToggles = () => {
@@ -990,6 +1056,8 @@ export class Panel {
     this.displayedStep = step;
     this.syncTimeDisplay();
     this.rateLabel.textContent = `${fps === null ? '—' : Math.round(fps).toLocaleString('ru')} FPS${paused ? ' · пауза' : ''}`;
+    const mark = `${formatWorldAge(step)} · ${paused ? 'пауза' : `×${speed.toLocaleString('ru')}`}`;
+    if (this.cornerTime.textContent !== mark) this.cornerTime.textContent = mark;
     const actual = paused ? 'Расчёт на паузе' : `${behind ? 'Предел · ' : ''}${rate}`;
     if (this.actualRateLabel.textContent !== actual) this.actualRateLabel.textContent = actual;
     this.actualRateLabel.dataset.limited = String(!paused && behind);

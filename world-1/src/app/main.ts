@@ -91,6 +91,7 @@ const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#pa
   onZoomOut: () => renderer.zoomBy(1 / ZOOM_STEP),
   onZoomFit: () => renderer.fit(),
   onMinimap: () => minimapOverlay.toggle(),
+  onFocusMode: (on) => renderer.setDarkTable(on),
   onRulers: (enabled) => renderer.setRulers(enabled),
   onStreamView: (view) => { renderer.streamView = view; },
   onProcesses: (enabled) => {
@@ -216,6 +217,7 @@ canvas.addEventListener('wheel', (e) => {
 let drag: { x: number; y: number; startX: number; startY: number; moved: boolean } | null = null;
 canvas.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
+  panel.mapPressed();
   drag = { x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY, moved: false };
   canvas.setPointerCapture(e.pointerId);
   canvas.parentElement!.classList.add('dragging');
@@ -271,6 +273,8 @@ document.addEventListener('keydown', (e) => {
     renderer.zoomBy(1 / ZOOM_STEP);
   } else if (e.key === '0') {
     renderer.fit();
+  } else if (e.key === 'f' || e.key === 'F' || e.key === 'а' || e.key === 'А') {
+    panel.toggleFullscreen();
   } else if (SPEED_KEYS.includes(e.key)) {
     changeSpeed(SPEEDS[SPEED_KEYS.indexOf(e.key)]);
   }

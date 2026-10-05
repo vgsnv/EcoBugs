@@ -156,6 +156,8 @@ export class MinimapOverlay {
         if (sx > left - pad && sx < left + w + pad && sy > top - pad && sy < top + h + pad) score += 2;
       }
       if (pointer && pointer.clientX > left - pad && pointer.clientX < left + w + pad && pointer.clientY > top - pad && pointer.clientY < top + h + pad) score += 0.5;
+      // В полном экране вверху — метка времени и кнопки.
+      if (c < 2 && this.stage.closest('.focus-mode')) score += 1;
       if (c === this.corner && !force) score -= STAY_BONUS;
       if (score < bestScore) { bestScore = score; best = c; }
     }

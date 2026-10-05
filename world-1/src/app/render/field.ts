@@ -138,7 +138,8 @@ void main() {
   // Стол целиком, тень чашки на нём; под стеклом обода — стол сквозь стекло (обод поверх рисует Canvas).
   vec3 table = tableAt(worldAt(px));
   float shape = covered(px, .35, 0.);
-  vec3 shadow = vec3(31., 53., 47.) / 255.;
+  // На тёмной подложке тень — просто темнее неё.
+  vec3 shadow = u_darkTable > .5 ? vec3(0.) : vec3(31., 53., 47.) / 255.;
   float a1 = .32 * covered(px, 6. * u_dpr, 5. * u_dpr);
   float a2 = .25 * covered(px, 1.5 * u_dpr, 2. * u_dpr);
   vec3 c = mix(mix(table, shadow, a1), shadow, a2);
@@ -359,6 +360,8 @@ type Command =
 
 export class FieldRenderer implements GlowSink {
   readonly canvas = document.createElement('canvas');
+  /** Стол — ровная тёмная подложка (полный экран). */
+  darkTable = false;
   private gl: WebGL2RenderingContext | null = null;
   private textures!: Textures;
   private quad!: WebGLBuffer;
@@ -482,6 +485,7 @@ export class FieldRenderer implements GlowSink {
     gl.uniform1f(this.shadow.uniform('u_wall'), wall);
     gl.uniform1f(this.shadow.uniform('u_dpr'), frame.camera.dpr);
     gl.uniform3f(this.shadow.uniform('u_glassTint'), ...GLASS_TINT);
+    gl.uniform1f(this.shadow.uniform('u_darkTable'), this.darkTable ? 1 : 0);
     gl.bindVertexArray(this.quadVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
@@ -719,6 +723,7 @@ export class FieldRenderer implements GlowSink {
     gl.uniform1i(p.uniform('u_ventCount'), vents.count);
     gl.uniform1ui(p.uniform('u_seed'), t.seed >>> 0);
     gl.uniform3f(p.uniform('u_glassTint'), ...GLASS_TINT);
+    gl.uniform1f(p.uniform('u_darkTable'), this.darkTable ? 1 : 0);
     // Мелкие детали камня проявляются с приближением, как прежде у плиток местности.
     gl.uniform1f(p.uniform('u_detail'), smoothstep(0.5, 4, frame.camera.zoom));
     gl.uniform2f(p.uniform('u_grid'), m.cols * m.cell, m.rows * m.cell);

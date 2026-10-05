@@ -32,7 +32,6 @@
       .app:fullscreen { background: var(--bg); }
       .app-body { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 340px; flex: 1; min-height: 0; gap: 8px; padding: 0 8px 8px; }
       .app.sidebar-collapsed .app-body { grid-template-columns: minmax(0, 1fr) 40px; }
-      .app.focus-mode .app-body { grid-template-columns: minmax(0, 1fr); }
       .map-column { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 6px; }
       .workspace { display: flex; flex: 1; min-height: 0; }
       .field { flex: 1; min-width: 0; min-height: 0; display: flex; }
@@ -55,7 +54,6 @@
       .right-panel { display: grid; grid-template-columns: minmax(0, 1fr) 40px; min-height: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); overflow: hidden; }
       .app.sidebar-collapsed .right-panel { grid-template-columns: 40px; }
       .app.sidebar-collapsed .panel-content { display: none; }
-      .app.focus-mode .right-panel { display: none; }
       .panel-content { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow-y: auto; border-right: 1px solid var(--line); }
       .pane-head { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
       .pane-title { margin: 0; font-size: 13px; font-weight: 600; }
@@ -312,8 +310,34 @@
       dialog.confirm .row { gap: 8px; }
       .draft-banner { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 5; padding: 6px 12px; border-radius: 999px; background: var(--panel); border: 1px solid var(--accent); color: var(--accent); font-size: 12px; box-shadow: 0 4px 12px #2a292530; pointer-events: none; white-space: nowrap; }
 
-      /* Режим «на весь экран»: только карта и ход мира. */
-      .app.focus-mode .mineral-stats, .app.focus-mode .file-menu { display: none; }
+      /* Полный экран: мир от края до края. Метка времени видна всегда; управление
+         проявляется по движению мыши; панель — у правого края по требованию. */
+      .immersive-time, .immersive-top { display: none; }
+      .app.focus-mode #toolbar, .app.focus-mode .mineral-stats, .app.focus-mode .status { display: none; }
+      .app.focus-mode .app-body, .app.focus-mode.sidebar-collapsed .app-body { grid-template-columns: minmax(0, 1fr); padding: 0; gap: 0; }
+      .app.focus-mode .map-column { position: relative; gap: 0; }
+      .app.focus-mode .stage { border-radius: 0; box-shadow: none; background: #13151700; }
+      .app.focus-mode, .app.focus-mode .app-body { background: rgb(19, 21, 23); }
+      .app.focus-mode { min-width: 0; }
+      /* Плашки поверх мира — прозрачные: светлый текст с тенью, тонкие светлые кромки у кнопок. */
+      .app.focus-mode .world-footer { position: absolute; z-index: 8; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(620px, calc(100% - 32px)); padding: 0 4px; background: transparent; transition: opacity .35s; }
+      .app.focus-mode .world-playback { height: 44px; }
+      .app.focus-mode .world-footer, .app.focus-mode .immersive-time { color: #eef0ee; text-shadow: 0 1px 3px #000c, 0 0 1px #000; }
+      .app.focus-mode .world-footer *, .app.focus-mode .immersive-top button { color: #eef0ee; }
+      .app.focus-mode .world-footer button, .app.focus-mode .immersive-top button { background: #ffffff10; border-color: #ffffff38; }
+      .app.focus-mode .world-footer button:hover:not(:disabled), .app.focus-mode .immersive-top button:hover:not(:disabled) { background: #ffffff26; border-color: #ffffff66; }
+      .app.focus-mode .world-footer .run-toggle[data-state=running] { background: #ffffff1f; border-color: #ffffff55; }
+      .app.focus-mode .world-footer button svg, .app.focus-mode .immersive-top button svg { filter: drop-shadow(0 1px 2px #000a); }
+      .app.focus-mode .world-footer .speed-ticks button, .app.focus-mode .world-footer .speed-ticks button:hover:not(:disabled) { background: transparent; border: 0; color: #eef0eebb; }
+      .app.focus-mode .world-footer .speed-value { color: #ffc08a; }
+      .app.focus-mode .immersive-top button[aria-pressed=true] { background: #ffffff26; border-color: #ffffff66; }
+      .app.focus-mode .immersive-time { display: block; position: absolute; z-index: 5; top: 12px; left: 14px; font: 600 12px var(--mono); font-variant-numeric: tabular-nums; pointer-events: none; }
+      .app.focus-mode .immersive-top { display: flex; gap: 6px; position: absolute; z-index: 8; top: 10px; right: 10px; transition: opacity .35s; }
+      .app.focus-mode.idle .world-footer, .app.focus-mode.idle .immersive-top { opacity: 0; pointer-events: none; }
+      .app.focus-mode.idle, .app.focus-mode.idle canvas { cursor: none; }
+      .app.focus-mode .right-panel { position: absolute; z-index: 9; top: 52px; right: 10px; bottom: 84px; width: min(380px, calc(100% - 20px)); background: #f4f2ecf2; box-shadow: 0 10px 32px #2a292540; transition: transform .25s ease, opacity .25s ease; }
+      .app.focus-mode.sidebar-collapsed .right-panel { width: 40px; bottom: auto; }
+      .app.focus-mode.sidebar-collapsed:not(.peek) .right-panel { transform: translateX(calc(100% + 16px)); opacity: 0; pointer-events: none; }
 
     </style>
   </head>
