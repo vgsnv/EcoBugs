@@ -6,14 +6,14 @@ import { finishCalculation, type Calculation } from './task.ts';
 import { phase } from './profile.ts';
 import { dishOf, type Dish } from './dish.ts';
 import { mix32 } from './prng.ts';
-import { type WorldParams, validateParams } from './params.ts';
+import { type WorldParams, isLaw, validateParams } from './params.ts';
 import { setMediumLaws } from './laws.ts';
-import { type LightMap, advanceLight, createLightMap, lightAt } from './light.ts';
+import { type LightMap, advanceLight, createLightMap, lightAt, setLightLaws } from './light.ts';
 import { type ViscosityMap, createViscosityMap } from './viscosity.ts';
 import { type PartitionLayout, buildLayout, layoutForSeed } from './partitions.ts';
 import { Drift } from './drift.ts';
 import { MINERAL_CELL, MINERAL_PERIOD, TERRAIN_PERIOD } from './constants.ts';
-import { createTerrain, levelFromGround, type TerrainState } from './terrain.ts';
+import { createTerrain, levelFromGround, rescheduleMoves, type TerrainState } from './terrain.ts';
 import { applyLevels, applyLevelsTask } from './viscosity.ts';
 import { createMineral, transparencyAt, updateMineralTask, volcanoNumbers, funnelNumbers, type MineralState } from './mineral.ts';
 
@@ -63,6 +63,29 @@ export function createWorld(params: WorldParams): World {
     mineral,
     terrain,
   };
+}
+
+/**
+ * Сменить законы живого мира (спецификация, «Слои параметров»): берутся
+ * только законы из `next`, содержимое остаётся прежним. Состояние
+ * продолжается — фазы ритма и дрейфа копятся по шагам, поэтому скачков нет;
+ * запланированное (поворот дрейфа, подвижка, порог извержения) пересчитывается
+ * под новые законы. Возвращает причины отказа, если сочетание неверно.
+ */
+export function setWorldLaws(world: World, next: WorldParams): string[] {
+  const merged = { ...world.params };
+  for (const key of Object.keys(next) as (keyof WorldParams)[]) if (isLaw(key)) (merged as Record<string, unknown>)[key] = next[key];
+  const errors = validateParams(merged);
+  if (errors.length > 0) return errors;
+  const before = world.params;
+  const pressure = before.eruptionPressure, volume = before.tectonicVolume;
+  // Снос и минерал читают тот же объект параметров: меняем его на месте.
+  Object.assign(before, merged);
+  setMediumLaws(before);
+  setLightLaws(world.light, before);
+  if (before.tectonicVolume !== volume) rescheduleMoves(world.terrain, before, world.step);
+  if (before.eruptionPressure !== pressure && pressure > 0) world.mineral.threshold *= before.eruptionPressure / pressure;
+  return [];
 }
 
 /**
@@ -148,7 +171,7 @@ function paramNumbers(p: Readonly<WorldParams>): number[] {
 /** Состояние света числами: дрейф, ритм, пятна. */
 export function lightNumbers(l: LightMap): number[] {
   return [
-    l.step, l.offsetX, l.offsetY, l.angle, l.turnFrom, l.turnTo, l.turnStart, Number.isFinite(l.nextTurn) ? l.nextTurn : -1, l.turns, l.rhythmPhase,
+    l.step, l.offsetX, l.offsetY, l.angle, l.turnFrom, l.turnTo, l.turnStart, Number.isFinite(l.nextTurn) ? l.nextTurn : -1, l.turns, l.rhythmPhase, l.breathPhase,
     l.spots.length, ...l.spots.flatMap((s) => [s.x, s.y, s.r, ...s.amps, ...s.phases, ...s.rates]),
   ];
 }

@@ -5,8 +5,12 @@
  * Мир хаотичен, поэтому отклик — среднее и разброс по сидам; разброс прогонов
  * по умолчанию — собственный шум мира, с ним и сравнивается отклик. Node 24+.
  *
- * npm run bench -- [--params sun,spotSize | all] [--seeds 1,2,3] [--steps 1000000]
- *                  [--every 25000] [--jobs 4] [--out bench-results/bench.json]
+ * Длина прогона — по времени процесса, который параметр двигает (KINDS):
+ * свет меряется без шагов мира (только пятна и ритм) — секунды; течения
+ * устанавливаются за часы; минерал, извержения и тектоника — за сутки.
+ *
+ * npm run bench -- [--params lightExtra,spotArea | light | flow | slow | all] [--seeds 1,2,3]
+ *                  [--hours-scale 1] [--jobs 4] [--out bench-results/bench.json]
  * npm run bench -- --report bench-results/bench.json [--html bench-results/bench.html]
  *   — сводка по готовому файлу; с --html — ещё и страница с графиками отклика
  */
@@ -15,36 +19,58 @@ import { availableParallelism } from 'node:os';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
-/** Точки диапазона: края — границы ползунков панели, середина — значение по умолчанию. */
-export const SWEEPS = {
-  sun: [0.1, 0.3, 1, 2, 3],
-  lightDrift: [0, 0.25, 1, 2.5, 5],
-  sunRhythm: [0, 0.2, 0.4, 0.65, 0.9],
-  sunPeriod: [10_000, 40_000, 150_000, 400_000, 1_000_000],
-  backgroundLevel: [0.02, 0.1, 0.2, 0.45, 0.9],
-  illumination: [0.05, 0.15, 0.3, 0.5, 0.8],
-  spotSize: [15, 30, 60, 120, 200],
-  baseTemperature: [0.1, 0.3, 1, 2, 3],
-  spotHeat: [0, 0.5, 1, 2, 3],
-  viscosityZoneSize: [30, 60, 120, 200, 300],
-  landShare: [0, 0.05, 0.15, 0.3, 0.45],
-  mineralStock: [0.2, 0.5, 1, 2.5, 5],
-  terrainSpeed: [0, 0.25, 1, 2.5, 5],
-  quakeInterval: [50_000, 150_000, 400_000, 1_000_000, 2_000_000],
+/** Роды прогонов: сколько часов мира и как часто снимать; light — без шагов мира. */
+export const KINDS = {
+  light: { hours: 48, everyMinutes: 30, light: true },
+  flow: { hours: 6, everyMinutes: 12 },
+  slow: { hours: 28, everyMinutes: 40 },
 };
 
-/** Наблюдаемые величины: ключ, подпись, единица. */
+/**
+ * Точки диапазона: края — границы ползунков панели, середина — значение по
+ * умолчанию. Значение — число или строка для одного ключа, пара [от, до] — для двух.
+ */
+export const SWEEPS = {
+  spotCount: { kind: 'light', keys: ['spotCount'], values: [0, 2, 8, 20, 48] },
+  spotArea: { kind: 'light', keys: ['spotAreaMin', 'spotAreaMax'], values: [[25, 100], [150, 450], [500, 1500], [1500, 4500], [5000, 15000]] },
+  driftCross: { kind: 'light', keys: ['driftCross'], values: [0, 6, 50, 200, 1440] },
+  driftTurn: { kind: 'light', keys: ['driftTurn'], values: [0, 1, 6, 24, 240] },
+  sunRhythm: { kind: 'light', keys: ['sunRhythm'], values: [0, 0.2, 0.4, 0.65, 0.9] },
+  sunPeriod: { kind: 'light', keys: ['sunPeriod'], values: [18_000, 54_000, 150_000, 1_000_000, 8_640_000] },
+  rhythmShape: { kind: 'light', keys: ['rhythmShape'], values: ['wave', 'daynight', 'skewed'] },
+  spotWobble: { kind: 'light', keys: ['spotWobble'], values: [0, 0.05, 0.15, 0.25, 0.35] },
+  spotBreath: { kind: 'light', keys: ['spotBreath'], values: [0.5, 2, 6, 24, 72] },
+  lightShadow: { kind: 'flow', keys: ['lightShadow'], values: [0, 5, 20, 60, 200] },
+  lightExtra: { kind: 'flow', keys: ['lightExtra'], values: [0, 20, 80, 150, 300] },
+  driftResponse: { kind: 'flow', keys: ['driftResponse'], values: [0.1, 0.3, 1, 2.5, 5] },
+  resistanceShallows: { kind: 'flow', keys: ['resistanceShallows'], values: [1, 1.5, 3, 8, 30] },
+  resistanceLand: { kind: 'flow', keys: ['resistanceLand'], values: [1, 3, 9, 30, 100] },
+  landCount: { kind: 'flow', keys: ['landCount'], values: [0, 4, 12, 30, 60] },
+  landArea: { kind: 'flow', keys: ['landAreaMin', 'landAreaMax'], values: [[10, 50], [40, 200], [100, 500], [500, 2500], [3000, 12000]] },
+  coastRoughness: { kind: 'flow', keys: ['coastRoughness'], values: [0, 0.15, 0.35, 0.6, 1] },
+  shelfWidth: { kind: 'flow', keys: ['shelfWidth'], values: [1, 2, 5, 12, 30] },
+  mineralStock: { kind: 'slow', keys: ['mineralStock'], values: [0.2, 0.5, 1, 2.5, 5] },
+  eruptionPressure: { kind: 'slow', keys: ['eruptionPressure'], values: [0.03, 0.08, 0.15, 0.3, 0.5] },
+  settleHalf: { kind: 'slow', keys: ['settleHalf'], values: [1, 8, 29, 180, 1440] },
+  turbidityLoss: { kind: 'slow', keys: ['turbidityLoss'], values: [0, 0.03, 0.1, 0.3, 0.9] },
+  groundThreshold: { kind: 'slow', keys: ['groundThreshold'], values: [0.3, 0.8, 1.8, 5, 20] },
+  slopeLimit: { kind: 'slow', keys: ['slopeLimit'], values: [0.05, 0.15, 0.44, 1, 2] },
+  tectonicVolume: { kind: 'slow', keys: ['tectonicVolume'], values: [0, 40, 170, 1000, 5000] },
+  heights: { kind: 'slow', keys: ['heightMin', 'heightMax'], values: [[0, 0.5], [0, 1.5], [0.1, 2.2], [1, 3], [0, 3]] },
+};
+
+/** Наблюдаемые величины: ключ, подпись, единица; light — снимается и в световых прогонах. */
 export const METRICS = [
-  ['lit', 'Под пятнами', '%'],
-  ['spots', 'Число пятен', ''],
-  ['spotDiameter', 'Поперечник пятна (по площади)', 'мм'],
-  ['lightTurnover', 'Смена освещённой площади', '%/ч'],
-  ['sunNow', 'Сила солнца (среднее)', ''],
-  ['sunSwing', 'Размах солнца за прогон', ''],
+  ['light', 'Свет, среднее по чаше', 'лм/см²', true],
+  ['lit', 'Под пятнами', '%', true],
+  ['spots', 'Число пятен', '', true],
+  ['spotDiameter', 'Поперечник пятна (по площади)', 'мм', true],
+  ['lightTurnover', 'Смена освещённой площади', '%/ч', true],
+  ['sunNow', 'Сила солнца (среднее)', '', true],
+  ['sunSwing', 'Размах солнца за прогон', '', true],
   ['flowMean', 'Течение, среднее', 'мм/с'],
   ['flowP95', 'Течение, p95', 'мм/с'],
   ['turbidity', 'Мутность (потеря света)', '%'],
-  ['temperature', 'Температура (среднее)', 'усл.'],
   ['water', 'Вода', '%'],
   ['shallows', 'Отмель', '%'],
   ['land', 'Суша', '%'],
@@ -54,12 +80,12 @@ export const METRICS = [
   ['deposits', 'Минерал в залежах', '%'],
   ['depths', 'Минерал в недрах', '%'],
   ['eruptions', 'Извержения', '1/сут'],
-  ['quakes', 'Толчки', '1/сут'],
-  ['moves', 'Подвижки', '1/сут'],
+  ['moves', 'Подвижки и толчки', '1/сут'],
   ['funnels', 'Воронки (среднее число)', ''],
 ];
 
 const STEPS_PER_HOUR = 36_000, STEPS_PER_DAY = 864_000;
+const label = (v) => (Array.isArray(v) ? `${v[0]}–${v[1]}` : String(v));
 
 if (isMainThread) await main();
 else await work();
@@ -76,30 +102,39 @@ async function main() {
     return;
   }
   const list = option('--params', 'all');
-  const params = list === 'all' ? Object.keys(SWEEPS) : list.split(',');
-  for (const p of params) if (!SWEEPS[p]) throw Error(`Неизвестный параметр: ${p}. Есть: ${Object.keys(SWEEPS).join(', ')}`);
+  const params = list === 'all' ? Object.keys(SWEEPS)
+    : KINDS[list] ? Object.keys(SWEEPS).filter((p) => SWEEPS[p].kind === list)
+    : list.split(',');
+  for (const p of params) if (!SWEEPS[p]) throw Error(`Неизвестный параметр: ${p}. Есть: ${Object.keys(SWEEPS).join(', ')}; или light, flow, slow, all`);
   const seeds = option('--seeds', '1,2,3').split(',').map(Number);
-  const steps = Number(option('--steps', 1_000_000));
-  const every = Number(option('--every', 25_000));
+  const scale = Number(option('--hours-scale', 1));
+  const kinds = Object.fromEntries(Object.entries(KINDS).map(([k, v]) => [k, {
+    ...v, steps: Math.round(v.hours * scale * STEPS_PER_HOUR), every: Math.max(1, Math.round(v.everyMinutes * scale * 600)),
+  }]));
   const jobsCount = Number(option('--jobs', Math.max(1, Math.min(4, availableParallelism() - 1))));
   const out = resolve(option('--out', 'bench-results/bench.json'));
 
-  // Прогоны по умолчанию общие для всех параметров — считаем их один раз.
-  const defaults = await defaultValues();
+  // Прогоны по умолчанию общие для параметров одного рода — считаем их один раз.
+  const { DEFAULT_PARAMS } = await import('../src/core/index.ts');
+  const defaults = Object.fromEntries(Object.entries(SWEEPS).map(([p, s]) => [p, label(s.keys.length > 1 ? s.keys.map((k) => DEFAULT_PARAMS[k]) : DEFAULT_PARAMS[s.keys[0]])]));
   const runs = new Map();
-  const key = (param, value, seed) => (value === defaults[param] ? `default/${seed}` : `${param}=${value}/${seed}`);
-  for (const seed of seeds) runs.set(`default/${seed}`, { param: null, value: null, seed });
-  for (const param of params) for (const value of SWEEPS[param]) for (const seed of seeds) {
-    const k = key(param, value, seed);
-    if (!runs.has(k)) runs.set(k, { param, value, seed });
+  const used = new Set(params.map((p) => SWEEPS[p].kind));
+  for (const kind of used) for (const seed of seeds) runs.set(`${kind}:default/${seed}`, { kind, overrides: { seed } });
+  for (const param of params) {
+    const { kind, keys, values } = SWEEPS[param];
+    for (const value of values) {
+      if (label(value) === defaults[param]) continue;
+      const set = keys.length > 1 ? Object.fromEntries(keys.map((k, i) => [k, value[i]])) : { [keys[0]]: value };
+      for (const seed of seeds) runs.set(`${param}=${label(value)}/${seed}`, { kind, overrides: { seed, ...set } });
+    }
   }
-  const queue = [...runs.entries()];
+  const queue = [...runs.entries()].sort((a, b) => kinds[a[1].kind].steps - kinds[b[1].kind].steps);
   const results = {};
   const started = performance.now();
   let done = 0;
-  console.error(`Прогонов: ${queue.length}, по ${steps} шагов, потоков: ${jobsCount}`);
+  console.error(`Прогонов: ${queue.length} (${[...used].map((k) => `${k}: ${kinds[k].steps} шагов`).join(', ')}), потоков: ${jobsCount}`);
   await Promise.all(Array.from({ length: jobsCount }, () => new Promise((finish, fail) => {
-    const worker = new Worker(new URL(import.meta.url), { workerData: { steps, every } });
+    const worker = new Worker(new URL(import.meta.url), { workerData: { kinds } });
     const next = () => {
       const entry = queue.shift();
       if (!entry) { worker.terminate().then(() => finish()); return; }
@@ -118,7 +153,8 @@ async function main() {
   })));
   function save() {
     mkdirSync(dirname(out), { recursive: true });
-    writeFileSync(out, JSON.stringify({ steps, every, seeds, params, defaults, sweeps: Object.fromEntries(params.map((p) => [p, SWEEPS[p]])), runs: results }, null, 1));
+    const sweeps = Object.fromEntries(params.map((p) => [p, { kind: SWEEPS[p].kind, values: SWEEPS[p].values.map(label) }]));
+    writeFileSync(out, JSON.stringify({ kinds, seeds, params, defaults, sweeps, runs: results }, null, 1));
   }
   save();
   console.error(`Готово за ${((performance.now() - started) / 60000).toFixed(1)} мин: ${out}`);
@@ -128,34 +164,21 @@ async function main() {
   report(data);
 }
 
-async function defaultValues() {
-  const { DEFAULT_PARAMS } = await import('../src/core/index.ts');
-  return { ...DEFAULT_PARAMS, landShare: DEFAULT_PARAMS.viscosityShares.land };
-}
-
-/** Параметры прогона: доля суши меняется за счёт воды, отмель остаётся прежней. */
-function overrides(core, param, value, seed) {
-  if (param === null) return { seed };
-  if (param === 'landShare') {
-    const s = core.DEFAULT_PARAMS.viscosityShares;
-    return { seed, viscosityShares: { land: value, shallows: s.shallows, water: 1 - value - s.shallows } };
-  }
-  return { seed, [param]: value };
-}
-
 async function work() {
   const core = await import('../src/core/index.ts');
-  const { steps, every } = workerData;
-  parentPort.on('message', ([k, { param, value, seed }]) => {
+  const { kinds } = workerData;
+  parentPort.on('message', ([k, { kind, overrides }]) => {
     let result;
-    try { result = measure(core, core.createWorld(core.makeParams(overrides(core, param, value, seed))), steps, every); }
-    catch (error) { result = { error: String(error.message ?? error).split('\n')[0] }; }
+    try {
+      const w = core.createWorld(core.makeParams(overrides));
+      result = measure(core, w, kinds[kind]);
+    } catch (error) { result = { error: String(error.message ?? error).split('\n')[0] }; }
     parentPort.postMessage([k, result]);
   });
 }
 
-/** Один прогон: ряды наблюдаемых величин по снимкам каждые `every` шагов. */
-function measure(core, w, steps, every) {
+/** Один прогон: ряды наблюдаемых величин по снимкам каждые `every` шагов; в световом — без шагов мира. */
+function measure(core, w, { steps, every, light: lightOnly }) {
   const { width, height } = w.dish;
   const cell = 10, cols = Math.ceil(width / cell), rows = Math.ceil(height / cell);
   const inside = new Uint8Array(cols * rows);
@@ -167,14 +190,19 @@ function measure(core, w, steps, every) {
   for (const v of inside) insideCount += v;
   const series = Object.fromEntries(METRICS.map(([k]) => [k, []]));
   const push = (k, v) => series[k].push(v);
-  let prevLit = null, prevLevels = null, prev = { step: 0, eruptions: 0, quakes: 0, moves: 0 };
+  let prevLit = null, prevLevels = null, prev = { step: 0, eruptions: 0, moves: 0 };
   const total = () => w.mineral.depths + core.mineralInMedium(w.mineral) + core.mineralInDeposits(w.terrain) + core.mineralInEruptions(w.mineral);
   const sunMin = [Infinity], sunMax = [-Infinity];
   const started = performance.now();
+  const bg = core.lightBackground(w.light);
 
   for (let t = every; t <= steps; t += every) {
     while (w.step < t) {
-      core.stepWorld(w);
+      if (lightOnly) {
+        // Свет — функция своего состояния: шагаем только им, по тысяче шагов.
+        w.step = Math.min(t, w.step + 1000);
+        core.advanceLight(w.light, w.step);
+      } else core.stepWorld(w);
       // Ритм солнца бывает короче окна снимков — ловим размах по каждой тысяче шагов.
       if (w.step % 1000 === 0) {
         const s = core.sunAt(w.light, w.step);
@@ -183,18 +211,19 @@ function measure(core, w, steps, every) {
     }
     const dt = w.step - prev.step;
 
-    // Свет: доля под пятнами, пятна как связные области, смена освещённой площади.
+    // Свет: средний по чаше, доля под пятнами, пятна как связные области, смена освещённой площади.
     const intensity = core.rasterizeSpotIntensity(w.light, w.step, cols, rows, cell);
+    const sun = core.sunAt(w.light, w.step);
     const lit = new Uint8Array(cols * rows);
-    let litCount = 0, tempSum = 0;
+    let litCount = 0, lightSum = 0;
     for (let k = 0; k < lit.length; k++) {
       if (!inside[k]) continue;
       lit[k] = intensity[k] >= 0.5 ? 1 : 0;
       litCount += lit[k];
-      tempSum += core.temperatureFromIntensity(w.params, intensity[k]);
+      lightSum += sun * (bg + (1 - bg) * intensity[k]) * core.LIGHT_REFERENCE;
     }
+    push('light', lightSum / insideCount);
     push('lit', 100 * litCount / insideCount);
-    push('temperature', tempSum / insideCount);
     const areas = components(lit, cols, rows).filter((a) => a >= 4);
     push('spots', areas.length);
     const areaSum = areas.reduce((s, a) => s + a, 0);
@@ -205,7 +234,8 @@ function measure(core, w, steps, every) {
       push('lightTurnover', litCount ? 100 * (flips / 2 / litCount) * (STEPS_PER_HOUR / dt) : 0);
     }
     prevLit = lit;
-    push('sunNow', core.sunAt(w.light, w.step));
+    push('sunNow', sun);
+    if (lightOnly) { prev = { ...prev, step: w.step }; continue; }
 
     // Течения на сетке 40 × 30, как в сводке мира.
     const speeds = [];
@@ -246,10 +276,9 @@ function measure(core, w, steps, every) {
     push('deposits', 100 * core.mineralInDeposits(w.terrain) / all);
     push('depths', 100 * m.depths / all);
     push('eruptions', (m.eruptions - prev.eruptions) * STEPS_PER_DAY / dt);
-    push('quakes', (w.terrain.nextQuake - prev.quakes) * STEPS_PER_DAY / dt);
     push('moves', (w.terrain.nextMove - prev.moves) * STEPS_PER_DAY / dt);
     push('funnels', m.funnels.length);
-    prev = { step: w.step, eruptions: m.eruptions, quakes: w.terrain.nextQuake, moves: w.terrain.nextMove };
+    prev = { step: w.step, eruptions: m.eruptions, moves: w.terrain.nextMove };
   }
   series.sunSwing = [sunMax[0] - sunMin[0]];
   return { series, seconds: (performance.now() - started) / 1000 };
@@ -280,7 +309,7 @@ function components(mask, cols, rows) {
  * средних по диапазону параметра в долях шума (разброса прогонов по умолчанию).
  */
 export function summarize(data) {
-  const late = (a) => { const s = a.slice(Math.floor(a.length / 2)); return s.reduce((x, y) => x + y, 0) / s.length; };
+  const late = (a) => { const s = a.slice(Math.floor(a.length / 2)); return s.length ? s.reduce((x, y) => x + y, 0) / s.length : NaN; };
   const stats = (values) => {
     const ok = values.filter(Number.isFinite);
     if (!ok.length) return null;
@@ -288,24 +317,26 @@ export function summarize(data) {
     const sd = Math.sqrt(ok.reduce((s, v) => s + (v - mean) ** 2, 0) / Math.max(1, ok.length - 1));
     return { mean, sd, n: ok.length };
   };
+  const defaultRuns = (kind) => data.seeds.map((seed) => data.runs[`${kind}:default/${seed}`]).filter(Boolean);
   const point = (param, value) => {
+    const { kind } = data.sweeps[param];
     const isDefault = value === data.defaults[param];
-    const runs = data.seeds.map((seed) => data.runs[isDefault ? `default/${seed}` : `${param}=${value}/${seed}`]).filter(Boolean);
+    const runs = isDefault ? defaultRuns(kind) : data.seeds.map((seed) => data.runs[`${param}=${value}/${seed}`]).filter(Boolean);
     const errors = runs.filter((r) => r.error).map((r) => r.error);
     const metrics = Object.fromEntries(METRICS.map(([k]) => [k, stats(runs.filter((r) => !r.error).map((r) => late(r.series[k])))]));
     return { value, isDefault, errors, metrics };
   };
-  const noise = point(null, null);
-  const defaultsNoise = Object.fromEntries(METRICS.map(([k]) => [k, stats(data.seeds.map((seed) => data.runs[`default/${seed}`]).filter((r) => r && !r.error).map((r) => late(r.series[k])))]));
   return Object.fromEntries(data.params.map((param) => {
-    const points = data.sweeps[param].map((value) => point(param, value));
+    const { kind, values } = data.sweeps[param];
+    const noise = Object.fromEntries(METRICS.map(([k]) => [k, stats(defaultRuns(kind).filter((r) => !r.error).map((r) => late(r.series[k])))]));
+    const points = values.map((value) => point(param, value));
     const response = Object.fromEntries(METRICS.map(([k]) => {
       const means = points.map((p) => p.metrics[k]?.mean).filter(Number.isFinite);
       const span = means.length ? Math.max(...means) - Math.min(...means) : 0;
-      const sd = defaultsNoise[k]?.sd ?? 0;
+      const sd = noise[k]?.sd ?? 0;
       return [k, { span, noise: sd, ratio: sd > 1e-12 ? span / sd : span > 1e-9 ? Infinity : 0 }];
     }));
-    return [param, { points, response }];
+    return [param, { kind, hours: data.kinds[kind].steps / STEPS_PER_HOUR, points, response }];
   }));
 }
 
@@ -313,9 +344,10 @@ function report(data) {
   const summary = summarize(data);
   const f = (v) => (v === undefined || v === null || !Number.isFinite(v) ? '—' : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2));
   for (const [param, { points, response }] of Object.entries(summary)) {
-    console.log(`\n=== ${param} ===`);
+    console.log(`\n=== ${param} (${data.sweeps[param].kind}, ${data.kinds[data.sweeps[param].kind].steps / STEPS_PER_HOUR} ч) ===`);
     console.log(['величина'.padEnd(34), ...points.map((p) => `${p.value}${p.isDefault ? '*' : ''}`.padStart(14)), 'отклик/шум'.padStart(12)].join(''));
     for (const [k, label, unit] of METRICS) {
+      if (points.every((p) => !p.metrics[k])) continue;
       const row = points.map((p) => (p.errors.length && !p.metrics[k] ? 'ошибка' : `${f(p.metrics[k]?.mean)}±${f(p.metrics[k]?.sd)}`).padStart(14));
       const r = response[k].ratio;
       console.log([`${label}${unit ? `, ${unit}` : ''}`.padEnd(34), ...row, (r === Infinity ? '∞' : f(r)).padStart(12)].join(''));

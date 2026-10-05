@@ -75,8 +75,9 @@ export interface LightMap {
   /** Когда начнётся следующий поворот и сколько их было. */
   nextTurn: number;
   turns: number;
-  /** Фаза ритма солнца, радиан. */
+  /** Фаза ритма солнца и «дыхания» края пятен, радиан: копятся по шагам, поэтому смена периода не даёт скачка. */
   rhythmPhase: number;
+  breathPhase: number;
 }
 
 const unit = (seed: number, a: number, b: number) => hash3(seed, a, b) / 4294967296;
@@ -131,6 +132,7 @@ export function createLightMap(params: WorldParams): LightMap {
     step: 0, offsetX: 0, offsetY: 0,
     angle, turnFrom: angle, turnTo: angle, turnStart: -1, nextTurn: 0, turns: 0,
     rhythmPhase: unit(deriveSeed(seed, 'sun'), 0, 0) * TAU,
+    breathPhase: 0,
   };
   map.nextTurn = map.laws.turnEvery > 0 ? turnGap(map) : Number.POSITIVE_INFINITY;
   return map;
@@ -149,7 +151,7 @@ const wrapAngle = (a: number) => a - TAU * Math.round(a / TAU);
 /** Довести состояние света до шага `step`: дрейф, повороты, фаза ритма. */
 export function advanceLight(map: LightMap, step: number): void {
   const L = map.laws;
-  const dPhase = TAU / L.rhythmPeriod;
+  const dPhase = TAU / L.rhythmPeriod, dBreath = TAU / L.breath;
   while (map.step < step) {
     const t = ++map.step;
     if (t >= map.nextTurn) {
@@ -167,6 +169,8 @@ export function advanceLight(map: LightMap, step: number): void {
     map.offsetX += L.speed * Math.cos(map.angle);
     map.offsetY += L.speed * Math.sin(map.angle);
     map.rhythmPhase = (map.rhythmPhase + dPhase) % TAU;
+    // Без заворота по 2π: темпы гармоник дробные, заворот сдвинул бы форму края.
+    map.breathPhase += dBreath;
   }
 }
 
@@ -217,11 +221,17 @@ export function lightFromIntensity(map: LightMap, intensity: number, t: number):
 }
 
 /** Вклад одного пятна в точке на расстоянии (dx, dy) от центра, в шаге t. */
-function spotProfile(s: Spot, dx: number, dy: number, t: number, breath: number): number {
+/** Фаза «дыхания» края в шаге t: от состояния, впереди — с нынешним периодом. */
+function breathAt(map: LightMap, t: number): number {
+  return map.breathPhase + (TAU * (t - map.step)) / map.laws.breath;
+}
+
+/** Вклад одного пятна в точке на расстоянии (dx, dy) от центра при фазе дыхания w. */
+function spotProfile(s: Spot, dx: number, dy: number, w: number): number {
   const d = Math.hypot(dx, dy);
   const e = SPOT_EDGE * s.r;
   if (d > s.r * SPOT_REACH + e) return 0;
-  const theta = Math.atan2(dy, dx), w = (TAU * t) / breath;
+  const theta = Math.atan2(dy, dx);
   let rr = 1, sq = 0;
   for (let h = 0; h < HARMONICS; h++) {
     rr += s.amps[h] * Math.cos((h + 2) * theta + s.phases[h] + s.rates[h] * w);
@@ -239,7 +249,8 @@ const wrap = (d: number, L: number) => d - L * Math.round(d / L);
 export function spotIntensityAt(map: LightMap, x: number, y: number, t: number): number {
   const [ox, oy] = offsetAt(map, t);
   let sum = 0;
-  for (const s of map.spots) sum += spotProfile(s, wrap(x - s.x - ox, map.width), wrap(y - s.y - oy, map.height), t, map.laws.breath);
+  const w = breathAt(map, t);
+  for (const s of map.spots) sum += spotProfile(s, wrap(x - s.x - ox, map.width), wrap(y - s.y - oy, map.height), w);
   return sum;
 }
 
@@ -272,6 +283,7 @@ export function* rasterizeSpotIntensityTask(map: LightMap, t: number, cols: numb
   field.fill(0);
   const [ox, oy] = offsetAt(map, t);
   const { width: W, height: H } = map;
+  const w = breathAt(map, t);
   for (const s of map.spots) {
     yield;
     // Обходим только рамку пятна; на замкнутой плоскости рамка может переходить край.
@@ -286,7 +298,7 @@ export function* rasterizeSpotIntensityTask(map: LightMap, t: number, cols: numb
         const px = (i + 0.5) * cell, ii = ((Math.floor(wrapCoord(px, W) / cell)) % cols + cols) % cols;
         const k = jj * cols + ii;
         if (seen) { if (seen[k]) continue; seen[k] = 1; }
-        const v = spotProfile(s, wrap(px - cx, W), wrap(py - cy, H), t, map.laws.breath);
+        const v = spotProfile(s, wrap(px - cx, W), wrap(py - cy, H), w);
         if (v > 0) field[k] += v;
       }
     }
@@ -329,7 +341,7 @@ export function lightFieldUniforms(map: LightMap, t: number): { plane: [number, 
   const n = Math.min(MAX_SPOTS, map.spots.length);
   const spots = new Float32Array(MAX_SPOTS * 4), amps = new Float32Array(MAX_SPOTS * 4), phases = new Float32Array(MAX_SPOTS * 4);
   const [ox, oy] = offsetAt(map, t);
-  const w = (TAU * t) / map.laws.breath;
+  const w = breathAt(map, t);
   for (let i = 0; i < n; i++) {
     const s = map.spots[i];
     let sq = 0;

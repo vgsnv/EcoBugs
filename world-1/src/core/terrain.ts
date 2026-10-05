@@ -93,6 +93,14 @@ function gap(params: WorldParams, n: number): number {
   return Math.max(1, Math.round(-Math.log(1 - u * 0.999) / perStep));
 }
 
+/**
+ * Новый объём тектоники в живом мире: следующая подвижка — по новому темпу
+ * (промежутки случайные и без памяти, поэтому отсчёт просто начинается заново).
+ */
+export function rescheduleMoves(t: TerrainState, params: WorldParams, step: number): void {
+  t.nextMoveStep = Math.min(Number.MAX_SAFE_INTEGER, step + gap(params, t.nextMove));
+}
+
 /** Вес места в подвижке: 1 в середине, плавно до 0 к краю. */
 export function movementWeight(m: Movement, x: number, y: number): number {
   const dx = x - m.x, dy = y - m.y;

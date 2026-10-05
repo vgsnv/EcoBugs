@@ -1,5 +1,5 @@
 /** Мир считает шаги независимо от кадров; показ получает не больше 20 снимков/с. */
-import { createWorld, mineralExchanges, mineralProcesses, takeGroundChanges, DRIFT_PERIOD, parseWorldFile, serializeWorld, stepWorldTask, WorldFileError, type World } from '../core/index.ts';
+import { createWorld, mineralExchanges, mineralProcesses, takeGroundChanges, DRIFT_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, WorldFileError, type World } from '../core/index.ts';
 import type { SimulationCommand, SimulationReply, SimulationSnapshot } from './simulation.ts';
 import { STEPS_PER_SECOND } from '../core/units.ts';
 
@@ -130,8 +130,8 @@ function advance(): void {
 
 host.onmessage = ({ data: command }) => {
   if (calculation && command.type !== 'ack') {
-    // Частые движения ползунка заменяют только предыдущую соседнюю команду управления.
-    if (command.type === 'control' && commands.at(-1)?.type === 'control') commands.pop();
+    // Частые движения ползунка заменяют только предыдущую соседнюю команду того же рода.
+    if ((command.type === 'control' || command.type === 'laws') && commands.at(-1)?.type === command.type) commands.pop();
     commands.push(command);
     return;
   }
@@ -168,6 +168,14 @@ function handleCommand(command: SimulationCommand): void {
           calculation = calculateStep(world);
           publishOnCompletion = true;
           schedule();
+        }
+        break;
+      case 'laws':
+        if (world) {
+          // Между шагами: команды ждут, пока шаг не досчитан.
+          const problems = setWorldLaws(world, command.params);
+          if (problems.length > 0) host.postMessage({ type: 'error', epoch, problems });
+          publish(false, true);
         }
         break;
       case 'save':

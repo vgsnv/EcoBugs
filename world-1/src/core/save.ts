@@ -11,7 +11,7 @@ import { funnelFromNumbers, funnelNumbers, volcanoFromNumbers, volcanoNumbers } 
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 26;
+export const WORLD_FORMAT_VERSION = 27;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -40,6 +40,7 @@ const OLD_FORMATS: Record<number, string> = {
   23: 'тогда была «скорость местности», а пороги срыва зависели от солнца',
   24: 'тогда толчки и подвижки шли двумя отдельными потоками',
   25: 'тогда суша задавалась долями и размером зон',
+  26: 'тогда форма края пятен не копила фазу',
 };
 
 export interface MineralFile {
@@ -167,18 +168,19 @@ function readParams(raw: unknown, problems: string[]): WorldParams | null {
 
 /** Свет из файла (числа lightNumbers); возвращает причины отказа. */
 function restoreLight(world: World, raw: unknown): string[] {
-  if (!Array.isArray(raw) || raw.length < 11 || !raw.every((x) => typeof x === 'number' && Number.isFinite(x))) return ['Свет: числа повреждены'];
+  if (!Array.isArray(raw) || raw.length < 12 || !raw.every((x) => typeof x === 'number' && Number.isFinite(x))) return ['Свет: числа повреждены'];
   const n = raw as number[];
-  const count = n[10], per = 3 + 12;
-  if (!Number.isInteger(count) || count < 0 || n.length !== 11 + count * per) return ['Свет: число пятен не сходится'];
+  const count = n[11], per = 3 + 12;
+  if (!Number.isInteger(count) || count < 0 || n.length !== 12 + count * per) return ['Свет: число пятен не сходится'];
   const l = world.light;
   [l.step, l.offsetX, l.offsetY, l.angle, l.turnFrom, l.turnTo, l.turnStart] = n;
   l.nextTurn = n[7] < 0 ? Number.POSITIVE_INFINITY : n[7];
   l.turns = n[8];
   l.rhythmPhase = n[9];
+  l.breathPhase = n[10];
   const spots: Spot[] = [];
   for (let i = 0; i < count; i++) {
-    const o = 11 + i * per;
+    const o = 12 + i * per;
     spots.push({ x: n[o], y: n[o + 1], r: n[o + 2], amps: n.slice(o + 3, o + 7), phases: n.slice(o + 7, o + 11), rates: n.slice(o + 11, o + 15) });
   }
   l.spots = spots;

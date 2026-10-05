@@ -5,7 +5,7 @@
  * применяются кнопкой «Создать мир».
  */
 import { PROCESS_COLORS } from './render/processes.ts';
-import { createLightMap, createViscosityMap, dishCoverage, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type RhythmShape, type WorldParams } from '../core/index.ts';
+import { createLightMap, isLaw, createViscosityMap, dishCoverage, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type RhythmShape, type WorldParams } from '../core/index.ts';
 import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render/palette.ts';
 import { formatArea, formatLength, formatMass, formatNumber, formatPercent, formatWorldAge } from './units.ts';
 import { Sidebar } from './sidebar.ts';
@@ -18,6 +18,8 @@ export interface PanelHandlers {
   onDraft(params: WorldParams): void;
   /** Запустить черновик: время идёт. */
   onLaunch(): void;
+  /** Новые законы живого мира (параметры генератора не меняются). */
+  onLaws(params: WorldParams): void;
   onTogglePause(): void;
   onUnpinProbe(): void;
   onSpeed(speed: number): void;
@@ -163,6 +165,7 @@ export class Panel {
   private readonly speedSlider = el('input', { type: 'range', min: '0', max: '4', step: '0.001', value: '0', ariaLabel: 'Скорость мира', className: 'speed-slider', title: '×1 — реальное время; ×10 — в 10 раз быстрее; клавиши 1–7' });
   private readonly speedValue = el('output', { className: 'speed-value', textContent: '×1' });
   private readonly paramsToggle = el('button', { textContent: 'Новый мир', ariaLabel: 'Новый мир', ariaExpanded: 'false', title: 'Открыть настройки нового мира', className: 'params-toggle' });
+  private readonly lawsToggle = el('button', { textContent: 'Законы мира', ariaLabel: 'Законы мира', title: 'Менять законы живого мира на ходу' });
   private readonly focusToggle = el('button', { className: 'focus-toggle', ariaLabel: 'На весь экран', ariaPressed: 'false', title: 'На весь экран' });
   private fullscreenPending = false;
   private readonly summaryToggle = el('button', { className: 'legend-toggle', ariaLabel: 'Сводка мира', title: 'Сводка мира', ariaExpanded: 'false' });
@@ -176,6 +179,11 @@ export class Panel {
   /** Идёт настройка черновика нового мира. */
   private drafting = false;
   private draftTimer = 0;
+  /** Панель правит законы живого мира: ручки генератора скрыты, изменения действуют сразу. */
+  private livelaws = false;
+  private lawsTimer = 0;
+  private readonly paramsTitle = el('h2', { textContent: 'Параметры нового мира' });
+  private readonly lawsNote = el('div', { className: 'note laws-note', hidden: true, textContent: 'Изменения действуют сразу. Чаша, пятна, суша и запас минерала задаются только при создании мира.' });
   private readonly draftBanner = el('div', { className: 'draft-banner', hidden: true, textContent: 'Черновик нового мира — время стоит. Настройте параметры справа и нажмите «Запустить мир».' });
   private readonly newWorldDialog = el('dialog', { className: 'confirm' });
   private readonly status = el('span', { className: 'status' });
@@ -274,7 +282,7 @@ export class Panel {
   toggleParams(open?: boolean): void {
     const next = open ?? true;
     if (next) { this.toggleFocus(false); this.toggleLegend(false); this.toggleSummary(false); }
-    if (next) this.expandMainSection('Параметры нового мира');
+    if (next) this.expandMainSection(this.livelaws ? 'Законы мира' : 'Параметры нового мира');
     this.roots.app.classList.toggle('params-open', next);
     this.paramsToggle.setAttribute('aria-expanded', String(next));
     this.roots.params.inert = !next;
@@ -397,6 +405,7 @@ export class Panel {
     const save = el('button', { textContent: 'Сохранить', ariaLabel: 'Сохранить', title: 'Сохранить мир в файл (Ctrl+S)' });
     const load = el('button', { textContent: 'Загрузить', ariaLabel: 'Загрузить', title: 'Загрузить мир из файла' });
     this.paramsToggle.append(el('span', { className: 'desktop-menu-note', textContent: 'Параметры и создание' }));
+    this.lawsToggle.append(el('span', { className: 'desktop-menu-note', textContent: 'Свет, течения, тектоника — на ходу' }));
     save.append(el('span', { className: 'desktop-menu-note', textContent: 'Файл JSON · Ctrl / ⌘ S' }));
     load.append(el('span', { className: 'desktop-menu-note', textContent: 'Продолжить сохранённый мир' }));
     const picker = el('input', { type: 'file', accept: '.json,application/json', hidden: true });
@@ -449,15 +458,21 @@ export class Panel {
       if (this.drafting) { this.toggleParams(true); return; }
       this.newWorldDialog.showModal();
     });
+    this.lawsToggle.addEventListener('click', () => {
+      this.closeMenu();
+      if (this.drafting) { this.toggleParams(true); return; }
+      this.setLiveLaws(true);
+      this.toggleParams(true);
+    });
     this.focusToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path class="focus-enter" d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4"/><path class="focus-exit" d="M3 7h4V3M13 3v4h4M17 13h-4v4M7 17v-4H3"/></svg>';
     this.focusToggle.addEventListener('click', () => { void this.toggleFullscreen(); });
     this.menuToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M10 4v12M4 10h12"/></svg>';
     this.menuToggle.append(el('span', { className: 'desktop-control-label', textContent: 'Мир' }),
       el('span', { className: 'desktop-control-label menu-chevron', textContent: '⌄', ariaHidden: 'true' }));
-    this.fileMenu.append(this.menuToggle, el('div', { className: 'menu-actions' }, this.paramsToggle, save, load));
+    this.fileMenu.append(this.menuToggle, el('div', { className: 'menu-actions' }, this.paramsToggle, this.lawsToggle, save, load));
     // Arrow navigation stays local: it must not trigger simulation shortcuts.
     this.fileMenu.addEventListener('keydown', event => {
-      const actions = [this.paramsToggle, save, load];
+      const actions = [this.paramsToggle, this.lawsToggle, save, load];
       if (event.key === 'Escape' && this.fileMenu.open) {
         event.preventDefault(); event.stopPropagation(); this.closeMenu();
       } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -516,6 +531,7 @@ export class Panel {
   private buildParams(): void {
     const open = loadOpenGroups();
     const group = (title: string, about: string, fields: HTMLElement[], openByDefault: boolean, kind = '') => {
+      // В живом мире видны только законы; группа из одних ручек генератора скрывается целиком.
       const head = el('summary', {}, el('span', { className: 'group-title', textContent: title }), el('span', { className: 'group-about', textContent: about }));
       const d = el('details', { open: open[title] ?? openByDefault, className: `param-group ${kind}` }, head, el('div', { className: 'fields' }, ...fields));
       d.addEventListener('toggle', () => saveOpenGroup(title, d.open));
@@ -524,27 +540,28 @@ export class Panel {
     const sub = (text: string) => el('div', { className: 'subhead', textContent: text });
     const world = this.worldFields();
     this.roots.params.append(
-      el('div', { className: 'params-head' }, el('h2', { textContent: 'Параметры нового мира' })),
+      el('div', { className: 'params-head' }, this.paramsTitle),
       el('div', { className: 'params-body' },
-        group('Чаша', 'форма, пропорции, стартовая картина', [sub('Форма'), world[0], world[1], sub('Стартовая картина'), world[2], world[3]], true),
+        group('Чаша', 'форма, пропорции, стартовая картина', [sub('Форма'), world[0], world[1], sub('Стартовая картина'), world[2], world[3]], true, 'generator'),
         group('Свет', 'пятна, яркость и их движение', this.lightFields(sub), true),
         group('Ритм солнца', 'как свет нарастает и спадает', this.rhythmFields(), false),
-        group('Суша', 'массивы, берега, внутренние моря', this.landFields(sub), false),
+        group('Суша', 'массивы, берега, внутренние моря', this.landFields(sub), false, 'generator'),
         group('Тектоника', 'как дно поднимается и опускается', this.tectonicFields(), false),
         group('Минерал', 'запас недр и извержения', [
-          this.slider(STOCK), this.consequence(() => `Всего в недрах ≈ ${formatMass(this.draft.mineralStock * 1_920_000)} — без перегородок.`),
+          this.slider(STOCK), generator(this.consequence(() => `Всего в недрах ≈ ${formatMass(this.draft.mineralStock * 1_920_000)} — без перегородок.`)),
           this.slider({ key: 'eruptionPressure', label: 'Давление извержения', hint: 'Сколько минерала (доля всего запаса) должно накопиться в недрах, чтобы вулкан извергся. Выше — извержения реже и крупнее; ниже — чаще и мельче. Как часто они случаются на деле, покажет сводка.', min: 0.03, max: 0.5, step: 0.01, format: (v) => formatPercent(v) }),
         ], false),
         group('Для знатоков', 'тонкая настройка законов', this.expertFields(), false, 'expert'),
       ),
       el('div', { className: 'params-foot' },
+        this.lawsNote,
         this.dirtyNote,
         this.errorsBox,
         this.createButton,
         el('span', { className: 'row end' }, this.defaultsButton),
       ),
     );
-    this.defaultsButton.addEventListener('click', () => this.replaceDraft(makeParams({ seed: this.draft.seed })));
+    this.defaultsButton.addEventListener('click', () => this.replaceDraft(this.defaults()));
     this.createButton.addEventListener('click', () => {
       if (validateParams(this.draft).length > 0) return;
       window.clearTimeout(this.draftTimer);
@@ -577,6 +594,7 @@ export class Panel {
 
   /** Настройка черновика: время стоит, в чаше — получающийся мир. */
   private startDraft(): void {
+    this.setLiveLaws(false);
     this.setDrafting(true);
     this.toggleParams(true);
     this.handlers.onDraft(structuredClone(this.draft));
@@ -586,6 +604,34 @@ export class Panel {
     this.drafting = next;
     this.draftBanner.hidden = !next;
     this.roots.app.classList.toggle('drafting', next);
+  }
+
+  /** Правка законов живого мира или настройка нового: что видно в панели. */
+  private setLiveLaws(next: boolean): void {
+    this.livelaws = next;
+    this.roots.params.classList.toggle('live-laws', next);
+    this.paramsTitle.textContent = next ? 'Законы мира' : 'Параметры нового мира';
+    this.lawsNote.hidden = !next;
+    this.createButton.hidden = next;
+    this.refresh(false);
+  }
+
+  /** «По умолчанию»: в живом мире — только законы, содержимое остаётся. */
+  private defaults(): WorldParams {
+    const d = makeParams({ seed: this.draft.seed });
+    if (!this.livelaws) return d;
+    const out = structuredClone(this.draft);
+    for (const key of Object.keys(d) as (keyof WorldParams)[]) if (isLaw(key)) (out as unknown as Record<string, unknown>)[key] = d[key];
+    return out;
+  }
+
+  /** Законы изменились: передать живому миру, когда ручки чуть успокоятся. */
+  private scheduleLaws(): void {
+    if (!this.livelaws || this.drafting) return;
+    window.clearTimeout(this.lawsTimer);
+    this.lawsTimer = window.setTimeout(() => {
+      if (validateParams(this.draft).length === 0) this.handlers.onLaws(structuredClone(this.draft));
+    }, 120);
   }
 
   /** Черновик изменился: пересобрать мир в чаше, когда ручки чуть успокоятся. */
@@ -729,7 +775,7 @@ export class Panel {
     });
     this.inputs.push(show);
     show();
-    const node = el('label', {}, this.caption(spec.label, spec.hint, value), input);
+    const node = el('label', { className: isLaw(spec.key) ? '' : 'generator' }, this.caption(spec.label, spec.hint, value), input);
     if (toggle) node.append(el('span', { className: 'check' }, toggle, spec.toggle!.label));
     return this.mark(node, () => this.draft[spec.key] !== this.current[spec.key]);
   }
@@ -758,7 +804,7 @@ export class Panel {
     });
     this.inputs.push(show);
     show();
-    return this.mark(el('label', {}, this.caption(spec.label, spec.hint, value), el('span', { className: 'dual' }, a, b)),
+    return this.mark(el('label', { className: isLaw(lo) ? '' : 'generator' }, this.caption(spec.label, spec.hint, value), el('span', { className: 'dual' }, a, b)),
       () => this.draft[lo] !== this.current[lo] || this.draft[hi] !== this.current[hi]);
   }
 
@@ -884,14 +930,14 @@ export class Panel {
       this.slider({ key: 'lightShadow', label: 'Свет в тени', hint: 'Сколько света падает на место вне пятен, лм/см².', min: 0, max: 200, step: 1, format: (v) => `${formatNumber(v)} лм/см²` }),
       this.slider({ key: 'lightExtra', label: 'Пятно ярче тени на', hint: 'Добавка света в пятне сверх тени, лм/см²: свет в пятне — тень плюс добавка. От этой разницы зависит сила течений: больше — сильнее течения.', min: 0, max: 300, step: 5, format: (v) => `+${formatNumber(v)} лм/см²` }),
       this.consequence(() => `В пятне ${formatNumber(this.draft.lightShadow + this.draft.lightExtra)} лм/см², в тени ${formatNumber(this.draft.lightShadow)}.`),
-      sub('Пятна'),
+      generator(sub('Пятна')),
       this.slider({ key: 'spotCount', label: 'Число пятен', hint: 'Сколько пятен света в мире. Пятна плывут общим дрейфом и проходят друг сквозь друга; где перекрываются — светлее.', min: 0, max: 48, step: 1, format: (v) => `${v} шт.` }),
       this.range({ keys: ['spotAreaMin', 'spotAreaMax'], label: 'Площадь пятна', hint: 'Самое маленькое и самое большое пятно, см²; размер каждого — случайный в диапазоне. Вся чаша — 19 200 см².', min: 25, max: DISH_CM2, log: true, format: (v) => `${formatNumber(v)} см²`, formatRange: (a, b) => `${formatNumber(a)}–${formatNumber(b)} см²` }),
-      this.consequence(() => {
+      generator(this.consequence(() => {
         const map = createLightMap(this.draft);
         const lit = dishCoverage(map, map.width, map.height, 0, 16);
         return `Под пятнами ≈ ${Math.round(lit * 100)}% чаши · пятно ${formatNumber(round1((100 * this.draft.spotAreaMin) / DISH_CM2))}–${formatNumber(round1((100 * this.draft.spotAreaMax) / DISH_CM2))}% чаши`;
-      }),
+      })),
       sub('Движение'),
       this.slider({ key: 'driftCross', label: 'Пятна пересекают чашу', hint: 'Дрейф: за сколько времени мира пятна пересекают чашу. Все плывут вместе, в одну сторону.', min: 6, max: 1440, log: true, format: (v) => `за ${hoursText(v)}`, toggle: { label: 'свет стоит', value: 0 } }),
       this.slider({ key: 'driftTurn', label: 'Смена направления', hint: 'В среднем раз в сколько времени дрейф поворачивает в случайную сторону; поворот плавный, за час.', min: 1, max: 240, log: true, format: (v) => `раз в ${hoursText(v)}`, toggle: { label: 'не поворачивает', value: 0 } }),
@@ -1077,7 +1123,7 @@ export class Panel {
 
   private refresh(rebuild = true): void {
     this.showLayout();
-    if (rebuild) this.scheduleDraft();
+    if (rebuild) { this.scheduleDraft(); this.scheduleLaws(); }
     for (const update of this.consequences) update();
     const errors = validateParams(this.draft);
     this.errorsBox.replaceChildren(...errors.map((e) => el('div', { textContent: e })));
@@ -1089,8 +1135,14 @@ export class Panel {
       if (c) changed++;
     }
     this.dirtyNote.textContent = changed ? `Отличается от умолчаний: ${changed}.` : 'Всё по умолчанию.';
-    this.defaultsButton.disabled = JSON.stringify(this.draft) === JSON.stringify(makeParams({ seed: this.draft.seed }));
+    this.defaultsButton.disabled = JSON.stringify(this.draft) === JSON.stringify(this.defaults());
   }
+}
+
+/** Пометить узел как ручку генератора: в живом мире он скрыт. */
+function generator<T extends HTMLElement>(node: T): T {
+  node.classList.add('generator');
+  return node;
 }
 
 /** Какие группы параметров раскрыты — удобство одного зрителя, хранится в браузере. */

@@ -4,7 +4,7 @@
  */
 import {
   Drift, flowAt, meanSpotSpeed, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInDeposits, mineralInMedium, smoothLevelAt, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
-  resistanceAt, setMediumLaws, temperatureAt, type World, type WorldParams,
+  isLaw, LIGHT_REFERENCE, resistanceAt, setMediumLaws, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
 import { WorldSummary } from './world-summary.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
@@ -77,6 +77,12 @@ const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#pa
   onLayoutChange: () => { pointer = null; renderer.resizeKeepingView(); },
   onDraft: (params: WorldParams) => { drafting = true; paused = true; create(params); },
   onLaunch: () => { drafting = false; paused = false; control(); },
+  onLaws: (params: WorldParams) => {
+    send({ type: 'laws', epoch, params });
+    // Копия мира в показе: законы среды нужны отрисовке сразу, свет придёт со снимком.
+    for (const key of Object.keys(params) as (keyof WorldParams)[]) if (isLaw(key)) (world.params as unknown as Record<string, unknown>)[key] = params[key];
+    setMediumLaws(world.params);
+  },
   onTogglePause: () => togglePause(),
   onUnpinProbe: () => { pinnedPoint = null; renderer.setProbePoint(null); panel.setProbePinned(false); },
   onSpeed: (s) => changeSpeed(s),
@@ -301,7 +307,7 @@ function probe(): void {
   const k = Math.floor(y / world.mineral.cell) * world.mineral.cols + Math.floor(x / world.mineral.cell);
   panel.setProbe([
     `${GRADATION_NAMES[gradationAt(world.viscosity, x, y)]} · уровень ${smoothLevelAt(world.viscosity, x, y).toFixed(2)} · ${where}`,
-    `Свет ${worldLightAt(world, x, y).toFixed(3)} усл. ед. · усваивается ${formatPercent(absorptionAt(world.viscosity, x, y))}`,
+    `Свет ${formatNumber(Math.round(worldLightAt(world, x, y) * LIGHT_REFERENCE))} лм/см² · усваивается ${formatPercent(absorptionAt(world.viscosity, x, y))}`,
     `Температура ${formatNumber(temp)} усл. ед. · сила мутаций ${formatNumber(mutationStrength(temp))}`,
     `Сопротивление движению ×${formatNumber(resistanceAt(world.viscosity, x, y))}`,
     `Течение ${formatNumber(millimetresPerSecond(Math.hypot(...flowAt(world, x, y))))} мм/с`,

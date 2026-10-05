@@ -117,6 +117,20 @@ export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
 });
 
 /** Параметры по умолчанию с заданным сидом и частичными переопределениями. */
+/**
+ * Параметры генератора: задают стартовое содержимое — чашу, пятна света
+ * (число, площадь, неровность края), сушу и запас минерала. В живом мире они
+ * не меняются; остальные параметры — законы, их можно менять на ходу.
+ */
+export const GENERATOR_KEYS: readonly (keyof WorldParams)[] = [
+  'seed', 'shape', 'aspectRatio', 'spotCount', 'spotAreaMin', 'spotAreaMax', 'spotWobble',
+  'landCount', 'landAreaMin', 'landAreaMax', 'coastRoughness', 'seaCount', 'seaShare', 'shelfWidth', 'mineralStock',
+];
+
+export function isLaw(key: keyof WorldParams): boolean {
+  return !GENERATOR_KEYS.includes(key);
+}
+
 export function makeParams(overrides: Partial<WorldParams> = {}): WorldParams {
   return {
     ...DEFAULT_PARAMS,

@@ -7,6 +7,8 @@ export type SimulationCommand =
   | { type: 'save'; epoch: number; id: number }
   | { type: 'control'; epoch: number; paused: boolean; speed: number; active: boolean }
   | { type: 'step'; epoch: number }
+  /** Новые законы живого мира; параметры генератора в них не учитываются. */
+  | { type: 'laws'; epoch: number; params: WorldParams }
   | { type: 'ack'; epoch: number }
   | { type: 'processes'; epoch: number; enabled: boolean };
 

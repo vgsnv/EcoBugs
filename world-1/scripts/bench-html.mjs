@@ -6,17 +6,21 @@
  */
 
 const PARAM_TITLES = {
-  sun: 'Солнце', lightDrift: 'Скорость дрейфа света', sunRhythm: 'Размах ритма солнца', sunPeriod: 'Период ритма солнца',
-  backgroundLevel: 'Яркость фона', illumination: 'Освещённость', spotSize: 'Размер пятен', baseTemperature: 'Базовая температура',
-  spotHeat: 'Нагрев в пятнах', viscosityZoneSize: 'Размер зон вязкости', landShare: 'Доля суши', mineralStock: 'Запас минерала',
-  terrainSpeed: 'Скорость местности', quakeInterval: 'Промежуток между толчками',
+  spotCount: 'Число пятен', spotArea: 'Площадь пятна, см²', driftCross: 'Пятна пересекают чашу, ч', driftTurn: 'Смена направления дрейфа, ч',
+  sunRhythm: 'Размах ритма солнца', sunPeriod: 'Период ритма солнца, шагов', rhythmShape: 'Форма ритма', spotWobble: 'Неровность края пятна',
+  spotBreath: 'Дыхание края пятна, ч', lightShadow: 'Свет в тени, лм/см²', lightExtra: 'Пятно ярче тени на, лм/см²',
+  driftResponse: 'Отклик среды на свет', resistanceShallows: 'Сопротивление отмели', resistanceLand: 'Сопротивление суши',
+  landCount: 'Число массивов суши', landArea: 'Площадь массива, см²', coastRoughness: 'Изрезанность берега', shelfWidth: 'Ширина отмели, см',
+  mineralStock: 'Запас минерала, кг/м²', eruptionPressure: 'Давление извержения', settleHalf: 'Оседание минерала, мин',
+  turbidityLoss: 'Мутность', groundThreshold: 'Порог срыва грунта, мм/с', slopeLimit: 'Устойчивый склон', tectonicVolume: 'Объём тектоники, см²/ч',
+  heights: 'Высоты тектоники',
 };
 
 /** Отклик сильнее шума в столько раз — величина считается затронутой. */
 const AFFECTED = 3;
 
 export function renderHtml(data, summary, metrics) {
-  const payload = { steps: data.steps, seeds: data.seeds, defaults: data.defaults, titles: PARAM_TITLES, metrics, summary, affected: AFFECTED };
+  const payload = { seeds: data.seeds, defaults: data.defaults, titles: PARAM_TITLES, metrics, summary, affected: AFFECTED };
   return `<!doctype html>
 <html lang="ru">
 <head>
@@ -92,9 +96,8 @@ th:first-child, td:first-child { text-align: left; }
 <div class="tip" id="tip" hidden></div>
 <script>
 const DATA = ${JSON.stringify(payload)};
-const fmt = (v) => !Number.isFinite(v) ? '—' : Math.abs(v) >= 1000 ? Math.round(v).toLocaleString('ru') : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : Math.abs(v) >= 0.1 ? v.toFixed(2) : v.toPrecision(2);
-const days = (DATA.steps / 864000).toLocaleString('ru', { maximumFractionDigits: 1 });
-document.getElementById('lead').textContent = 'Каждый параметр проходит по точкам своего диапазона, остальные — по умолчанию; каждая точка — ' + DATA.seeds.length + ' сида по ' + DATA.steps.toLocaleString('ru') + ' шагов (' + days + ' сут мира). Значение величины — среднее по второй половине прогона. «Отклик» — размах средних по диапазону в долях шума мира; выше ' + DATA.affected + ' — параметр заметно влияет, такие графики идут первыми. Бледные — отклик в пределах шума.';
+const fmt = (v) => typeof v === 'string' ? v : !Number.isFinite(v) ? '—' : Math.abs(v) >= 1000 ? Math.round(v).toLocaleString('ru') : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : Math.abs(v) >= 0.1 ? v.toFixed(2) : v.toPrecision(2);
+document.getElementById('lead').textContent = 'Каждый параметр проходит по точкам своего диапазона, остальные — по умолчанию; каждая точка — ' + DATA.seeds.length + ' сида. Длина прогона — по времени процесса: свет меряется без шагов мира, течения — часы, минерал и тектоника — сутки (указано у параметра). Значение величины — среднее по второй половине прогона. «Отклик» — размах средних по диапазону в долях шума мира; выше ' + DATA.affected + ' — параметр заметно влияет, такие графики идут первыми. Бледные — отклик в пределах шума.';
 const tip = document.getElementById('tip');
 const nav = document.getElementById('nav'), view = document.getElementById('view');
 const params = Object.keys(DATA.summary);
@@ -157,18 +160,20 @@ function defaultStats(param, key) {
 
 function show(param) {
   for (const b of nav.children) b.setAttribute('aria-pressed', String(b.dataset.param === param));
-  const { points, response } = DATA.summary[param];
+  const { points, response, hours } = DATA.summary[param];
+  // В световых прогонах течения и минерал не меряются — их графиков нет.
+  const measured = DATA.metrics.filter(([k]) => points.some((p) => p.metrics[k]));
   view.replaceChildren();
   const h = document.createElement('h2'); h.textContent = DATA.titles[param] ?? param;
   const meta = document.createElement('p'); meta.className = 'meta';
-  const affected = DATA.metrics.filter(([k]) => response[k].ratio >= DATA.affected).length;
-  meta.textContent = 'Точки: ' + points.map((p) => fmt(p.value) + (p.isDefault ? ' (по умолчанию)' : '')).join(' · ') + '. Заметно влияет на ' + affected + ' из ' + DATA.metrics.length + ' величин.';
+  const affected = measured.filter(([k]) => response[k].ratio >= DATA.affected).length;
+  meta.textContent = 'Точки: ' + points.map((p) => fmt(p.value) + (p.isDefault ? ' (по умолчанию)' : '')).join(' · ') + '. Прогон — ' + fmt(hours) + ' ч мира. Заметно влияет на ' + affected + ' из ' + measured.length + ' величин.';
   view.append(h, meta);
   for (const p of points) if (p.errors.length) {
     const e = document.createElement('p'); e.className = 'errors'; e.textContent = fmt(p.value) + ': ' + p.errors[0]; view.append(e);
   }
   const grid = document.createElement('div'); grid.className = 'grid';
-  const order = DATA.metrics.slice().sort((a, b) => (response[b[0]].ratio || 0) - (response[a[0]].ratio || 0));
+  const order = measured.slice().sort((a, b) => (response[b[0]].ratio || 0) - (response[a[0]].ratio || 0));
   for (const [key, label, unit] of order) {
     const r = response[key].ratio;
     const card = document.createElement('div'); card.className = 'card' + (r >= DATA.affected ? '' : ' flat');
