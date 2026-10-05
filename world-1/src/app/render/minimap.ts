@@ -1,4 +1,7 @@
-/** Мини-карта в отдельной панели: вся чашка, пятна света, перегородки и рамка вида. */
+/**
+ * Мини-карта в углу карты: вся чашка, пятна света, перегородки и рамка вида.
+ * В покое — только контур чашки и рамка (карта под ними видна), полная — по наведению.
+ */
 import { lightBackground, rasterizeSpotIntensity, sunAt, type World } from '../../core/index.ts';
 import type { Camera } from './camera.ts';
 import { SHADE_COLOR, lightShade, rgb, traceDish } from './palette.ts';
@@ -29,13 +32,14 @@ export class Minimap {
     this.key = '';
   }
 
-  draw(mini: HTMLCanvasElement, s: MinimapSources): void {
+  draw(mini: HTMLCanvasElement, s: MinimapSources, full: boolean): void {
     const { world, camera } = s;
     if (!world || !mini.clientWidth || !mini.clientHeight) return;
     const { width, height } = world.dish;
     const dpr = camera.dpr;
-    if (!s.base) return;
-    const key = `${world.step}:${world.viscosity.version}:${camera.zoom}:${camera.cx}:${camera.cy}:${mini.clientWidth}:${mini.clientHeight}:${dpr}:${this.bases.get(s.base) ?? this.remember(s.base)}`;
+    // Подложка ещё строится — пока только контур.
+    const filled = full && s.base !== null;
+    const key = `${filled}:${filled ? `${world.step}:${world.viscosity.version}:${this.bases.get(s.base!) ?? this.remember(s.base!)}` : ''}:${camera.zoom}:${camera.cx}:${camera.cy}:${mini.clientWidth}:${mini.clientHeight}:${dpr}`;
     if (key === this.key) return;
     this.key = key;
     const w = Math.round(mini.clientWidth * dpr);
@@ -46,6 +50,29 @@ export class Minimap {
     const ox = (w - scale * width) / 2, oy = (h - scale * height) / 2;
     m.setTransform(1, 0, 0, 1, 0, 0); m.clearRect(0, 0, w, h);
     m.setTransform(scale, 0, 0, scale, ox, oy);
+    if (!filled) { this.outline(m, world, camera, scale); return; }
+    this.picture(m, s, w, h, scale, ox, oy);
+  }
+
+  /** Контур чашки и рамка вида: тёмная подводка под светлой линией читается на любом фоне. */
+  private outline(m: CanvasRenderingContext2D, world: World, camera: Camera, scale: number): void {
+    const { width, height } = world.dish;
+    const [x0, y0, x1, y1] = camera.visible();
+    const rect = [Math.max(0, x0), Math.max(0, y0), Math.min(width, x1) - Math.max(0, x0), Math.min(height, y1) - Math.max(0, y0)] as const;
+    const line = (lw: number, style: string, path: () => void) => {
+      m.lineWidth = lw * camera.dpr / scale; m.strokeStyle = style; m.beginPath(); path(); m.stroke();
+    };
+    const dish = () => traceDish(m, world.dish);
+    const view = () => m.rect(...rect);
+    line(3.5, 'rgba(20, 30, 45, 0.45)', dish); line(1.5, 'rgba(255, 255, 255, 0.9)', dish);
+    line(4, 'rgba(20, 30, 45, 0.5)', view); line(2, '#ffffff', view);
+  }
+
+  private picture(m: CanvasRenderingContext2D, s: MinimapSources, w: number, h: number, scale: number, ox: number, oy: number): void {
+    const { world, camera } = s;
+    const { width, height } = world.dish;
+    const dpr = camera.dpr;
+    if (!s.base) return;
     m.save(); m.beginPath(); traceDish(m, world.dish); m.clip();
     m.globalCompositeOperation = 'source-over';
     m.drawImage(s.base, 0, 0, width, height);

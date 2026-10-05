@@ -16,6 +16,8 @@ export class Camera {
   fitted = true;
   private width = 1;
   private height = 1;
+  /** Запас сдвига за край чашки при приближении, пикселей экрана (CSS) — под миникарту. */
+  margin = 0;
   /** Толщина стены вокруг чашки, единиц мира. */
   private wall = 0;
   private readonly canvas: HTMLCanvasElement;
@@ -49,7 +51,7 @@ export class Camera {
     this.fitted = this.zoom <= min * 1.0001;
     const clampAxis = (c: number, size: number, view: number) => {
       const half = view / this.zoom / 2;
-      const inset = TABLE_INSET * this.dpr / this.zoom;
+      const inset = (TABLE_INSET + (this.fitted ? 0 : this.margin)) * this.dpr / this.zoom;
       const lo = -this.wall - inset + half, hi = size + this.wall + inset - half;
       return lo > hi ? size / 2 : Math.min(hi, Math.max(lo, c));
     };

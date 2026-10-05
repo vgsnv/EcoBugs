@@ -8,7 +8,7 @@ import { PROCESS_COLORS } from './render/processes.ts';
 import { createLightMap, isLaw, createViscosityMap, dishCoverage, dishOf, LAYOUT_PRESETS, layoutForSeed, makeParams, validateParams, type RhythmShape, type WorldParams } from '../core/index.ts';
 import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render/palette.ts';
 import { formatArea, formatLength, formatMass, formatNumber, formatPercent, formatWorldAge } from './units.ts';
-import { Sidebar } from './sidebar.ts';
+import { PanelTabs, type PanelTab } from './tabs.ts';
 
 export const SPEEDS = [1, 10, 100, 300, 1000, 3000, 10000] as const;
 
@@ -28,6 +28,8 @@ export interface PanelHandlers {
   onZoomIn(): void;
   onZoomOut(): void;
   onZoomFit(): void;
+  /** Показать или скрыть миникарту в углу карты. */
+  onMinimap(): void;
   onProcesses(enabled: boolean): void;
   onRulers(enabled: boolean): void;
   onStreamView(view: 'water' | 'mineral'): void;
@@ -41,7 +43,7 @@ export interface PanelRoots {
   tip: HTMLElement;
   observation: HTMLElement;
   summary: HTMLElement;
-  navigation: HTMLElement;
+  probe: HTMLElement;
   viewControls: HTMLElement;
 }
 
@@ -165,13 +167,10 @@ export class Panel {
   private readonly speedSlider = el('input', { type: 'range', min: '0', max: '4', step: '0.001', value: '0', ariaLabel: 'Скорость мира', className: 'speed-slider', title: '×1 — реальное время; ×10 — в 10 раз быстрее; клавиши 1–7' });
   private readonly speedValue = el('output', { className: 'speed-value', textContent: '×1' });
   private readonly paramsToggle = el('button', { textContent: 'Новый мир', ariaLabel: 'Новый мир', ariaExpanded: 'false', title: 'Открыть настройки нового мира', className: 'params-toggle' });
-  private readonly lawsToggle = el('button', { textContent: 'Законы мира', ariaLabel: 'Законы мира', title: 'Менять законы живого мира на ходу' });
   private readonly focusToggle = el('button', { className: 'focus-toggle', ariaLabel: 'На весь экран', ariaPressed: 'false', title: 'На весь экран' });
   private fullscreenPending = false;
-  private readonly summaryToggle = el('button', { className: 'legend-toggle', ariaLabel: 'Сводка мира', title: 'Сводка мира', ariaExpanded: 'false' });
   private readonly legendBody = el('div', { className: 'legend-body' });
-  private readonly legendToggle = el('button', { className: 'legend-toggle', ariaLabel: 'Легенда', title: 'Легенда', ariaExpanded: 'false' });
-  private readonly navigationToggle = el('button', { className: 'minimap-toggle', ariaLabel: 'Миникарта', title: 'Миникарта', ariaExpanded: 'false' });
+  private readonly minimapButton = el('button', { className: 'minimap-toggle', ariaLabel: 'Миникарта', title: 'Миникарта в углу карты — видна, когда карта приближена', ariaPressed: 'true' });
   private readonly fileMenu = el('details', { className: 'file-menu' });
   private readonly menuToggle = el('summary', { ariaLabel: 'Меню мира', title: 'Меню мира' });
   private readonly zoomButton = el('button', { className: 'zoom', title: 'Показать чашку целиком (0)' });
@@ -195,67 +194,58 @@ export class Panel {
   private readonly consequences: (() => void)[] = [];
   private readonly layoutLabel = el('span', { className: 'value' });
   private readonly marks: { node: HTMLElement; changed: () => boolean }[] = [];
-  private readonly sidebar: Sidebar;
+  private readonly tabs: PanelTabs;
 
   constructor(roots: PanelRoots, initial: WorldParams, handlers: PanelHandlers) {
     this.roots = roots;
     this.handlers = handlers;
     this.draft = structuredClone(initial);
     this.current = structuredClone(initial);
+    // Вкладки — первыми: построение параметров уже переключает их.
+    this.tabs = new PanelTabs(roots.app, [
+      ['summary', 'Сводка мира', roots.summary],
+      ['laws', 'Законы мира', roots.params],
+      ['probe', 'Точка на карте', roots.probe],
+      ['legend', 'Легенда', roots.observation],
+    ], (tab) => this.tabChanged(tab));
+    roots.probe.append(document.querySelector<HTMLElement>('.probe-content')!);
     this.buildParams();
     this.buildLegend();
     this.buildToolbar();
-    this.sidebar = new Sidebar(roots.app, () => this.handlers.onLayoutChange());
-    const probeDock = document.querySelector<HTMLDetailsElement>('.probe-dock')!;
-    const probeToggle = document.querySelector<HTMLButtonElement>('.probe-toggle')!;
-    probeDock.append(document.querySelector<HTMLElement>('.probe-content')!);
-    probeToggle.addEventListener('click', () => {
-      probeDock.hidden = !probeDock.hidden;
-      if (!probeDock.hidden) { this.toggleFocus(false); this.sidebar.show(); probeDock.open = true; probeDock.scrollIntoView({ block: 'nearest' }); }
-      probeToggle.setAttribute('aria-expanded', String(!probeDock.hidden && probeDock.open));
-      probeToggle.setAttribute('aria-pressed', String(!probeDock.hidden));
-    });
-    probeDock.addEventListener('toggle', () => {
-      probeToggle.setAttribute('aria-expanded', String(!probeDock.hidden && probeDock.open));
-      probeToggle.setAttribute('aria-pressed', String(!probeDock.hidden));
-    });
-    this.roots.navigation.addEventListener('toggle', () => {
-      this.navigationToggle.setAttribute('aria-expanded', String(!this.roots.navigation.hidden && (this.roots.navigation as HTMLDetailsElement).open));
-      this.navigationToggle.setAttribute('aria-pressed', String(!this.roots.navigation.hidden));
-    });
     document.querySelector('.probe-point-release')!.addEventListener('click', () => this.handlers.onUnpinProbe());
     // Дрейф и ритм — первой строкой в группе «Свет» сводки.
     const lightGroup = this.roots.summary.querySelector<HTMLElement>('[data-group="Свет"]');
     if (lightGroup) { lightGroup.classList.add('summary-light'); lightGroup.querySelector('h3')!.after(document.querySelector<HTMLElement>('.light-drift')!); }
-    else this.roots.summary.querySelector('.legend-head')!.after(el('section', { className: 'summary-section summary-light' },
-      el('h3', { textContent: 'Свет' }), document.querySelector<HTMLElement>('.light-drift')!));
-    this.summaryToggle.setAttribute('aria-controls', 'world-summary');
-    this.summaryToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3v14h14 M6 13V9 M10 13V5 M14 13V7"/></svg>';
-    this.summaryToggle.addEventListener('click', () => { if (!this.revealPanel(!this.roots.summary.hidden)) this.toggleSummary(); });
     installInfoTips();
-    this.navigationToggle.addEventListener('click', () => { if (!this.revealPanel(!this.roots.navigation.hidden)) this.toggleNavigation(); });
-    this.navigationToggle.setAttribute('aria-controls', 'navigation');
-    this.navigationToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m2 4 5-2 6 2 5-2v14l-5 2-6-2-5 2Z M7 2v14 M13 4v14"/></svg>';
-    for (const [button, label] of [[this.legendToggle, 'Легенда'], [this.navigationToggle, 'Миникарта'], [this.summaryToggle, 'Сводка']] as const) {
-      button.append(el('span', { className: 'desktop-panel-label', textContent: label }));
-    }
     this.status.setAttribute('role', 'status');
     roots.toolbar.after(this.status);
     document.addEventListener('fullscreenchange', () => this.toggleFocus(document.fullscreenElement === roots.app));
     this.refresh();
-    this.toggleSummary(true);
-    // На узком окне панель выезжает поверх карты — при запуске она закрыта.
-    if (matchMedia('(max-width: 999px)').matches) this.sidebar.hide();
+    // На узком окне панель выезжает поверх карты — при запуске она свёрнута.
+    if (matchMedia('(max-width: 999px)').matches) this.tabs.collapsed = true;
+    this.tabs.sync(false);
   }
 
-  /**
-   * Раздел уже открыт, но панель свёрнута — кнопка раздела показывает панель,
-   * а не закрывает раздел. Возвращает, показала ли.
-   */
-  private revealPanel(sectionOpen: boolean): boolean {
-    if (!sectionOpen || !this.roots.app.classList.contains('sidebar-collapsed')) return false;
-    this.sidebar.show();
-    return true;
+  /** Вкладка сменилась: законы в живом мире, черновик — как был; карта меняет ширину. */
+  private tabChanged(tab: PanelTab): void {
+    if (tab === 'laws' && !this.drafting && !this.livelaws) this.setLiveLaws(true);
+    this.roots.params.inert = tab !== 'laws';
+    this.handlers.onLayoutChange();
+  }
+
+  /** Открыта ли вкладка «Точка на карте» — тогда клик по карте закрепляет точку. */
+  probeOpen(): boolean {
+    return this.tabs.isOpen('probe');
+  }
+
+  /** Открыть вкладку «Точка на карте» (точку закрепили). */
+  showProbe(): void {
+    this.tabs.open('probe');
+  }
+
+  /** Миникарта включена — кнопка нажата. */
+  setMinimapEnabled(on: boolean): void {
+    this.minimapButton.setAttribute('aria-pressed', String(on));
   }
 
   /** Мир создан с этими параметрами — черновик совпадает с миром. */
@@ -269,28 +259,12 @@ export class Panel {
     this.refresh(false);
   }
 
-  /** Открыть или закрыть настройки; черновик сохраняется при закрытии. */
-  private expandMainSection(title: string): void {
-    const section = document.querySelector<HTMLDetailsElement>('.sidebar-main')!;
-    section.querySelector('.section-title')!.textContent = title;
-    section.hidden = false;
-    section.open = true;
-    this.sidebar.show();
-  }
-
-  private syncMainVisibility(): void {
-    document.querySelector<HTMLElement>('.sidebar-main')!.hidden = this.roots.summary.hidden && this.roots.legend.hidden && !this.roots.app.classList.contains('params-open');
-  }
-
+  /** Открыть настройки (вкладка «Законы»: черновик нового мира или законы живого); закрыть — вернуться к сводке. */
   toggleParams(open?: boolean): void {
     const next = open ?? true;
-    if (next) { this.toggleFocus(false); this.toggleLegend(false); this.toggleSummary(false); }
-    if (next) this.expandMainSection(this.livelaws ? 'Законы мира' : 'Параметры нового мира');
-    this.roots.app.classList.toggle('params-open', next);
+    if (next) { this.toggleFocus(false); this.tabs.open('laws'); }
+    else if (this.tabs.active === 'laws') this.tabs.open('summary');
     this.paramsToggle.setAttribute('aria-expanded', String(next));
-    this.roots.params.inert = !next;
-    this.syncMainVisibility();
-    this.handlers.onLayoutChange();
     if (!next && this.roots.params.contains(document.activeElement)) this.menuToggle.focus();
   }
 
@@ -324,40 +298,6 @@ export class Panel {
     }
   }
 
-  toggleLegend(open?: boolean): void {
-    const next = open ?? this.roots.legend.hidden;
-    if (next) { this.toggleFocus(false); this.toggleParams(false); this.toggleSummary(false); }
-    if (next) this.expandMainSection('Легенда');
-    this.roots.legend.hidden = !next;
-    this.legendToggle.setAttribute('aria-expanded', String(next));
-    this.legendToggle.setAttribute('aria-pressed', String(next));
-    this.syncObservation();
-    this.syncMainVisibility();
-    if (!next && this.roots.legend.contains(document.activeElement)) this.legendToggle.focus();
-  }
-
-  toggleNavigation(open?: boolean): void {
-    const next = open ?? this.roots.navigation.hidden;
-    this.roots.navigation.hidden = !next;
-    if (next) { this.toggleFocus(false); this.sidebar.show(); (this.roots.navigation as HTMLDetailsElement).open = true; }
-    if (next) this.roots.navigation.scrollIntoView({ block: 'nearest' });
-    this.navigationToggle.setAttribute('aria-expanded', String(next));
-    this.navigationToggle.setAttribute('aria-pressed', String(next));
-    if (!next && this.roots.navigation.contains(document.activeElement)) this.navigationToggle.focus();
-  }
-
-  toggleSummary(open?: boolean): void {
-    const next = open ?? this.roots.summary.hidden;
-    if (next) { this.toggleFocus(false); this.toggleParams(false); this.toggleLegend(false); }
-    if (next) this.expandMainSection('Сводка мира');
-    this.roots.summary.hidden = !next;
-    this.summaryToggle.setAttribute('aria-expanded', String(next));
-    this.summaryToggle.setAttribute('aria-pressed', String(next));
-    this.syncMainVisibility();
-    this.handlers.onLayoutChange();
-    if (!next && this.roots.summary.contains(document.activeElement)) this.summaryToggle.focus();
-  }
-
   closePanels(): void {
     this.toggleFocus(false);
     this.closeMenu();
@@ -366,11 +306,6 @@ export class Panel {
   private closeMenu(): void {
     if (this.fileMenu.contains(document.activeElement)) this.menuToggle.focus();
     this.fileMenu.open = false;
-  }
-
-  private syncObservation(): void {
-    this.roots.observation.hidden = this.roots.legend.hidden;
-    this.handlers.onLayoutChange();
   }
 
   /** Заменить черновик целиком и обновить все поля панели. */
@@ -408,7 +343,6 @@ export class Panel {
     const save = el('button', { textContent: 'Сохранить', ariaLabel: 'Сохранить', title: 'Сохранить мир в файл (Ctrl+S)' });
     const load = el('button', { textContent: 'Загрузить', ariaLabel: 'Загрузить', title: 'Загрузить мир из файла' });
     this.paramsToggle.append(el('span', { className: 'desktop-menu-note', textContent: 'Параметры и создание' }));
-    this.lawsToggle.append(el('span', { className: 'desktop-menu-note', textContent: 'Свет, течения, тектоника — на ходу' }));
     save.append(el('span', { className: 'desktop-menu-note', textContent: 'Файл JSON · Ctrl / ⌘ S' }));
     load.append(el('span', { className: 'desktop-menu-note', textContent: 'Продолжить сохранённый мир' }));
     const picker = el('input', { type: 'file', accept: '.json,application/json', hidden: true });
@@ -461,21 +395,15 @@ export class Panel {
       if (this.drafting) { this.toggleParams(true); return; }
       this.newWorldDialog.showModal();
     });
-    this.lawsToggle.addEventListener('click', () => {
-      this.closeMenu();
-      if (this.drafting) { this.toggleParams(true); return; }
-      this.setLiveLaws(true);
-      this.toggleParams(true);
-    });
     this.focusToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path class="focus-enter" d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4"/><path class="focus-exit" d="M3 7h4V3M13 3v4h4M17 13h-4v4M7 17v-4H3"/></svg>';
     this.focusToggle.addEventListener('click', () => { void this.toggleFullscreen(); });
     this.menuToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M10 4v12M4 10h12"/></svg>';
     this.menuToggle.append(el('span', { className: 'desktop-control-label', textContent: 'Мир' }),
       el('span', { className: 'desktop-control-label menu-chevron', textContent: '⌄', ariaHidden: 'true' }));
-    this.fileMenu.append(this.menuToggle, el('div', { className: 'menu-actions' }, this.paramsToggle, this.lawsToggle, save, load));
+    this.fileMenu.append(this.menuToggle, el('div', { className: 'menu-actions' }, this.paramsToggle, save, load));
     // Arrow navigation stays local: it must not trigger simulation shortcuts.
     this.fileMenu.addEventListener('keydown', event => {
-      const actions = [this.paramsToggle, this.lawsToggle, save, load];
+      const actions = [this.paramsToggle, save, load];
       if (event.key === 'Escape' && this.fileMenu.open) {
         event.preventDefault(); event.stopPropagation(); this.closeMenu();
       } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -498,9 +426,6 @@ export class Panel {
       this.roots.viewControls,
       speedControl,
       spacer,
-      el('span', { className: 'toolbar-secondary' }, this.legendToggle, this.navigationToggle, this.summaryToggle),
-      document.querySelector<HTMLElement>('.probe-toggle')!,
-      document.querySelector<HTMLElement>('.sidebar-toggle')!,
       this.focusToggle,
       picker,
     );
@@ -520,7 +445,9 @@ export class Panel {
     document.addEventListener('pointerdown', (event) => {
       if (viewMenu.open && !viewMenu.contains(event.target as Node)) viewMenu.open = false;
     });
-    this.roots.viewControls.append(el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn), ...toggles, viewMenu);
+    this.minimapButton.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m2 4 5-2 6 2 5-2v14l-5 2-6-2-5 2Z M7 2v14 M13 4v14"/></svg>';
+    this.minimapButton.addEventListener('click', () => this.handlers.onMinimap());
+    this.roots.viewControls.append(el('span', { className: 'group' }, zoomOut, this.zoomButton, zoomIn), this.minimapButton, ...toggles, viewMenu);
     const narrow = matchMedia('(max-width: 980px)');
     const placeToggles = () => {
       if (narrow.matches) viewMenu.querySelector('.menu-actions')!.append(...toggles);
@@ -570,11 +497,11 @@ export class Panel {
       window.clearTimeout(this.draftTimer);
       this.handlers.onDraft(structuredClone(this.draft));
       this.setDrafting(false);
+      this.setLiveLaws(true);
       this.handlers.onLaunch();
-      this.toggleSummary(true);
+      this.tabs.open('summary');
     });
     this.buildNewWorldDialog();
-    this.toggleParams(false);
   }
 
   /** Предупреждение перед новым миром: текущий будет заменён без возврата. */
@@ -606,6 +533,7 @@ export class Panel {
   private setDrafting(next: boolean): void {
     this.drafting = next;
     this.draftBanner.hidden = !next;
+    this.tabs.markDraft('laws', next);
     this.roots.app.classList.toggle('drafting', next);
   }
 
@@ -614,6 +542,7 @@ export class Panel {
     this.livelaws = next;
     this.roots.params.classList.toggle('live-laws', next);
     this.paramsTitle.textContent = next ? 'Законы мира' : 'Параметры нового мира';
+    this.tabs.setTitle('laws', next ? 'Законы мира' : 'Параметры нового мира');
     this.lawsNote.hidden = !next;
     this.createButton.hidden = next;
     this.refresh(false);
@@ -1029,9 +958,6 @@ export class Panel {
       el('details', { className: 'legend-extras' }, el('summary', { textContent: 'Блики и нагрев' }),
         el('p', { className: 'note', textContent: 'Блики отмечают воду на свету. Светлые пятна теплее; точные значения температуры доступны в панели «Точка на карте».' })),
     );
-    this.legendToggle.addEventListener('click', () => { if (!this.revealPanel(!this.roots.legend.hidden)) this.toggleLegend(); });
-    this.legendToggle.setAttribute('aria-controls', 'legend');
-    this.legendToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><rect x="2" y="3" width="4" height="4" rx="1"/><rect x="2" y="12" width="4" height="4" rx="1"/><path d="M10 5h8 M10 14h8"/></svg>';
     this.roots.legend.append(el('div', { className: 'legend-head' }, el('h2', { textContent: 'Легенда' })), this.legendBody, detail);
 
   }

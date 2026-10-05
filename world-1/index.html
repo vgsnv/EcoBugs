@@ -30,8 +30,9 @@
       /* ── Раскладка ─────────────────────────────────────────────── */
       .app { height: 100%; min-width: 920px; display: flex; flex-direction: column; }
       .app:fullscreen { background: var(--bg); }
-      .app-body { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 300px; flex: 1; min-height: 0; gap: 8px; padding: 0 8px 8px; }
-      .app.sidebar-collapsed .app-body, .app.focus-mode .app-body { grid-template-columns: minmax(0, 1fr); }
+      .app-body { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 340px; flex: 1; min-height: 0; gap: 8px; padding: 0 8px 8px; }
+      .app.sidebar-collapsed .app-body { grid-template-columns: minmax(0, 1fr) 40px; }
+      .app.focus-mode .app-body { grid-template-columns: minmax(0, 1fr); }
       .map-column { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 6px; }
       .workspace { display: flex; flex: 1; min-height: 0; }
       .field { flex: 1; min-width: 0; min-height: 0; display: flex; }
@@ -49,13 +50,25 @@
       .control-staging { display: none; }
       .spacer { flex: 1; }
 
-      /* Правая панель: колонка; на узком окне — выезжает поверх карты. */
-      .right-panel { min-height: 0; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
-      .app.sidebar-collapsed .right-panel, .app.focus-mode .right-panel { display: none; }
-      .right-panel-empty { display: none; }
+      /* Правая панель: содержимое вкладки и полоса значков справа; свёрнутая — только полоса.
+         На узком окне содержимое выезжает поверх карты, полоса остаётся у края. */
+      .right-panel { display: grid; grid-template-columns: minmax(0, 1fr) 40px; min-height: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); overflow: hidden; }
+      .app.sidebar-collapsed .right-panel { grid-template-columns: 40px; }
+      .app.sidebar-collapsed .panel-content { display: none; }
+      .app.focus-mode .right-panel { display: none; }
+      .panel-content { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow-y: auto; border-right: 1px solid var(--line); }
+      .pane-head { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+      .pane-title { margin: 0; font-size: 13px; font-weight: 600; }
+      .panel-tabs { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; }
+      .panel-tab { position: relative; width: 30px; padding: 0; border-color: transparent; }
+      .panel-tab[aria-selected=true] { color: var(--accent); }
+      .panel-tab.active { background: var(--accent-soft); border-color: var(--accent-line); }
+      .panel-tab.draft::after { content: ''; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+      .right-panel .legend-head, .right-panel .params-head { display: none; }
       @media (max-width: 999px) {
-        .app-body { grid-template-columns: minmax(0, 1fr); }
-        .right-panel { position: absolute; z-index: 6; top: 0; right: 8px; bottom: 84px; width: min(320px, calc(100% - 48px)); box-shadow: 0 10px 32px #2a29253d; }
+        .app-body, .app.sidebar-collapsed .app-body { grid-template-columns: minmax(0, 1fr) 40px; }
+        .right-panel { position: absolute; z-index: 6; top: 0; right: 8px; bottom: 84px; width: min(360px, calc(100% - 16px)); box-shadow: 0 10px 32px #2a29253d; }
+        .app.sidebar-collapsed .right-panel { width: 40px; box-shadow: none; }
       }
 
       /* ── Кнопки и поля ─────────────────────────────────────────── */
@@ -71,9 +84,6 @@
       .focus-toggle, .minimap-toggle, .legend-toggle, .run-toggle { width: var(--h); padding: 0; flex-shrink: 0; }
       .focus-toggle .focus-exit, .focus-toggle[aria-pressed=true] .focus-enter { display: none; }
       .focus-toggle[aria-pressed=true] .focus-exit { display: block; }
-      .sidebar-toggle .sidebar-expand { display: none; }
-      .sidebar-collapsed .sidebar-toggle .sidebar-expand { display: block; }
-      .sidebar-collapsed .sidebar-toggle .sidebar-collapse { display: none; }
       .group { display: inline-flex; }
       .group button { border-radius: 0; margin-left: -1px; }
       .group button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; }
@@ -91,7 +101,6 @@
       #toolbar { position: relative; z-index: 7; display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; height: 44px; padding: 0 8px; flex-shrink: 0; white-space: nowrap; }
       #toolbar > *, #view-controls > * { flex-shrink: 0; }
       #view-controls { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; min-width: 0; }
-      .toolbar-secondary { display: inline-flex; align-items: center; gap: 4px; }
       .desktop-panel-label, .desktop-menu-note { display: none; }
       .file-menu, .view-menu { position: relative; padding: 0; border: 0; }
       .file-menu > summary, .view-menu > summary { display: flex; align-items: center; gap: 6px; height: var(--h); padding: 0 10px; margin: 0; border: 1px solid var(--line); border-radius: var(--radius); color: var(--text); font-size: 12.5px; font-weight: 500; text-transform: none; letter-spacing: 0; list-style: none; }
@@ -174,19 +183,6 @@
       .key i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; }
 
       /* ── Панель: секции ────────────────────────────────────────── */
-      .right-panel .sidebar-section { padding: 0; border-bottom: 1px solid var(--line); }
-      .right-panel .sidebar-section > summary { display: flex; align-items: center; gap: 8px; padding: 9px 12px; margin: 0; color: var(--text); font-size: 12px; text-transform: none; letter-spacing: 0; list-style: none; }
-      .right-panel .sidebar-section > summary::-webkit-details-marker { display: none; }
-      .right-panel .sidebar-section > summary::before { content: '▸'; color: var(--faint); font-size: 10px; }
-      .right-panel .sidebar-section[open] > summary::before { content: '▾'; }
-      .right-panel .sidebar-section[open] > summary { border-bottom: 1px solid var(--line); }
-      .section-title { flex: 1; }
-      .section-drag-handle { padding: 0 6px; cursor: grab; color: var(--faint); font-size: 15px; border-radius: 4px; }
-      .section-drag-handle:hover, .section-drag-handle:focus-visible { background: var(--hover); color: var(--accent); }
-      .section-dragging { opacity: .5; }
-      .drop-before { box-shadow: inset 0 3px var(--accent); }
-      .drop-after { box-shadow: inset 0 -3px var(--accent); }
-      .right-panel .sidebar-main .legend-head, .right-panel .sidebar-main .params-head { display: none; }
       #observation { display: flex; flex-direction: column; min-height: 0; }
       #world-summary { font-variant-numeric: tabular-nums; }
       .summary-section { padding: 10px 12px; border-bottom: 1px solid var(--line); }
@@ -213,12 +209,16 @@
       .legend-detail { flex-shrink: 0; max-height: 125px; overflow-y: auto; margin: 0 8px 8px; padding: 10px; border-radius: 6px; color: var(--muted); line-height: 1.5; background: var(--hover); }
       .legend-detail strong { color: var(--text); font-weight: 600; }
       .legend-detail p { margin: 4px 0 0; }
-      .legend-close, #navigation-close { width: 26px; height: 26px; min-height: 26px; padding: 0; border: 0; color: var(--muted); }
 
-      /* Миникарта и точка на карте. */
-      #navigation .navigation-body { padding: 6px; }
-      .minimap { width: 100%; height: 160px; background: var(--bg); border-radius: 4px; cursor: grab; }
-      #navigation.moving, #navigation.moving .minimap { cursor: grabbing; }
+      /* Миникарта в углу карты: в покое — контур, под курсором — картинка. */
+      .minimap-overlay { position: absolute; z-index: 4; border-radius: 6px; transition: left .35s ease, top .35s ease, width .18s ease, height .18s ease, background-color .18s, box-shadow .18s; }
+      .minimap-overlay.instant { transition: none; }
+      .minimap-overlay.full { background: #f4f2ecee; box-shadow: 0 4px 16px #2a292540, inset 0 0 0 1px var(--line); }
+      .minimap-overlay .minimap { width: 100%; height: 100%; cursor: pointer; }
+      .minimap-hide { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; min-height: 20px; padding: 0; font-size: 14px; line-height: 1; color: var(--muted); background: var(--panel); opacity: 0; pointer-events: none; transition: opacity .15s; }
+      .minimap-overlay.full .minimap-hide { opacity: 1; pointer-events: auto; }
+
+      /* Точка на карте. */
       .probe-content { display: block; }
       .probe-actions { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 12px 0; }
       .probe-actions button { height: 26px; min-height: 26px; font-size: 11.5px; }
@@ -228,7 +228,6 @@
 
       /* Параметры нового мира. */
       #params { display: flex; flex-direction: column; min-height: 0; }
-      .app:not(.params-open) #params { display: none; }
       .params-body { padding: 0 12px 12px; display: flex; flex-direction: column; gap: 2px; }
       .params-foot { position: sticky; bottom: 0; border-top: 1px solid var(--line); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; background: var(--panel); }
       .fields { display: flex; flex-direction: column; gap: 10px; }
@@ -314,7 +313,7 @@
       .draft-banner { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 5; padding: 6px 12px; border-radius: 999px; background: var(--panel); border: 1px solid var(--accent); color: var(--accent); font-size: 12px; box-shadow: 0 4px 12px #2a292530; pointer-events: none; white-space: nowrap; }
 
       /* Режим «на весь экран»: только карта и ход мира. */
-      .app.focus-mode .mineral-stats, .app.focus-mode .toolbar-secondary, .app.focus-mode .file-menu { display: none; }
+      .app.focus-mode .mineral-stats, .app.focus-mode .file-menu { display: none; }
 
     </style>
   </head>
@@ -331,17 +330,19 @@
       <div class="mineral-stats" title="Где сейчас минерал мира. Сумма постоянна."></div>
       <div class="world-playback" role="toolbar" aria-label="Управление симуляцией"></div>
       <div class="control-staging" hidden>
-        <button class="sidebar-toggle focus-toggle" aria-label="Свернуть правую панель" title="Свернуть правую панель" aria-expanded="true"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="3" width="16" height="14" rx="2"/><path d="M13 3v14"/><path class="sidebar-collapse" d="m6 7 3 3-3 3"/><path class="sidebar-expand" d="m9 7-3 3 3 3"/></svg></button>
         <div id="view-controls"></div>
         <div class="light-drift"><span class="light-speed" title="Средняя скорость пятен света"></span><span class="sun-rhythm" title="Ритм солнца: множитель силы солнца сейчас и куда он идёт"></span></div>
-        <button class="probe-toggle focus-toggle" aria-label="Точка на карте" title="Точка на карте" aria-expanded="false" aria-controls="probe-section"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6"/><circle cx="10" cy="10" r="2"/><path d="M10 1v3m0 12v3M1 10h3m12 0h3"/></svg></button><div class="probe-content"><div class="probe-actions"><button class="probe-point-release" type="button" disabled>Снять точку</button></div><span class="probe-pin-note">Клик по карте закрепит точку. Её значения продолжат обновляться.</span><div class="tip">Наведите курсор на чашку, чтобы увидеть значения.</div></div>
+        <div class="probe-content"><div class="probe-actions"><button class="probe-point-release" type="button" disabled>Снять точку</button></div><span class="probe-pin-note">Клик по карте закрепит точку. Её значения продолжат обновляться.</span><div class="tip">Наведите курсор на чашку, чтобы увидеть значения.</div></div>
       </div></footer></div>
       <aside class="right-panel" aria-label="Панель мира">
-        <details id="main-panel" class="sidebar-section sidebar-main" open><summary>Сводка мира</summary><div id="observation" hidden aria-label="Наблюдение за миром"><section id="legend" hidden aria-label="Легенда карты"></section></div>
-        <div id="world-summary" hidden aria-label="Сводка мира"></div>
-        <div id="params"></div></details>
-        <details id="navigation" class="sidebar-section" hidden><summary>Миникарта</summary><div class="navigation-body"><canvas class="minimap" aria-label="Мини-карта чашки" title="Клик — перейти сюда"></canvas></div></details>
-        <details id="probe-section" class="sidebar-section probe-dock" hidden><summary>Точка на карте</summary></details>
+        <div class="panel-content">
+          <div class="pane-head"><h2 class="pane-title"></h2></div>
+          <div id="world-summary" aria-label="Сводка мира"></div>
+          <div id="params" hidden></div>
+          <div id="probe-pane" hidden></div>
+          <div id="observation" hidden aria-label="Наблюдение за миром"><section id="legend" aria-label="Легенда карты"></section></div>
+        </div>
+        <nav class="panel-tabs" role="tablist" aria-orientation="vertical" aria-label="Вкладки панели"></nav>
       </aside></div>
     </div>
     <script type="module" src="/src/app/main.ts"></script>

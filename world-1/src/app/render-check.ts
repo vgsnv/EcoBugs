@@ -153,11 +153,11 @@ export function installRenderCheck(renderer: WorldRenderer): void {
       }
       for (const t of TIMES) renderer.draw(t, world.step);
       // Подложка мини-карты строится по частям: достроить, затем кадр целиком.
-      renderer.drawMinimap(mini);
-      for (let i = 0; i < 2000 && renderer.pendingWork(); i++) renderer.drawMinimap(mini);
+      renderer.drawMinimap(mini, true);
+      for (let i = 0; i < 2000 && renderer.pendingWork(); i++) renderer.drawMinimap(mini, true);
       renderer.setProbePoint(null);
       renderer.draw(TIMES[TIMES.length - 1], world.step);
-      renderer.drawMinimap(mini);
+      renderer.drawMinimap(mini, true);
       return capture(renderer.snapshot());
     } finally {
       Math.random = random;

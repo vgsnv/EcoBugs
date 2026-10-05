@@ -6,6 +6,7 @@ import {
   Drift, flowAt, meanSpotSpeed, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInDeposits, mineralInMedium, smoothLevelAt, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
   isLaw, LIGHT_REFERENCE, resistanceAt, setMediumLaws, temperatureAt, type World, type WorldParams,
 } from '../core/index.ts';
+import { MinimapOverlay } from './minimap-overlay.ts';
 import { WorldSummary } from './world-summary.ts';
 import { Panel, SPEEDS, SPEED_KEYS } from './panel.ts';
 import { WorldRenderer } from './render.ts';
@@ -21,8 +22,6 @@ const GRADATION_NAMES = ['Вода', 'Отмель', 'Суша'];
 
 const canvas = document.querySelector<HTMLCanvasElement>('#world')!;
 const renderer = new WorldRenderer(canvas);
-const minimap = document.querySelector<HTMLCanvasElement>('.minimap')!;
-minimap.addEventListener('click', event => renderer.centerFromMinimap(minimap, event.clientX, event.clientY));
 const lightSpeed = document.querySelector<HTMLElement>('.light-speed')!;
 const mineralStats = document.querySelector<HTMLElement>('.mineral-stats')!;
 mineralStats.innerHTML = '<details class="mineral-details"><summary><b>Минерал</b><span class="mineral-scale"><span class="mineral-bar" role="img"><i class="depths"></i><i class="out"></i><i class="deposits"></i><i class="medium"></i><i class="threshold"></i></span><span class="mineral-ticks"><span class="mass-zero"></span><span class="mass-half"></span><span class="mass-total"></span></span></span></summary>'
@@ -73,7 +72,7 @@ let pointer: { x: number; y: number } | null = null;
 let pinnedPoint: { x: number; y: number } | null = null;
 
 const $ = (selector: string) => document.querySelector<HTMLElement>(selector)!;
-const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#params'), legend: $('#legend'), tip: $('.tip'), observation: $('#observation'), navigation: $('#navigation'), viewControls: $('#view-controls'), summary: $('#world-summary') }, world.params, {
+const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#params'), legend: $('#legend'), tip: $('.tip'), observation: $('#observation'), probe: $('#probe-pane'), viewControls: $('#view-controls'), summary: $('#world-summary') }, world.params, {
   onLayoutChange: () => { pointer = null; renderer.resizeKeepingView(); },
   onDraft: (params: WorldParams) => { drafting = true; paused = true; create(params); },
   onLaunch: () => { drafting = false; paused = false; control(); },
@@ -91,6 +90,7 @@ const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#pa
   onZoomIn: () => renderer.zoomBy(ZOOM_STEP),
   onZoomOut: () => renderer.zoomBy(1 / ZOOM_STEP),
   onZoomFit: () => renderer.fit(),
+  onMinimap: () => minimapOverlay.toggle(),
   onRulers: (enabled) => renderer.setRulers(enabled),
   onStreamView: (view) => { renderer.streamView = view; },
   onProcesses: (enabled) => {
@@ -99,6 +99,10 @@ const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#pa
   },
 });
 renderer.onZoomChange = (relative) => panel.setZoom(relative);
+const minimapOverlay = new MinimapOverlay($('.stage'), renderer, (on) => panel.setMinimapEnabled(on));
+panel.setMinimapEnabled(minimapOverlay.enabled);
+/** Курсор над картой в координатах окна — миникарта уходит из-под него. */
+let pointerClient: { clientX: number; clientY: number } | null = null;
 
 function saveWorld(): void {
   send({ type: 'save', epoch, id: ++requestId });
@@ -224,6 +228,7 @@ canvas.addEventListener('pointermove', (e) => {
     pointer = null;
     return;
   }
+  pointerClient = { clientX: e.clientX, clientY: e.clientY };
   const at = renderer.toWorld(e.clientX, e.clientY);
   pointer = at ? { x: at[0], y: at[1] } : null;
 });
@@ -232,14 +237,15 @@ const endDrag = () => {
   canvas.parentElement!.classList.remove('dragging');
 };
 canvas.addEventListener('pointerup', (e) => {
-  if (drag && !drag.moved && !$('.probe-dock').hidden && document.querySelector<HTMLDetailsElement>('.probe-dock')!.open) {
+  // Клик закрепляет точку, когда открыта вкладка «Точка на карте».
+  if (drag && !drag.moved && panel.probeOpen()) {
     const at = renderer.toWorld(e.clientX, e.clientY);
     if (at) { pinnedPoint = { x: at[0], y: at[1] }; renderer.setProbePoint(pinnedPoint); panel.setProbePinned(true); }
   }
   endDrag();
 });
 canvas.addEventListener('pointercancel', endDrag);
-canvas.addEventListener('pointerleave', () => { pointer = null; });
+canvas.addEventListener('pointerleave', () => { pointer = null; pointerClient = null; });
 canvas.addEventListener('dblclick', (e) => renderer.zoomBy(2, e.clientX, e.clientY));
 
 // Горячие клавиши: не мешают полям ввода.
@@ -346,7 +352,13 @@ function frame(now: number): void {
       renderedFrames = 0;
     }
   }
-  renderer.drawMinimap(minimap);
+  // Миникарта не закрывает закреплённую точку, извержения и толчки.
+  const avoid = [
+    ...(pinnedPoint ? [pinnedPoint] : []),
+    ...world.mineral.volcanoes.filter((v) => v.stage === 'erupting' || v.stage === 'preparing'),
+    ...world.terrain.active.filter((m) => m.quake),
+  ];
+  minimapOverlay.update(world, now, avoid, pointerClient);
   const spotSpeed = millimetresPerSecond(meanSpotSpeed(world.light, world.step)) * 60;
   const speedText = spotSpeed > 0 ? `пятна плывут ≈ ${(spotSpeed * 60 * 24 / 10).toFixed(0)} см/сут` : 'свет стоит';
   if (lightSpeed.textContent !== speedText) lightSpeed.textContent = speedText;

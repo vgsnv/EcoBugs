@@ -274,13 +274,40 @@ export class WorldRenderer {
     return out;
   }
 
-  /** Мини-карта в отдельной панели: вся чашка, пятна света, перегородки и рамка вида. */
-  drawMinimap(mini: HTMLCanvasElement): void {
-    // Скрытая карта не рисуется — и подложка для неё не строится.
+  /** Мини-карта в углу карты; `full` — с картинкой, иначе контур и рамка вида. */
+  drawMinimap(mini: HTMLCanvasElement, full: boolean): void {
+    // Скрытая карта не рисуется; подложка строится только для полной.
     if (!this.world || !mini.clientWidth || !mini.clientHeight) return;
     this.minimap.draw(mini, {
-      world: this.world, camera: this.camera, base: this.terrain.minimapBase(), parts: this.walls.parts,
-    });
+      world: this.world, camera: this.camera, base: full ? this.terrain.minimapBase() : null, parts: this.walls.parts,
+    }, full);
+  }
+
+  /** Вся ли чашка в кадре (миникарта тогда не нужна). */
+  get fitted(): boolean {
+    return this.camera.fitted;
+  }
+
+  /** Запас сдвига вида за край чашки, пикселей экрана (CSS): из-под миникарты можно вывести любой угол. */
+  setViewMargin(px: number): void {
+    this.camera.margin = px;
+  }
+
+  /** Видимая часть мира: [x0, y0, x1, y1]. */
+  visibleWorld(): [number, number, number, number] {
+    return this.camera.visible();
+  }
+
+  /** Координаты мира → точка окна (CSS). */
+  worldToClient(x: number, y: number): [number, number] {
+    const [a, , , d, e, f] = this.camera.view();
+    const rect = this.canvas.getBoundingClientRect(), dpr = this.camera.dpr;
+    return [rect.left + (a * x + e) / dpr, rect.top + (d * y + f) / dpr];
+  }
+
+  /** Точка окна → координаты мира, и вне чашки тоже. */
+  clientToWorld(clientX: number, clientY: number): [number, number] {
+    return this.camera.clientToWorld(clientX, clientY);
   }
 
   /** Точка мини-карты (координаты окна) → центр вида там. */
