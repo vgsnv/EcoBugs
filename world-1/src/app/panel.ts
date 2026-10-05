@@ -48,7 +48,7 @@ export const SPEED_KEYS = SPEEDS.map((_, i) => String(i + 1));
 
 const OPEN_GROUPS_KEY = 'ecobugs.params.open';
 
-type NumberKey = 'lightShadow' | 'lightExtra' | 'spotCount' | 'spotAreaMin' | 'spotAreaMax' | 'driftCross' | 'driftTurn' | 'sunRhythm' | 'sunPeriod' | 'rhythmTransition' | 'rhythmRise' | 'viscosityZoneSize' | 'quakeInterval' | 'groundThreshold' | 'slopeLimit' | 'settleHalf' | 'mineralStock' | 'eruptionPressure' | 'driftResponse' | 'resistanceShallows' | 'resistanceLand' | 'turbidityLoss' | 'spotWobble' | 'spotBreath';
+type NumberKey = 'lightShadow' | 'lightExtra' | 'spotCount' | 'spotAreaMin' | 'spotAreaMax' | 'driftCross' | 'driftTurn' | 'sunRhythm' | 'sunPeriod' | 'rhythmTransition' | 'rhythmRise' | 'viscosityZoneSize' | 'tectonicVolume' | 'heightMin' | 'heightMax' | 'groundThreshold' | 'slopeLimit' | 'settleHalf' | 'mineralStock' | 'eruptionPressure' | 'driftResponse' | 'resistanceShallows' | 'resistanceLand' | 'turbidityLoss' | 'spotWobble' | 'spotBreath';
 
 /** Ползунок параметра: значение — в единицах параметра, шкала — линейная или логарифмическая. */
 interface SliderSpec {
@@ -87,7 +87,6 @@ const nice = (v: number) => {
 
 /** Прежние параметры местности — до генератора суши. */
 const ZONE_SIZE: SliderSpec = { key: 'viscosityZoneSize', label: 'Размер зон', hint: 'Средний размер зон воды, отмели и суши. Заменится генератором суши (массивы, изрезанность, внутренние моря).', min: 80, max: 300, step: 5, format: (v) => formatLength(v) };
-const QUAKES: SliderSpec = { key: 'quakeInterval', label: 'Толчки', hint: 'В среднем раз в сколько часов случается толчок — короткий подъём или провал небольшого участка. Заменится «Тектоникой»: объём за час и высоты.', min: 1.5, max: 55, log: true, view: hoursOf, store: stepsOf, format: (v) => `раз в ${hoursText(v)}` };
 const STOCK: SliderSpec = { key: 'mineralStock', label: 'Запас минерала', hint: 'Сколько минерала в недрах при сотворении, на квадратный метр свободной площади. Дальше масса постоянна: минерал ходит между недрами, средой и залежами. Больше запас — крупнее извержения и воронки, а не чаще.', min: 200, max: 5000, log: true, view: (v) => v * 1000, store: (v) => v / 1000, format: (v) => `${formatNumber(v)} г/м²` };
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLElementTagNameMap[K]> = {}, ...children: (Node | string)[]): HTMLElementTagNameMap[K] {
@@ -532,7 +531,8 @@ export class Panel {
         group('Чаша', 'форма, пропорции, стартовая картина', [sub('Форма'), world[0], world[1], sub('Стартовая картина'), world[2], world[3]], true),
         group('Свет', 'пятна, яркость и их движение', this.lightFields(sub), true),
         group('Ритм солнца', 'как свет нарастает и спадает', this.rhythmFields(), false),
-        group('Местность', 'прежние ручки — до генератора суши', [this.slider(ZONE_SIZE), ...this.sharesRows(), this.slider(QUAKES)], false),
+        group('Местность', 'прежние ручки — до генератора суши', [this.slider(ZONE_SIZE), ...this.sharesRows()], false),
+        group('Тектоника', 'как дно поднимается и опускается', this.tectonicFields(), false),
         group('Минерал', 'запас недр и извержения', [
           this.slider(STOCK), this.consequence(() => `Всего в недрах ≈ ${formatMass(this.draft.mineralStock * 1_920_000)} — без перегородок.`),
           this.slider({ key: 'eruptionPressure', label: 'Давление извержения', hint: 'Сколько минерала (доля всего запаса) должно накопиться в недрах, чтобы вулкан извергся. Выше — извержения реже и крупнее; ниже — чаще и мельче. Как часто они случаются на деле, покажет сводка.', min: 0.03, max: 0.5, step: 0.01, format: (v) => formatPercent(v) }),
@@ -819,6 +819,21 @@ export class Panel {
     this.consequences.push(update);
     update();
     return node;
+  }
+
+  private tectonicFields(): HTMLElement[] {
+    // Средняя площадь подвижки, см² (как в ядре: 40–3000 см², равномерно в логарифме).
+    const meanArea = (3000 - 40) / Math.log(3000 / 40);
+    const levelName = (v: number) => (v < 0.05 ? 'стекло' : v < 0.5 ? 'вода' : v < 1.5 ? 'отмель' : 'суша');
+    const levelOf = (v: number) => (v < 0.05 ? 'стеклянного дна' : v < 0.5 ? 'воды' : v < 1.5 ? 'отмели' : 'суши');
+    return [
+      this.slider({ key: 'tectonicVolume', label: 'Объём', hint: 'Сколько дна в среднем меняет уровень за час. Подвижки бывают мелкие и быстрые (толчки, секунды–минуты) и крупные и медленные (часы, до суток); как часто они начинаются, следует из объёма.', min: 5, max: 5000, log: true, format: (v) => `${formatNumber(v)} см²/ч`, toggle: { label: 'дно не движется', value: 0 } }),
+      this.consequence(() => this.draft.tectonicVolume > 0
+        ? `≈ ${formatNumber(round1((100 * this.draft.tectonicVolume) / DISH_CM2))}% чаши в час · подвижка в среднем раз в ${hoursText(meanArea / this.draft.tectonicVolume)}`
+        : 'Тектоники нет: дно меняют только течения и осыпание'),
+      this.range({ keys: ['heightMin', 'heightMax'], label: 'Высоты', hint: 'До каких уровней поднимаются и опускаются участки: 0 — стеклянное дно, вода — до 0,5, отмель — до 1,5, выше — суша. Подъёмов и опусканий поровну; середина диапазона — куда дно тянется за долгое время.', min: 0, max: 3, step: 0.05, format: (v) => `${formatNumber(v)} ${levelName(v)}`, formatRange: (a, b) => `${levelName(a)} — ${levelName(b)}` }),
+      this.consequence(() => `Уровни ${formatNumber(this.draft.heightMin)}–${formatNumber(this.draft.heightMax)}: от ${levelOf(this.draft.heightMin)} до ${levelOf(this.draft.heightMax)}`),
+    ];
   }
 
   /** Тонкие законы среды и света — свёрнуты, по умолчанию подобраны. */

@@ -65,8 +65,10 @@ export interface WorldParams {
   groundThreshold: number;
   slopeLimit: number;
   settleHalf: number;
-  /** Средний промежуток между толчками, шагов. */
-  quakeInterval: number;
+  /** Тектоника: сколько дна меняет уровень за час, см²; в каком диапазоне уровней (0 — стеклянное дно, 2 — суша) поднимаются и опускаются участки. */
+  tectonicVolume: number;
+  heightMin: number;
+  heightMax: number;
 }
 
 export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
@@ -100,7 +102,9 @@ export const DEFAULT_PARAMS: Readonly<WorldParams> = Object.freeze({
   groundThreshold: 1.8,
   slopeLimit: 0.44,
   settleHalf: 29,
-  quakeInterval: 400000,
+  tectonicVolume: 170,
+  heightMin: 0.1,
+  heightMax: 2.2,
 });
 
 /** Параметры по умолчанию с заданным сидом и частичными переопределениями. */
@@ -144,7 +148,9 @@ export const PARAM_LABELS: Readonly<Record<string, string>> = {
   'groundThreshold': 'Порог срыва грунта',
   'slopeLimit': 'Устойчивый склон',
   'settleHalf': 'Оседание минерала',
-  'quakeInterval': 'Промежуток между толчками',
+  'tectonicVolume': 'Тектоника: объём',
+  'heightMin': 'Тектоника: высоты от',
+  'heightMax': 'Тектоника: высоты до',
   'viscosityShares': 'Доли вязкости',
   'viscosityShares.water': 'Доля воды',
   'viscosityShares.shallows': 'Доля отмели',
@@ -205,7 +211,10 @@ export function validateParams(p: WorldParams): string[] {
   inRange('groundThreshold', p.groundThreshold, 0.01, 1000);
   inRange('slopeLimit', p.slopeLimit, 0.01, 100);
   inRange('settleHalf', p.settleHalf, 0.1, 100000);
-  inRange('quakeInterval', p.quakeInterval, 1000, 1e9);
+  inRange('tectonicVolume', p.tectonicVolume, 0, 1e6);
+  inRange('heightMin', p.heightMin, 0, 5);
+  inRange('heightMax', p.heightMax, 0, 5);
+  if (p.heightMax < p.heightMin) errors.push('Тектоника: высоты «до» ниже, чем «от»');
 
   const s = p.viscosityShares;
   if (typeof s !== 'object' || s === null) {

@@ -161,18 +161,17 @@ export const TERRAIN_PERIOD = 10_000;
 export const EROSION = 0.00012;
 export const EROSION_RATIO = 2;
 
-/** Подвижки: промежуток между началами, длительность, размах (уровень) — от и до. */
-export const MOVE_GAP: readonly [number, number] = [100_000, 300_000];
-export const MOVE_DURATION: readonly [number, number] = [200_000, 800_000];
-export const MOVE_AMPLITUDE: readonly [number, number] = [0.8, 1.8];
-/** Формы подвижек: пятно (радиус) и полоса (длина, полуширина), единиц мира. */
-export const MOVE_SPOT_RADIUS: readonly [number, number] = [100, 300];
-export const MOVE_BAND_LENGTH: readonly [number, number] = [300, 1000];
+/**
+ * Подвижки: площадь — от и до, см² (равномерно в логарифме); длительность
+ * растёт с площадью — MOVE_DURATION_SMALL шагов у самой мелкой, × (площадь /
+ * самая мелкая)^MOVE_DURATION_POWER (30 с — около суток); полуширина полосы, мм.
+ * Короче QUAKE_STEPS — толчок (для показа).
+ */
+export const MOVE_AREA: readonly [number, number] = [40, 3000];
+export const MOVE_DURATION_SMALL = 300;
+export const MOVE_DURATION_POWER = 1.8;
 export const MOVE_BAND_WIDTH: readonly [number, number] = [30, 80];
-/** Толчки: длительность, размах (уровень), радиус — от и до; промежуток — параметр. */
-export const QUAKE_DURATION: readonly [number, number] = [200, 600];
-export const QUAKE_AMPLITUDE: readonly [number, number] = [0.6, 1.2];
-export const QUAKE_RADIUS: readonly [number, number] = [40, 120];
+export const QUAKE_STEPS = 36_000;
 /** Какую долю своего грунта подъём отдаёт на погашение долга подложки (см. terrain.ts). */
 export const TECTONIC_DEBT_SHARE = 0.5;
 

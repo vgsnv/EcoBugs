@@ -59,7 +59,7 @@ export class GroundLayer {
     this.rates.tectonic = new Float32Array(n);
     this.rates.version++;
     this.version++;
-    this.seenQuake = world.terrain.nextQuake;
+    this.seenQuake = world.terrain.nextMove;
     this.rings = [];
   }
 
@@ -113,8 +113,10 @@ export class GroundLayer {
     const w = this.world!;
     const t = w.terrain;
     // Толчки, начавшиеся с прошлого кадра, — даже если уже закончились.
-    for (; this.seenQuake < t.nextQuake; this.seenQuake++) {
-      this.rings.push({ m: movement(w.params, true, this.seenQuake, 0), at: animTime });
+    for (; this.seenQuake < t.nextMove; this.seenQuake++) {
+      const n = this.seenQuake;
+      const m = t.active.find((a) => a.n === n) ?? movement(w.params, n, 0);
+      if (m.quake) this.rings.push({ m, at: animTime });
     }
     this.rings = this.rings.filter((r) => animTime - r.at < QUAKE_SHOW).slice(-MAX_RINGS);
     let rings = 0;

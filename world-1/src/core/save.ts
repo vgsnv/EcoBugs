@@ -11,7 +11,7 @@ import { funnelFromNumbers, funnelNumbers, volcanoFromNumbers, volcanoNumbers } 
 
 export const WORLD_FILE_FORMAT = 'ecobugs-world';
 /** Версия формата файла мира. Растёт при несовместимых изменениях. */
-export const WORLD_FORMAT_VERSION = 24;
+export const WORLD_FORMAT_VERSION = 25;
 
 /** Прежние версии формата и почему они больше не читаются. */
 const OLD_FORMATS: Record<number, string> = {
@@ -38,6 +38,7 @@ const OLD_FORMATS: Record<number, string> = {
   21: 'тогда свет был полем шума, а не пятнами',
   22: 'тогда сопротивление сред, мутность и давление извержения не были параметрами',
   23: 'тогда была «скорость местности», а пороги срыва зависели от солнца',
+  24: 'тогда толчки и подвижки шли двумя отдельными потоками',
 };
 
 export interface MineralFile {
@@ -65,11 +66,9 @@ export interface TerrainFile {
   applied: string;
   nextMove: number;
   nextMoveStep: number;
-  nextQuake: number;
-  nextQuakeStep: number;
   /** Долг подложки (грунт), см. terrain.ts. */
   debt: number;
-  /** Идущие подвижки и толчки: номер, толчок ли (0/1), шаг начала. */
+  /** Идущие подвижки: номер, шаг начала, размах. */
   active: [number, number, number][];
 }
 
@@ -123,10 +122,8 @@ export function worldToFile(world: World, savedAt?: Date): WorldFile {
       applied: toBase64(new Uint8Array(world.terrain.applied.buffer.slice(0))),
       nextMove: world.terrain.nextMove,
       nextMoveStep: world.terrain.nextMoveStep,
-      nextQuake: world.terrain.nextQuake,
-      nextQuakeStep: world.terrain.nextQuakeStep,
       debt: world.terrain.debt,
-      active: world.terrain.active.map((m) => [m.n, m.quake ? 1 : 0, m.start]),
+      active: world.terrain.active.map((m) => [m.n, m.start, m.amp]),
     },
     checksum: worldHash(world).toString(16).padStart(8, '0'),
   };
@@ -282,7 +279,7 @@ function restoreMineral(world: World, raw: unknown): string[] {
 function restoreTerrain(world: World, raw: unknown): string[] {
   if (!isObject(raw)) return ['Нет состояния местности'];
   const t = world.terrain;
-  const ints = [raw.nextMove, raw.nextMoveStep, raw.nextQuake, raw.nextQuakeStep];
+  const ints = [raw.nextMove, raw.nextMoveStep];
   if (!ints.every((x) => Number.isSafeInteger(x) && (x as number) >= 0)) return ['Местность: расписание подвижек повреждено'];
   if (typeof raw.debt !== 'number' || !(raw.debt >= 0)) return ['Местность: долг подложки повреждён'];
   if (typeof raw.ground !== 'string' || typeof raw.deposits !== 'string' || typeof raw.applied !== 'string' || !Array.isArray(raw.active)) return ['Местность: нет грунта, залежей или снимка'];
@@ -297,12 +294,12 @@ function restoreTerrain(world: World, raw: unknown): string[] {
   if (ground.length !== t.ground.length * 8 || deposits.length !== t.deposits.length * 8 || applied.length !== t.applied.length * 4) return ['Местность другого размера'];
   const active = [];
   for (const entry of raw.active as unknown[]) {
-    if (!Array.isArray(entry) || entry.length !== 3 || !entry.every((x) => Number.isSafeInteger(x) && x >= 0)) return ['Местность: подвижка повреждена'];
-    active.push(movement(world.params, entry[1] === 1, entry[0] as number, entry[2] as number));
+    if (!Array.isArray(entry) || entry.length !== 3 || !Number.isSafeInteger(entry[0]) || !Number.isSafeInteger(entry[1]) || entry[0] < 0 || entry[1] < 0 || typeof entry[2] !== 'number' || !Number.isFinite(entry[2])) return ['Местность: подвижка повреждена'];
+    active.push(movement(world.params, entry[0] as number, entry[1] as number, entry[2] as number));
   }
   t.ground = new Float64Array(ground.buffer, ground.byteOffset, t.ground.length).slice();
   t.deposits = new Float64Array(deposits.buffer, deposits.byteOffset, t.deposits.length).slice();
-  [t.nextMove, t.nextMoveStep, t.nextQuake, t.nextQuakeStep] = ints as number[];
+  [t.nextMove, t.nextMoveStep] = ints as number[];
   t.debt = raw.debt;
   t.active = active;
   applyTerrain(world, new Float32Array(applied.buffer, applied.byteOffset, t.applied.length).slice());
