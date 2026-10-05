@@ -1,27 +1,25 @@
-/** Стеклянный обод чашки и перегородки тем же стеклом (тень чашки на столе — в шейдере нижнего холста). */
-import { cellInsideDish, type World } from '../../core/index.ts';
+/**
+ * Стеклянный обод чашки и перегородки тем же стеклом, без кромки внутри чашки;
+ * под стеклом виден стол (шейдер нижнего холста — и тень чашки на столе).
+ */
+import type { World } from '../../core/index.ts';
 import type { Frame } from './frame.ts';
 import { traceDish } from './palette.ts';
 
-/** Стекло стен и перегородок: полупрозрачная заливка, светлая кромка, лёгкая тень. */
-const GLASS_FILL = 'rgba(205, 230, 255, 0.5)';
+/** Стекло стен и перегородок: один блик на всю чашку; светлая кромка — только снаружи обода. */
 const GLASS_MID = 'rgba(211, 238, 244, 0.72)';
 const GLASS_GLOSS_TO = 'rgba(128, 166, 180, 0.48)';
 const GLASS_END = 'rgba(188, 214, 224, 0.84)';
 const GLASS_GLOSS_FROM = 'rgba(244, 253, 255, 0.94)';
 const GLASS_EDGE = 'rgba(255, 255, 255, 0.9)';
-const GLASS_SHADOW = 'rgba(30, 55, 80, 0.65)';
 
 export class WallsLayer {
   /** Перегородки одним путём (в единицах мира). */
   parts = new Path2D();
-  /** Кромка стекла (в единицах мира) — строится один раз на мир. */
-  private edges = new Path2D();
   private world!: World;
 
   setWorld(world: World): void {
     this.world = world;
-    this.edges = this.buildEdges();
     this.parts = this.buildParts();
   }
 
@@ -49,26 +47,10 @@ export class WallsLayer {
     gloss.addColorStop(1, GLASS_END);
     ctx.fillStyle = gloss;
     ctx.fill(solid, 'evenodd');
+    // Перегородки — то же стекло, что обод: тот же блик на всю чашку, плоская
+    // толщина без поперечного перелива; кромку дают общие с ободом линии ниже.
     ctx.save(); ctx.beginPath(); traceDish(ctx, dish); ctx.clip();
-    // Контактная тень перегородок лежит на среде, а стекло остаётся полупрозрачным.
-    ctx.save(); ctx.translate(camera.px(1), camera.px(2));
-    ctx.fillStyle = 'rgba(18, 48, 66, 0.28)'; ctx.fill(this.parts); ctx.restore();
-    ctx.fillStyle = GLASS_FILL; ctx.fill(this.parts);
-    ctx.clip(this.parts);
-    for (const part of this.world.partitions.partitions) {
-      for (let k = 1; k < part.points.length; k++) {
-        const [ax, ay] = part.points[k - 1], [bx, by] = part.points[k];
-        const x = Math.min(ax, bx) - W / 2, y = Math.min(ay, by) - W / 2;
-        const horizontal = ay === by;
-        const face = horizontal ? ctx.createLinearGradient(0, y, 0, y + W) : ctx.createLinearGradient(x, 0, x + W, 0);
-        face.addColorStop(0, GLASS_GLOSS_FROM);
-        face.addColorStop(0.24, GLASS_MID);
-        face.addColorStop(0.7, GLASS_GLOSS_TO);
-        face.addColorStop(1, GLASS_END);
-        ctx.fillStyle = face;
-        ctx.fillRect(x, y, Math.abs(bx - ax) + W, Math.abs(by - ay) + W);
-      }
-    }
+    ctx.fill(this.parts);
     ctx.restore();
 
     const half = camera.px(0.5);
@@ -91,20 +73,6 @@ export class WallsLayer {
       ctx.moveTo(width * 0.04, -W * 0.55); ctx.lineTo(width * 0.62, -W * 0.55);
     }
     ctx.stroke(); ctx.lineCap = 'butt';
-    // Внутренняя кромка: контактная тень и тонкий блик дают толщину стекла.
-    ctx.save(); ctx.beginPath(); traceDish(ctx, dish); ctx.clip();
-    ctx.strokeStyle = 'rgba(18, 48, 66, 0.55)'; ctx.lineWidth = camera.px(3);
-    ctx.beginPath(); traceDish(ctx, dish); ctx.stroke();
-    ctx.strokeStyle = 'rgba(237, 252, 255, 0.8)'; ctx.lineWidth = camera.px(0.8); ctx.stroke();
-    ctx.restore();
-    // Как у стекла: тёмный контур по краю (виден на светлом) и светлый блик
-    // поверх него (виден на тёмном).
-    ctx.strokeStyle = GLASS_SHADOW;
-    ctx.lineWidth = camera.px(2);
-    ctx.save(); ctx.beginPath(); traceDish(ctx, dish); ctx.clip(); ctx.stroke(this.edges); ctx.restore();
-    ctx.strokeStyle = GLASS_EDGE;
-    ctx.lineWidth = camera.px(0.75);
-    ctx.save(); ctx.beginPath(); traceDish(ctx, dish); ctx.clip(); ctx.stroke(this.edges); ctx.restore();
   }
 
   /** Перегородки — прямоугольники-отрезки толщиной стенки с квадратными концами. */
@@ -121,31 +89,4 @@ export class WallsLayer {
     return parts;
   }
 
-  /**
-   * Кромка стекла: граница между свободными ячейками чашки и занятыми (стена
-   * или перегородка). Стыки перегородок со стеной и между собой поэтому не
-   * обводятся.
-   */
-  private buildEdges(): Path2D {
-    const lay = this.world.partitions;
-    const { width, height } = this.world.dish;
-    const c = lay.cell;
-    const solid = (i: number, j: number) =>
-      i < 0 || j < 0 || i >= lay.cols || j >= lay.rows || lay.blocked[j * lay.cols + i] === 1;
-    const path = new Path2D();
-    for (let j = 0; j < lay.rows; j++) {
-      for (let i = 0; i < lay.cols; i++) {
-        if (solid(i, j)) continue;
-        const x = Math.min(i * c, width);
-        const y = Math.min(j * c, height);
-        const x1 = Math.min((i + 1) * c, width);
-        const y1 = Math.min((j + 1) * c, height);
-        if (solid(i - 1, j) && cellInsideDish(lay.dish, (i - 1) * c, j * c, c)) { path.moveTo(x, y); path.lineTo(x, y1); }
-        if (solid(i + 1, j) && cellInsideDish(lay.dish, (i + 1) * c, j * c, c)) { path.moveTo(x1, y); path.lineTo(x1, y1); }
-        if (solid(i, j - 1) && cellInsideDish(lay.dish, i * c, (j - 1) * c, c)) { path.moveTo(x, y); path.lineTo(x1, y); }
-        if (solid(i, j + 1) && cellInsideDish(lay.dish, i * c, (j + 1) * c, c)) { path.moveTo(x, y1); path.lineTo(x1, y1); }
-      }
-    }
-    return path;
-  }
 }

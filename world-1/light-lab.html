@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Лаборатория света</title>
+<style>
+  :root { --bg: #e9e7e1; --panel: #f7f6f2; --line: #d8d4ca; --text: #2a2925; --muted: #76716a; --accent: #a8572b; --mono: ui-monospace, Menlo, monospace; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px system-ui, sans-serif; }
+  .app { display: flex; flex-direction: column; height: 100%; }
+  header { display: flex; align-items: center; gap: 10px; padding: 8px 10px; flex-wrap: wrap; }
+  header b { font-weight: 600; margin-right: 6px; }
+  button { height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+  button[aria-pressed=true] { background: #f2e2d5; border-color: #d9a888; color: var(--accent); }
+  label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  input[type=range] { accent-color: var(--accent); width: 160px; }
+  .value { font-family: var(--mono); color: var(--text); min-width: 74px; }
+  main { flex: 1; min-height: 0; padding: 0 10px 10px; display: flex; }
+  canvas { flex: 1; min-width: 0; border-radius: 8px; }
+  .note { padding: 0 10px 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <b>Свет</b>
+    <button data-variant="0" aria-pressed="true">1 · пятна-«комореби»</button>
+    <button data-variant="1" aria-pressed="false">2 · текучий свет</button>
+    <button data-variant="3" aria-pressed="false">3 · дышащее поле</button>
+    <button data-variant="2" aria-pressed="false">сейчас (эллипсы)</button>
+    <label>Скорость <input id="speed" type="range" min="0" max="4" step="0.01" value="3" /><span class="value" id="speedValue"></span></label>
+    <label>Освещённость <input id="share" type="range" min="0.1" max="0.6" step="0.01" value="0.3" /><span class="value" id="shareValue"></span></label>
+    <label>Перетекание раз в <input id="every" type="range" min="50000" max="1500000" step="10000" value="300000" /><span class="value" id="everyValue"></span></label>
+    <label>Дальность <input id="reach" type="range" min="0.1" max="1" step="0.01" value="0.45" /><span class="value" id="reachValue"></span></label>
+    <label>Мягкость края <input id="edge" type="range" min="0.05" max="1" step="0.01" value="0.35" /><span class="value" id="edgeValue"></span></label>
+    <span class="flow-only" style="display:contents">
+      <label>Размер <input id="scale" type="range" min="2" max="14" step="0.1" value="4" /><span class="value" id="scaleValue"></span></label>
+      <label>Искажение <input id="warp" type="range" min="0" max="3" step="0.05" value="1.1" /><span class="value" id="warpValue"></span></label>
+      <label>Темп <input id="tempo" type="range" min="50000" max="2000000" step="10000" value="400000" /><span class="value" id="tempoValue"></span></label>
+    </span>
+    <button id="pause" aria-pressed="false">Пауза</button>
+    <label>Шаг <span class="value" id="stepValue"></span></label>
+  </header>
+  <div class="note" id="note"></div>
+  <main><canvas id="c"></canvas></main>
+</div>
+<script>
+const notes = [
+  'Каждое пятно своё: мягкий неровный край из шума, форма медленно «дышит», не вращается. Пятно блуждает около своего «дома» с памятью (плавно, то медленнее, то быстрее); дом очень медленно смещается. Иногда пятно гаснет, а в другом месте разгорается новое. Заперты в чаше.',
+  'Отдельных пятен нет: свет — порог крупного поля шума, искажённого другим медленно меняющимся шумом (domain warping). Пятна рождаются, вытягиваются, сливаются и расходятся; каждый участок движется в свою сторону, общего кружения нет, свет заперт в чаше. Ползунки: размер форм, сила искажения, темп изменений, мягкость края.',
+  'Для сравнения — нынешняя модель: постоянные эллипсы, «пила» со скруглёнными разворотами у стенок.',
+  'Общее световое поле. Пятна круглые и стоят на месте; к краю — широкий плавный градиент. Дышит сила света: плато пятна разгорается и тускнеет, размер постоянный. Время от времени пятно перетекает в случайное место без движения: новое место наполняется светом, старое осушается, между ними на время слабо подсвечивается среда. Пятна сливаются мягко, свет не складывается.',
+];
+const W = 1600, H = 1200; // чашка, единицы мира (мм)
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2');
+const vs = `#version 300 es
+in vec2 p; void main() { gl_Position = vec4(p, 0., 1.); }`;
+const fs = `#version 300 es
+precision highp float;
+uniform vec2 u_size;      // холст, px
+uniform vec4 u_view;      // масштаб px/мир, сдвиг x, y
+uniform float u_t;        // шаг мира
+uniform int u_variant;
+uniform float u_share;    // освещённость
+uniform float u_every;    // перетекание в среднем раз в столько шагов
+uniform float u_reach;    // дальность перетекания (шаг по шуму мест)
+uniform float u_edge;     // ширина плавного края — доля радиуса
+uniform float u_scale;    // размер форм текучего света, в средних размерах пятна
+uniform float u_warp;     // сила искажения
+uniform float u_tempo;    // за сколько шагов искажение заметно меняется
+out vec4 o;
+const vec2 DISH = vec2(${W}., ${H}.);
+const float MEAN_R = 60.;  // средний размер пятна (параметр мира)
+
+uint mixh(uint x) { x += 0x9e3779b9u; x = (x ^ (x >> 16u)) * 0x85ebca6bu; x = (x ^ (x >> 13u)) * 0xc2b2ae35u; return x ^ (x >> 16u); }
+float h1(int a, int b) { return float(mixh(uint(a) * 0x27d4eb2du ^ mixh(uint(b)))) / 4294967296.; }
+float h2(ivec2 p, int s) { return float(mixh(uint(p.x) * 0x27d4eb2du ^ mixh(uint(p.y) * 0x165667b1u ^ uint(s)))) / 4294967296.; }
+/** Гладкий шум по времени: значения в узлах через каждую единицу, сглаженные; −1…1. */
+float tnoise(float t, int s) { float i = floor(t), f = fract(t); f = f * f * (3. - 2. * f); return mix(h1(int(i), s), h1(int(i) + 1, s), f) * 2. - 1.; }
+/** Шум на плоскости (значения в узлах решётки, сглаженные), 0…1. */
+float vnoise(vec2 p, int s) {
+  ivec2 i = ivec2(floor(p)); vec2 f = fract(p); f = f * f * f * (f * (f * 6. - 15.) + 10.);
+  return mix(mix(h2(i, s), h2(i + ivec2(1, 0), s), f.x), mix(h2(i + ivec2(0, 1), s), h2(i + ivec2(1, 1), s), f.x), f.y);
+}
+float fbm(vec2 p, int s) { return .55 * vnoise(p, s) + .3 * vnoise(p * 2.03 + 17.1, s + 1) + .15 * vnoise(p * 4.1 - 9.3, s + 2); }
+
+/* ── Вариант 1: пятна-«комореби» ─────────────────────────────── */
+const int SPOTS = 48;
+float komorebi(vec2 w, float t) {
+  float best = 0.;
+  // Сколько пятен горит — по освещённости (площадь пятна ≈ π r²).
+  float lit = u_share * DISH.x * DISH.y / (3.14159 * MEAN_R * MEAN_R * 1.6);
+  for (int n = 0; n < SPOTS; n++) {
+    if (float(n) >= lit * 1.25) break;
+    // Жизнь пятна: долгий цикл со сдвигом фазы; в каждом цикле — новый дом.
+    float life = 900000. * (.7 + .6 * h1(n, 1));
+    float u = t / life + h1(n, 2);
+    int cycle = int(floor(u));
+    float phase = fract(u);
+    float alive = smoothstep(0., .12, phase) * (1. - smoothstep(.85, 1., phase));
+    if (alive <= 0.) continue;
+    float r0 = MEAN_R * (0.6 + 1.1 * pow(h1(n * 7 + cycle, 3), 1.6));
+    float margin = r0 * 1.2;
+    // Дом: где пятно живёт в этом цикле, медленно смещается.
+    vec2 home = vec2(margin) + (DISH - 2. * margin) * vec2(h1(n * 13 + cycle, 4), h1(n * 17 + cycle, 5));
+    vec2 drift = vec2(tnoise(t / 400000., n * 31 + 6), tnoise(t / 400000., n * 37 + 7)) * 180.;
+    // Блуждание с памятью около дома: гладкий шум по времени, два масштаба.
+    vec2 wander = vec2(tnoise(t / 60000., n * 41 + 8) + .5 * tnoise(t / 21000., n * 43 + 9),
+                       tnoise(t / 60000., n * 47 + 10) + .5 * tnoise(t / 21000., n * 53 + 11)) * r0 * 1.1;
+    vec2 c = clamp(home + drift + wander, vec2(margin), DISH - margin);
+    vec2 d = w - c;
+    float dist = length(d);
+    if (dist > r0 * 2.2) continue;
+    // Край — шум в координатах вокруг пятна (движется с ним, не вращается), медленно дышит.
+    float bump = fbm(d / (r0 * .85) + vec2(float(n) * 3.7, float(cycle) * 5.1) + vec2(t / 170000., -t / 230000.), n + 100);
+    float e = dist / r0 + .9 * (bump - .5);
+    float v = 1. - smoothstep(.72, 1.02, e);
+    best = max(best, v * alive);
+  }
+  return best;
+}
+
+/* ── Вариант 2: текучий свет ─────────────────────────────────── */
+float flowLight(vec2 w, float t) {
+  // Крупное поле; его координаты искажает другое медленно меняющееся поле —
+  // каждый участок смещается в свою сторону, формы перетекают.
+  vec2 p = w / (MEAN_R * u_scale);
+  float s = t / u_tempo;
+  vec2 q = vec2(fbm(p * .7 + vec2(s * .6, -s * .35), 20), fbm(p * .7 + vec2(5.2 - s * .45, 1.3 + s * .55), 30)) - .5;
+  float f = fbm(p + u_warp * q + vec2(-s * .2, s * .15), 60);
+  // Порог по освещённости — квантиль распределения поля (посчитан заранее), край — по ползунку.
+  float x = clamp((u_share - .1) / .1, 0., 5.);
+  float th = x < 1. ? mix(.6919, .6298, x) : x < 2. ? mix(.6298, .5822, x - 1.) : x < 3. ? mix(.5822, .5394, x - 2.) : x < 4. ? mix(.5394, .4988, x - 3.) : mix(.4988, .4581, x - 4.);
+  return smoothstep(th - u_edge * .08, th + u_edge * .08, f);
+}
+
+/* ── Вариант 3: дышащее поле ─────────────────────────────────── */
+/** Мягкое пятно: ровное плато, широкий плавный спад до фона. */
+float soft(float d, float r) { return 1. - smoothstep(r * (1. - u_edge * .5), r * (1. + u_edge * .5), d); }
+/** Место пятна n после k перетеканий. */
+vec2 site(int n, int k, float r) {
+  vec2 reach = DISH * .5 - r * .8;
+  float q = float(k) * u_reach;
+  return DISH * .5 + reach * vec2(tnoise(q + h1(n, 40) * 50., n * 29 + 11), tnoise(q + h1(n, 41) * 50., n * 31 + 12)) * 1.25;
+}
+float breathing(vec2 w, float t) {
+  float dark = 1.;
+  float lit = u_share * DISH.x * DISH.y / (3.14159 * MEAN_R * MEAN_R * 2.2);
+  for (int n = 0; n < SPOTS; n++) {
+    if (float(n) >= lit) break;
+    float r = MEAN_R * (0.75 + 0.9 * pow(h1(n, 3), 1.4));
+    // Расписание: пятно живёт на месте (дышит), затем перетекает к следующему месту.
+    float period = u_every * (.6 + .8 * h1(n, 1));
+    float u = t / period + h1(n, 2);
+    int k = int(floor(u));
+    float f = fract(u);
+    float flowFrom = .7;                      // последние 30% цикла — перетекание
+    // Места пятна — точки плавного шума по номеру перетекания: каждое следующее
+    // случайно, но обычно неподалёку от прежнего.
+    vec2 a = site(n, k, r), b = site(n, k + 1, r);
+    // Дыхание — сила света: плато пятна плавно и случайно разгорается и тускнеет; размер постоянный.
+    float pulse = .8 + .2 * (.6 * tnoise(t / 26000., n * 61 + 1) + .4 * tnoise(t / 9000., n * 67 + 2));
+    float g;
+    if (f < flowFrom) {
+      g = soft(length(w - a), r);
+    } else {
+      // Перетекание без движения: новое место наполняется, старое осушается
+      // (с перекрытием — свет как будто переливается); на время перехода между ними
+      // неподвижно и слабо подсвечивается широкая область — свет идёт сквозь среду.
+      float s = (f - flowFrom) / (1. - flowFrom);
+      float fill = smoothstep(0., .7, s), drain = 1. - smoothstep(.3, 1., s);
+      float span = length(b - a);
+      float glow = soft(length(w - (a + b) * .5), span * .5 + r) * .3 * sin(3.14159 * s);
+      g = max(max(soft(length(w - a), r) * drain, soft(length(w - b), r) * fill), glow);
+    }
+    dark *= 1. - g * pulse;
+  }
+  return 1. - dark;
+}
+
+/* ── Для сравнения: нынешние эллипсы ─────────────────────────── */
+float saw(float tau) { return asin(.96 * sin(tau)) / asin(.96); }
+float ellipses(vec2 w, float t) {
+  float best = 0.;
+  float lit = u_share * DISH.x * DISH.y / (3.14159 * MEAN_R * MEAN_R * 1.6);
+  for (int n = 0; n < SPOTS; n++) {
+    if (float(n) >= lit) break;
+    float r = MEAN_R * (0.6 + 1.1 * pow(h1(n, 3), 1.6)), k = sqrt(1. + 1.2 * h1(n, 4)), a = h1(n, 5) * 3.14;
+    vec2 hh = DISH * .5 - r;
+    float sp = .02 * (.5 + .7 * h1(n, 6)), hd = h1(n, 7) * 6.283;
+    vec2 sv = sp * max(vec2(.25), abs(vec2(cos(hd), sin(hd))));
+    vec2 c = DISH * .5 + hh * vec2(saw(sv.x * asin(.96) / (.96 * hh.x) * t + h1(n, 8) * 6.28), saw(sv.y * asin(.96) / (.96 * hh.y) * t + h1(n, 9) * 6.28));
+    vec2 d = w - c; vec2 uv = vec2(dot(d, vec2(cos(a), sin(a))) / (r * k), dot(d, vec2(-sin(a), cos(a))) / (r / k));
+    best = max(best, 1. - smoothstep(.95, 1.1, length(uv)));
+  }
+  return best;
+}
+
+void main() {
+  vec2 px = vec2(gl_FragCoord.x, u_size.y - gl_FragCoord.y);
+  vec2 w = (px - u_view.yz) / u_view.x;
+  vec3 table = vec3(.87, .89, .88);
+  if (w.x < 0. || w.y < 0. || w.x > DISH.x || w.y > DISH.y) { o = vec4(table, 1.); return; }
+  float L = u_variant == 0 ? komorebi(w, u_t) : u_variant == 1 ? flowLight(w, u_t) : u_variant == 3 ? breathing(w, u_t) : ellipses(w, u_t);
+  // Вода с лёгкой фактурой; свет — честно: тень 0,75 яркости, пятно — полная и тёплая.
+  vec3 water = mix(vec3(.11, .38, .55), vec3(.16, .46, .6), vnoise(w / 90., 5) * .6 + vnoise(w / 23., 6) * .4);
+  vec3 shade = water * vec3(.69, .73, .84);
+  vec3 lit = water * vec3(1.08, 1.04, .96) + vec3(.06, .05, .03);
+  o = vec4(mix(shade, lit, L), 1.);
+}`;
+function shader(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, vs)); gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(prog, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+const U = (n) => gl.getUniformLocation(prog, n);
+
+let variant = 0, step = 0, paused = false, last = performance.now();
+const speedInput = document.getElementById('speed'), shareInput = document.getElementById('share');
+const stepsPerSecond = () => 10 * 10 ** Number(speedInput.value); // ×1 — 10 шагов в секунду
+for (const b of document.querySelectorAll('[data-variant]')) b.onclick = () => {
+  variant = Number(b.dataset.variant);
+  for (const o of document.querySelectorAll('[data-variant]')) o.setAttribute('aria-pressed', String(o === b));
+  document.getElementById('note').textContent = notes[variant];
+};
+document.getElementById('pause').onclick = (e) => { paused = !paused; e.target.setAttribute('aria-pressed', String(paused)); };
+document.getElementById('note').textContent = notes[0];
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  if (!paused) step += dt * stepsPerSecond();
+  const dpr = devicePixelRatio || 1;
+  const cw = Math.round(canvas.clientWidth * dpr), ch = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+  gl.viewport(0, 0, cw, ch);
+  const scale = Math.min(cw / (W + 40), ch / (H + 40));
+  gl.uniform2f(U('u_size'), cw, ch);
+  gl.uniform4f(U('u_view'), scale, (cw - W * scale) / 2, (ch - H * scale) / 2, 0);
+  gl.uniform1f(U('u_t'), step);
+  gl.uniform1i(U('u_variant'), variant);
+  gl.uniform1f(U('u_share'), Number(shareInput.value));
+  gl.uniform1f(U('u_every'), Number(document.getElementById('every').value));
+  gl.uniform1f(U('u_reach'), Number(document.getElementById('reach').value));
+  gl.uniform1f(U('u_edge'), Number(document.getElementById('edge').value));
+  for (const [id, name, fmt] of [['scale', 'u_scale', (v) => '×' + v.toFixed(1)], ['warp', 'u_warp', (v) => v.toFixed(2)], ['tempo', 'u_tempo', (v) => (v / 1000).toLocaleString('ru') + ' тыс.']]) {
+    const v = Number(document.getElementById(id).value);
+    gl.uniform1f(U(name), v);
+    document.getElementById(id + 'Value').textContent = fmt(v);
+  }
+  document.getElementById('edgeValue').textContent = Math.round(Number(document.getElementById('edge').value) * 100) + '% r';
+  document.getElementById('everyValue').textContent = (Number(document.getElementById('every').value) / 1000).toLocaleString('ru') + ' тыс.';
+  document.getElementById('reachValue').textContent = Number(document.getElementById('reach').value).toFixed(2);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  document.getElementById('speedValue').textContent = '×' + Math.round(stepsPerSecond() / 10).toLocaleString('ru');
+  document.getElementById('shareValue').textContent = Math.round(Number(shareInput.value) * 100) + '%';
+  document.getElementById('stepValue').textContent = Math.round(step).toLocaleString('ru');
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

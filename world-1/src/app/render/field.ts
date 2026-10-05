@@ -4,7 +4,7 @@
  * смешивается с тем, что под ним, поэтому свечения рисуются здесь, а не на
  * верхнем Canvas 2D). Верхний холст рисует объекты.
  */
-import type { Dish } from '../../core/index.ts';
+import type { Dish, World } from '../../core/index.ts';
 import type { Frame } from './frame.ts';
 import { createProgram, Textures, type Program, type TextureSource } from './gl.ts';
 import { GLARE_STRENGTH, LIGHT_SHADE_GLSL, MINERAL_COLOR, MINERAL_DEEP, SHADE_COLOR, SUN_COLOR, smoothstep, type Rgb } from './palette.ts';
@@ -15,6 +15,9 @@ import { TERRAIN_GLSL, type Grid, type TerrainData } from './terrain.ts';
 import { TECTONICS_GLSL, type Tectonics } from './ground.ts';
 import { GLASS_TINT, TABLE_GLSL } from './table.ts';
 import { MAX_VENTS, VENT_ASH, VENT_HOLE, VENT_RIM, VENT_SPARK } from './sources.ts';
+
+/** Сколько отрезков перегородок знает шейдер полей. */
+const MAX_PARTS = 32;
 
 /** Свечения и блёстки: копятся за кадр и рисуются после полей, в порядке вызовов. */
 export interface GlowSink {
@@ -222,6 +225,20 @@ vec3 ventLight(vec3 c, vec2 w) {
   return c;
 }
 
+uniform vec4 u_parts[${MAX_PARTS}];  // перегородки: x0, y0, x1, y1 (мир)
+uniform int u_partCount;
+/** Доля пикселя под стеклом перегородок, с краем в пиксель. */
+float partitionAt(vec2 w) {
+  float cover = 0.;
+  for (int i = 0; i < ${MAX_PARTS}; i++) {
+    if (i >= u_partCount) break;
+    vec4 r = u_parts[i];
+    vec2 d = max(r.xy - w, w - r.zw);
+    cover = max(cover, clamp(.5 - max(d.x, d.y) * u_cam.x, 0., 1.));
+  }
+  return cover;
+}
+
 void main() {
   vec2 px = screenPx();
   vec2 w = worldAt(px);
@@ -288,6 +305,9 @@ void main() {
   c *= mineral.r;
   vec3 haze = mix(u_mineralThin, u_mineralDeep, mineral.b);
   c = c * (1. - mineral.a) + haze * mineral.a;
+
+  // Под стеклом перегородок, как под ободом, — стол (стекло стоит на нём, среды там нет).
+  c = mix(c, tableAt(w) * u_glassTint, partitionAt(w));
 
   o = vec4(c * inside, inside);
 }`;
@@ -362,6 +382,7 @@ export class FieldRenderer implements GlowSink {
   readonly canvas = document.createElement('canvas');
   /** Стол — ровная тёмная подложка (полный экран). */
   darkTable = false;
+  private partsCache: { world: World; data: Float32Array; count: number } | null = null;
   private gl: WebGL2RenderingContext | null = null;
   private textures!: Textures;
   private quad!: WebGLBuffer;
@@ -655,6 +676,22 @@ export class FieldRenderer implements GlowSink {
   }
 
   /** Поля поверх местности: свет, вода, минерал — в основной холст. */
+  /** Прямоугольники перегородок для шейдера (как WallsLayer.buildParts) — один раз на мир. */
+  private partRects(world: World): { data: Float32Array; count: number } {
+    if (this.partsCache?.world === world) return this.partsCache;
+    const data = new Float32Array(MAX_PARTS * 4);
+    const W = world.partitions.thickness;
+    let count = 0;
+    for (const part of world.partitions.partitions) {
+      for (let k = 1; k < part.points.length && count < MAX_PARTS; k++) {
+        const [ax, ay] = part.points[k - 1], [bx, by] = part.points[k];
+        data.set([Math.min(ax, bx) - W / 2, Math.min(ay, by) - W / 2, Math.max(ax, bx) + W / 2, Math.max(ay, by) + W / 2], count++ * 4);
+      }
+    }
+    this.partsCache = { world, data, count };
+    return this.partsCache;
+  }
+
   fields(input: FieldInputs): void {
     const gl = this.gl!;
     const frame = this.frame!;
@@ -710,6 +747,9 @@ export class FieldRenderer implements GlowSink {
     gl.uniform4fv(p.uniform('u_moveA'), tec.moves.filter((_, i) => i % 8 < 4));
     gl.uniform4fv(p.uniform('u_moveB'), tec.moves.filter((_, i) => i % 8 >= 4));
     gl.uniform1i(p.uniform('u_moveCount'), tec.moveCount);
+    const parts = this.partRects(world);
+    gl.uniform4fv(p.uniform('u_parts'), parts.data);
+    gl.uniform1i(p.uniform('u_partCount'), parts.count);
     gl.uniform4fv(p.uniform('u_ring'), tec.rings);
     gl.uniform1i(p.uniform('u_ringCount'), tec.ringCount);
     const vents = input.vents;
