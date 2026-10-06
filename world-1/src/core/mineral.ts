@@ -296,7 +296,7 @@ export function updateMineral(m: MineralState, params: WorldParams, drift: Drift
 }
 
 /** Горячая арифметика отдельно от планировщика: обычная функция оптимизируется JIT. */
-function transportRange(m: MineralState, src: Float64Array, dst: Float64Array, holes: Uint8Array, mobility: Float64Array, tvx: Float32Array, tvy: Float32Array, P: number, first: number, last: number): void {
+export function transportRange(m: MineralState, src: Float64Array, dst: Float64Array, holes: Uint8Array, mobility: Float64Array, tvx: Float32Array, tvy: Float32Array, P: number, first: number, last: number): void {
   const { cols, rows, cell, blocked } = m;
   const inv = 1 / cell, width = cols * cell, height = rows * cell;
   for (let k = first; k < last; k++) {
