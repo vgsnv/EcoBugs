@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Замер: клетки на JS и WebGPU</title>
+<style>
+  body { font: 14px/1.4 ui-monospace, Menlo, monospace; background: #111; color: #ddd; margin: 16px; }
+  pre { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h3>Одна и та же упрощённая модель клеток: JS (одно ядро) против WebGPU</h3>
+<p>Ход клетки: соседи по сетке 3×3 и расталкивание, свет из поля с наклоном, регуляция 4 генов × 4 сигнала, энергия и масса, движение со стенками. Без рождений и смертей. Чаша 1600 × 1200 мм, радиус 1 мм.</p>
+<pre id="out">Идёт замер…</pre>
+<script type="module">
+const out = document.getElementById('out');
+const log = (s) => { out.textContent += '\n' + s; };
+out.textContent = '';
+
+const W = 1600, H = 1200, R = 1, CELL = 2 * R, GW = W / CELL, GH = H / CELL, CAP = 16;
+const SORTED = new URLSearchParams(location.search).has('sorted');
+const LW = 160, LH = 120, DT = 1, GENES = 20; // 5 vec4 на клетку: база и 4 строки весов
+
+function lightField() {
+  const l = new Float32Array(LW * LH);
+  const spots = [[40, 30, 18], [110, 80, 25], [130, 25, 12], [60, 95, 15]];
+  for (let y = 0; y < LH; y++) for (let x = 0; x < LW; x++) {
+    let v = 0.05;
+    for (const [sx, sy, r] of spots) v += Math.exp(-((x - sx) ** 2 + (y - sy) ** 2) / (r * r));
+    l[y * LW + x] = Math.min(v, 1);
+  }
+  return l;
+}
+const LIGHT = lightField();
+
+function seed(n) {
+  let s = 12345;
+  const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const pos = new Float32Array(n * 2), vel = new Float32Array(n * 2), em = new Float32Array(n * 2), genes = new Float32Array(n * GENES);
+  for (let i = 0; i < n; i++) {
+    pos[2 * i] = rnd() * W; pos[2 * i + 1] = rnd() * H;
+    em[2 * i] = 0.5; em[2 * i + 1] = 1;
+    for (let k = 0; k < GENES; k++) genes[i * GENES + k] = (rnd() - 0.5) * (k < 4 ? 1 : 0.3);
+  }
+  if (SORTED) {
+    // клетки в памяти по порядку корзин: соседи на карте — соседи в памяти
+    const key = (i) => Math.min(GH - 1, (pos[2 * i + 1] / CELL) | 0) * GW + Math.min(GW - 1, (pos[2 * i] / CELL) | 0);
+    const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => key(a) - key(b));
+    const p2 = new Float32Array(n * 2);
+    order.forEach((j, i) => { p2[2 * i] = pos[2 * j]; p2[2 * i + 1] = pos[2 * j + 1]; });
+    return { pos: p2, vel, em, genes };
+  }
+  return { pos, vel, em, genes };
+}
+
+// ---------- JS: плотные массивы, сетка подсчётом ----------
+function jsBench(n, seconds) {
+  const { pos, vel, em, genes } = seed(n);
+  const next = new Float32Array(n * 2);
+  const start = new Int32Array(GW * GH + 1), items = new Int32Array(n), cellOf = new Int32Array(n);
+  let p = pos, q = next;
+  const lightAt = (x, y) => {
+    const fx = Math.min(Math.max(x / W * (LW - 1), 0), LW - 1.001), fy = Math.min(Math.max(y / H * (LH - 1), 0), LH - 1.001);
+    const ix = fx | 0, iy = fy | 0, tx = fx - ix, ty = fy - iy, o = iy * LW + ix;
+    return (LIGHT[o] * (1 - tx) + LIGHT[o + 1] * tx) * (1 - ty) + (LIGHT[o + LW] * (1 - tx) + LIGHT[o + LW + 1] * tx) * ty;
+  };
+  function tick(t) {
+    start.fill(0);
+    for (let i = 0; i < n; i++) {
+      const cx = Math.min(GW - 1, Math.max(0, (p[2 * i] / CELL) | 0)), cy = Math.min(GH - 1, Math.max(0, (p[2 * i + 1] / CELL) | 0));
+      const c = cy * GW + cx; cellOf[i] = c; start[c + 1]++;
+    }
+    for (let c = 0; c < GW * GH; c++) start[c + 1] += start[c];
+    const fill = start.slice(0, GW * GH);
+    for (let i = 0; i < n; i++) items[fill[cellOf[i]]++] = i;
+    const D2 = 4 * R * R;
+    for (let i = 0; i < n; i++) {
+      const x = p[2 * i], y = p[2 * i + 1];
+      const c = cellOf[i], cx = c % GW, cy = (c / GW) | 0;
+      let px = 0, py = 0, nb = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = cy + dy; if (yy < 0 || yy >= GH) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = cx + dx; if (xx < 0 || xx >= GW) continue;
+          const b = yy * GW + xx;
+          for (let k = start[b]; k < start[b + 1]; k++) {
+            const j = items[k]; if (j === i) continue;
+            const ddx = x - p[2 * j], ddy = y - p[2 * j + 1], d2 = ddx * ddx + ddy * ddy;
+            if (d2 < D2 && d2 > 1e-12) { const d = Math.sqrt(d2), f = (2 * R - d) * 0.5 / d; px += ddx * f; py += ddy * f; nb++; }
+          }
+        }
+      }
+      const L = lightAt(x, y), gx = lightAt(x + 10, y) - lightAt(x - 10, y), gy = lightAt(x, y + 10) - lightAt(x, y - 10);
+      const s0 = L, s1 = em[2 * i], s2 = nb / 8, s3 = 1, o = i * GENES;
+      const e0 = genes[o] + genes[o + 4] * s0 + genes[o + 5] * s1 + genes[o + 6] * s2 + genes[o + 7] * s3;
+      const e1 = genes[o + 1] + genes[o + 8] * s0 + genes[o + 9] * s1 + genes[o + 10] * s2 + genes[o + 11] * s3;
+      const e2 = genes[o + 2] + genes[o + 12] * s0 + genes[o + 13] * s1 + genes[o + 14] * s2 + genes[o + 15] * s3;
+      let h = (Math.imul(i, 747796405) + Math.imul(t, 2891336453)) >>> 0; h = Math.imul(h ^ (h >>> 16), 2246822519) >>> 0; h ^= h >>> 13;
+      const nx = (h & 0xffff) / 65535 - 0.5, ny = (h >>> 16) / 65535 - 0.5;
+      let vx = vel[2 * i] * 0.9 + px * 0.5 + gx * e0 * 2 + nx * 0.1 * e1;
+      let vy = vel[2 * i + 1] * 0.9 + py * 0.5 + gy * e0 * 2 + ny * 0.1 * e1;
+      let qx = x + vx * DT, qy = y + vy * DT;
+      if (qx < R) { qx = R; vx = -vx; } else if (qx > W - R) { qx = W - R; vx = -vx; }
+      if (qy < R) { qy = R; vy = -vy; } else if (qy > H - R) { qy = H - R; vy = -vy; }
+      q[2 * i] = qx; q[2 * i + 1] = qy; vel[2 * i] = vx; vel[2 * i + 1] = vy;
+      const m = em[2 * i + 1];
+      const en = Math.min(Math.max(em[2 * i] + L * Math.min(Math.max(e2, 0), 1) * 0.01 - 0.002 * m, 0), 2);
+      em[2 * i] = en; em[2 * i + 1] = Math.min(Math.max(m + 0.001 * (en - 0.5), 0.2), 3);
+    }
+    const tmp = p; p = q; q = tmp;
+  }
+  for (let t = 0; t < 3; t++) tick(t);
+  let t = 3; const t0 = performance.now();
+  while (performance.now() - t0 < seconds * 1000 || t < 8) tick(t++);
+  const ms = (performance.now() - t0) / (t - 3);
+  return { ms, ticks: t - 3 };
+}
+
+// ---------- WebGPU: те же шаги, сетка с ограниченной ёмкостью корзины ----------
+const WGSL = /* wgsl */`
+struct P { n: u32, tick: u32, gw: u32, gh: u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> posIn: array<vec2f>;
+@group(0) @binding(2) var<storage, read_write> posOut: array<vec2f>;
+@group(0) @binding(3) var<storage, read_write> vel: array<vec2f>;
+@group(0) @binding(4) var<storage, read_write> em: array<vec2f>;
+@group(0) @binding(5) var<storage, read> genes: array<vec4f>;
+@group(0) @binding(6) var<storage, read_write> counts: array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read_write> items: array<u32>;
+@group(0) @binding(8) var<storage, read> light: array<f32>;
+const W = ${W}.0; const H = ${H}.0; const R = ${R}.0; const CELL = ${CELL}.0; const CAP = ${CAP}u;
+const LW = ${LW}u; const LH = ${LH}u;
+
+fn bucket(x: vec2f) -> vec2u {
+  return vec2u(clamp(vec2i(x / CELL), vec2i(0), vec2i(i32(p.gw) - 1, i32(p.gh) - 1)));
+}
+fn lightAt(x: f32, y: f32) -> f32 {
+  let fx = clamp(x / W * f32(LW - 1u), 0.0, f32(LW) - 1.001);
+  let fy = clamp(y / H * f32(LH - 1u), 0.0, f32(LH) - 1.001);
+  let ix = u32(fx); let iy = u32(fy); let tx = fx - f32(ix); let ty = fy - f32(iy); let o = iy * LW + ix;
+  return mix(mix(light[o], light[o + 1u], tx), mix(light[o + LW], light[o + LW + 1u], tx), ty);
+}
+
+@compute @workgroup_size(256) fn clear(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x < p.gw * p.gh) { atomicStore(&counts[g.x], 0u); }
+}
+@compute @workgroup_size(256) fn bin(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= p.n) { return; }
+  let b = bucket(posIn[i]); let c = b.y * p.gw + b.x;
+  let k = atomicAdd(&counts[c], 1u);
+  if (k < CAP) { items[c * CAP + k] = i; }
+}
+@compute @workgroup_size(256) fn update(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= p.n) { return; }
+  let x = posIn[i]; let b = vec2i(bucket(x));
+  var push = vec2f(0.0); var nb = 0u;
+  for (var dy = -1; dy <= 1; dy++) {
+    let yy = b.y + dy; if (yy < 0 || yy >= i32(p.gh)) { continue; }
+    for (var dx = -1; dx <= 1; dx++) {
+      let xx = b.x + dx; if (xx < 0 || xx >= i32(p.gw)) { continue; }
+      let c = u32(yy) * p.gw + u32(xx);
+      let cnt = min(atomicLoad(&counts[c]), CAP);
+      for (var k = 0u; k < cnt; k++) {
+        let j = items[c * CAP + k]; if (j == i) { continue; }
+        let d = x - posIn[j]; let d2 = dot(d, d);
+        if (d2 < 4.0 * R * R && d2 > 1e-12) { let dl = sqrt(d2); push += d * ((2.0 * R - dl) * 0.5 / dl); nb++; }
+      }
+    }
+  }
+  let L = lightAt(x.x, x.y);
+  let gr = vec2f(lightAt(x.x + 10.0, x.y) - lightAt(x.x - 10.0, x.y), lightAt(x.x, x.y + 10.0) - lightAt(x.x, x.y - 10.0));
+  let s = vec4f(L, em[i].x, f32(nb) / 8.0, 1.0);
+  let o = i * 5u;
+  let e = genes[o] + vec4f(dot(genes[o + 1u], s), dot(genes[o + 2u], s), dot(genes[o + 3u], s), dot(genes[o + 4u], s));
+  var h = i * 747796405u + p.tick * 2891336453u; h = (h ^ (h >> 16u)) * 2246822519u; h ^= h >> 13u;
+  let nz = vec2f(f32(h & 0xffffu) / 65535.0 - 0.5, f32(h >> 16u) / 65535.0 - 0.5);
+  var v = vel[i] * 0.9 + push * 0.5 + gr * e.x * 2.0 + nz * 0.1 * e.y;
+  var q = x + v;
+  if (q.x < R) { q.x = R; v.x = -v.x; } else if (q.x > W - R) { q.x = W - R; v.x = -v.x; }
+  if (q.y < R) { q.y = R; v.y = -v.y; } else if (q.y > H - R) { q.y = H - R; v.y = -v.y; }
+  posOut[i] = q; vel[i] = v;
+  let m = em[i].y;
+  let en = clamp(em[i].x + L * clamp(e.z, 0.0, 1.0) * 0.01 - 0.002 * m, 0.0, 2.0);
+  em[i] = vec2f(en, clamp(m + 0.001 * (en - 0.5), 0.2, 3.0));
+}`;
+
+async function gpuBench(device, n, seconds) {
+  const { pos, vel, em, genes } = seed(n);
+  // гены в JS лежат строками по 4: база (0–3) и веса 4×4 (4–19) — тот же порядок, что 5 vec4 в шейдере
+  const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+  const buf = (data, usage = S) => { const b = device.createBuffer({ size: Math.max(16, data.byteLength), usage, mappedAtCreation: true }); new data.constructor(b.getMappedRange()).set(data); b.unmap(); return b; };
+  const posA = buf(pos), posB = buf(new Float32Array(n * 2)), velB = buf(vel), emB = buf(em), genB = buf(genes), lightB = buf(LIGHT);
+  const counts = device.createBuffer({ size: GW * GH * 4, usage: S });
+  const items = device.createBuffer({ size: GW * GH * CAP * 4, usage: S });
+  const module = device.createShaderModule({ code: WGSL });
+  const ro = { type: 'read-only-storage' }, rw = { type: 'storage' };
+  const layout = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ...[ro, rw, rw, rw, ro, rw, rw, ro].map((buffer, k) => ({ binding: k + 1, visibility: GPUShaderStage.COMPUTE, buffer })),
+  ] });
+  const pl = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+  const pipe = (entryPoint) => device.createComputePipeline({ layout: pl, compute: { module, entryPoint } });
+  const [pClear, pBin, pUpdate] = ['clear', 'bin', 'update'].map(pipe);
+  let tick = 0;
+  // Ход — отдельный проход; тик пишется в свой uniform, чтобы пакет ходов шёл одним отправлением.
+  const uniPool = Array.from({ length: 64 }, () => device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
+  const groupsFor = uniPool.map((u) => [posA, posB].map((_, k) => device.createBindGroup({ layout, entries: [u, k ? posB : posA, k ? posA : posB, velB, emB, genB, counts, items, lightB].map((buffer, binding) => ({ binding, resource: { buffer } })) })));
+  async function run(ticks) {
+    const enc = device.createCommandEncoder();
+    for (let k = 0; k < ticks; k++, tick++) {
+      device.queue.writeBuffer(uniPool[k], 0, new Uint32Array([n, tick, GW, GH]));
+      const pass = enc.beginComputePass();
+      pass.setBindGroup(0, groupsFor[k][tick & 1]);
+      pass.setPipeline(pClear); pass.dispatchWorkgroups(Math.ceil(GW * GH / 256));
+      pass.setPipeline(pBin); pass.dispatchWorkgroups(Math.ceil(n / 256));
+      pass.setPipeline(pUpdate); pass.dispatchWorkgroups(Math.ceil(n / 256));
+      pass.end();
+    }
+    device.queue.submit([enc.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  await run(20);
+  const t0 = performance.now(); let done = 0;
+  while (performance.now() - t0 < seconds * 1000 || done < 64) { await run(64); done += 64; }
+  const ms = (performance.now() - t0) / done;
+  // переполнение корзин: сколько клеток не попало в списки соседей
+  const read = device.createBuffer({ size: GW * GH * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const enc = device.createCommandEncoder(); enc.copyBufferToBuffer(counts, 0, read, 0, GW * GH * 4); device.queue.submit([enc.finish()]);
+  await read.mapAsync(GPUMapMode.READ);
+  const c = new Uint32Array(read.getMappedRange()); let lost = 0, maxc = 0;
+  for (let k = 0; k < c.length; k++) { if (c[k] > CAP) lost += c[k] - CAP; if (c[k] > maxc) maxc = c[k]; }
+  read.unmap();
+  for (const b of [posA, posB, velB, emB, genB, lightB, counts, items, read, ...uniPool]) b.destroy();
+  return { ms, ticks: done, lost, maxc };
+}
+
+const fmt = (x, d = 2) => x.toFixed(d).padStart(8);
+const results = { js: [], gpu: [] };
+window.benchResults = results;
+log(SORTED ? 'Клетки упорядочены в памяти по месту на карте' : 'Клетки в памяти в случайном порядке');
+log('JS, одно ядро (главный поток страницы)');
+log('   клеток   мс/ход   мкс/клетку·ход   клеток при 200 ходах/с');
+for (const n of [20_000, 50_000, 100_000]) {
+  const r = jsBench(n, 2);
+  const us = r.ms * 1000 / n;
+  results.js.push({ n, ...r, us });
+  log(`${String(n).padStart(9)} ${fmt(r.ms)} ${fmt(us, 3)}         ${Math.round(5000 / us).toLocaleString('ru')}`);
+  await new Promise((r) => setTimeout(r, 50));
+}
+if (!navigator.gpu) { log('\nWebGPU недоступен в этом браузере'); }
+else {
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: 8, maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize } });
+  log(`\nWebGPU: ${adapter.info?.vendor ?? ''} ${adapter.info?.architecture ?? ''}`);
+  log('   клеток   мс/ход   мкс/клетку·ход   клеток при 200 ходах/с   ходов/с   потеряно соседей (макс. в корзине)');
+  for (const n of [20_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 2_000_000]) {
+    const r = await gpuBench(device, n, 2);
+    const us = r.ms * 1000 / n;
+    results.gpu.push({ n, ...r, us });
+    log(`${String(n).padStart(9)} ${fmt(r.ms)} ${fmt(us, 4)}         ${Math.round(5000 / us).toLocaleString('ru').padStart(10)}     ${fmt(1000 / r.ms, 0)}   ${r.lost} (${r.maxc})`);
+  }
+}
+log('\nГотово.');
+results.done = true;
+</script>
+</body>
+</html>
