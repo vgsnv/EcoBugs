@@ -50,6 +50,8 @@ export const LAWS = {
   /** Выключатели для опытов: нападение (1/0), скорость дрейфа пятен (×). */
   predation: 1,
   spotDrift: 1,
+  /** 1 — фотосинтез идёт сам каждый ход и не занимает ход (правило «фотосинтез» тогда невыполнимо). */
+  passivePhoto: 0,
 };
 
 export interface Sim {
@@ -230,7 +232,7 @@ function defence(sim: Sim, q: number): number {
 function act(sim: Sim, p: number, a: number, param: number): boolean {
   const L = LAWS;
   switch (a) {
-    case A_PHOTO: sim.energy[p] += sim.light[p] * L.photo; return true;
+    case A_PHOTO: if (L.passivePhoto) return false; sim.energy[p] += sim.light[p] * L.photo; return true;
     case A_EAT: {
       if (sim.remE[p] <= 0.01) return false;
       const take = Math.min(L.eatRate, sim.remE[p]), f = take / sim.remE[p];
@@ -337,6 +339,7 @@ export function step(sim: Sim): void {
     const g = sim.geno[p]!;
     sim.age[p]++;
     sim.energy[p] -= sim.body[p] * L.upkeep + g.rules.length * L.ruleCost;
+    if (L.passivePhoto) sim.energy[p] += sim.light[p] * L.photo;
     let done = -1;
     for (let r = 0; r < g.rules.length; r++) {
       const rule = g.rules[r];
