@@ -10,6 +10,7 @@
  */
 import { groundTotal, mineralInDeposits, mineralInEruptions, mineralInMedium, type World } from '../core/index.ts';
 import { GpuMineral } from './mineral.ts';
+import { GpuDrift } from './drift.ts';
 
 /** Запас 2^4 на рост сумм (подвижки меняют грунт) и на округление. */
 const HEADROOM = 16;
@@ -79,13 +80,22 @@ export class GpuWorld {
   private lost = false;
   private mineralStages: GpuMineral | null = null;
 
-  /** Этапы обновления минерала: «среда» (перенос, растекание, оседание и размыв) и «стекание». */
+  private driftStage: GpuDrift | null = null;
+
+  /** Поверхность за обновление минерала: среда, грунт, стекание. */
   get mineral(): GpuMineral { return this.mineralStages ??= new GpuMineral(this.device); }
+  /** Поле течений от света. */
+  get drift(): GpuDrift { return this.driftStage ??= new GpuDrift(this.device); }
 
   private constructor(device: GPUDevice) {
     this.device = device;
     device.lost.then(() => { this.lost = true; });
+    // Ошибка проверки команд молча отбрасывает работу — после неё видеокарте не доверяем.
+    device.addEventListener('uncapturederror', (e) => { this.error ??= (e as GPUUncapturedErrorEvent).error.message.split('\n')[0]; });
   }
+
+  /** Первая ошибка видеокарты, если была. */
+  error: string | null = null;
 
   /** Устройство или причина, почему видеокарты нет. */
   static async create(): Promise<GpuWorld | string> {
@@ -93,10 +103,14 @@ export class GpuWorld {
     if (!gpu) return 'WebGPU недоступен в этом браузере';
     const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) return 'видеокарта не найдена';
-    return new GpuWorld(await adapter.requestDevice());
+    // Решатель течений считает суммы и грубые уровни одной группой из 1024 потоков; проходам течений нужно до 10 буферов.
+    return new GpuWorld(await adapter.requestDevice({ requiredLimits: {
+      maxComputeInvocationsPerWorkgroup: 1024, maxComputeWorkgroupSizeX: 1024,
+      maxStorageBuffersPerShaderStage: Math.min(10, adapter.limits.maxStorageBuffersPerShaderStage),
+    } }));
   }
 
-  get usable(): boolean { return !this.lost; }
+  get usable(): boolean { return !this.lost && this.error === null; }
 
   /** Буферы под сетку мира; показатели долей — по суммам мира. */
   attach(world: World): void {

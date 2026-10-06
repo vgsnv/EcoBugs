@@ -1,5 +1,5 @@
 /** Мир считает шаги независимо от кадров; показ получает не больше 20 снимков/с. */
-import { createWorld, mineralExchanges, mineralProcesses, surfaceTask, takeGroundChanges, DRIFT_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, WorldFileError, type MineralAccelerator, type World } from '../core/index.ts';
+import { createWorld, mineralExchanges, mineralProcesses, surfaceTask, takeGroundChanges, type DriftAccelerator, DRIFT_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, WorldFileError, type MineralAccelerator, type World } from '../core/index.ts';
 import type { ComputeMode, ComputeState, SimulationCommand, SimulationReply, SimulationSnapshot } from './simulation.ts';
 import { GpuWorld } from '../gpu-world/engine.ts';
 import { STEPS_PER_SECOND } from '../core/units.ts';
@@ -37,7 +37,7 @@ let gpuUnavailable: string | null = null;
 let gpuStarting = false;
 let waiting: Promise<void> | null = null;
 function computeState(): ComputeState {
-  return { mode: computeMode, unavailable: gpuUnavailable, ...(computeMode === 'gpu' && lastStages.surface > 0 ? { stages: { surface: lastStages.surface, parts: [...lastStages.parts] } } : {}) };
+  return { mode: computeMode, unavailable: gpuUnavailable, ...(computeMode === 'gpu' && lastStages.surface > 0 ? { stages: { surface: lastStages.surface, parts: [...lastStages.parts], drift: lastStages.drift, driftIterations: lastStages.driftIterations } } : {}) };
 }
 
 function useCpu(reason: string): void {
@@ -79,18 +79,31 @@ const accelerator: MineralAccelerator = {
   },
 };
 /** Последний этап на видеокарте: время с ожиданием, мс, и его части. */
-const lastStages = { surface: 0, parts: [0, 0, 0] };
+const lastStages = { surface: 0, parts: [0, 0, 0], drift: 0, driftIterations: 0 };
+
+/** Поле течений на видеокарте; null — пусть считает ядро. */
+const driftAccelerator: DriftAccelerator = {
+  *field(stage) {
+    const g = gpu;
+    if (!g?.usable) return null;
+    const run = yield* awaitGpu(g.drift.field(stage));
+    if (!run) { gpuFailed(null, g); return null; }
+    lastStages.drift = run.ms; lastStages.driftIterations = run.iterations;
+    return run.field;
+  },
+};
 
 function gpuFailed(run: { exact: boolean } | null, g: GpuWorld | null): void {
   if (run && !run.exact) {
     useCpu('суммы долей после этапа не совпали');
     host.postMessage({ type: 'error', epoch, problems: ['Видеокарта: суммы долей после этапа не совпали — расчёт возвращён на процессор'] });
-  } else if (g && !g.usable) useCpu('устройство видеокарты потеряно');
+  } else if (g && !g.usable) useCpu(g.error ? `ошибка видеокарты: ${g.error}` : 'устройство видеокарты потеряно');
 }
 
 /** Снимок включает готовые узлы поля: publish никогда не запускает решатель. */
 function* calculateStep(next: World): Generator<void, void, void> {
   if (computeMode === 'gpu' && gpu && !gpu.attached(next)) gpu.attach(next);
+  next.drift.accelerator = computeMode === 'gpu' && gpu ? driftAccelerator : null;
   yield* stepWorldTask(next, computeMode === 'gpu' && gpu ? accelerator : undefined);
   const key = `${next.viscosity.version}:${Math.floor(next.step / DRIFT_PERIOD)}`;
   if (key !== preparedDriftKey) {

@@ -349,6 +349,7 @@ export class GpuMineral {
     q.writeBuffer(b.flow, 0, this.flowData); q.writeBuffer(b.mob, 0, this.mobData); q.writeBuffer(b.mask, 0, this.maskData);
     const mineralBefore = shareSum(this.fShares) + shareSum(this.dShares), groundBefore = shareSum(this.gShares);
     const t1 = performance.now();
+    this.device.pushErrorScope('validation');
     const enc = this.device.createCommandEncoder();
     // Среда: перенос F → A, растекание A → B, оседание и размыв в B и залежах.
     enc.clearBuffer(b.A);
@@ -372,6 +373,8 @@ export class GpuMineral {
       enc.copyBufferToBuffer(buf, 0, b.read, at, size); at += size;
     }
     q.submit([enc.finish()]);
+    const failure = await this.device.popErrorScope();
+    if (failure) throw Error(`видеокарта отклонила поверхность: ${failure.message.split('\n')[0]}`);
     await b.read.mapAsync(GPUMapMode.READ, 0, at);
     const data = b.read.getMappedRange(0, at).slice(0);
     b.read.unmap();

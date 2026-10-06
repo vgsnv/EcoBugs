@@ -280,8 +280,9 @@ export class Panel {
     if (this.computeButton.getAttribute('aria-pressed') !== String(on)) this.computeButton.setAttribute('aria-pressed', String(on));
     const r = state.stages;
     this.computeText = on
-      ? `Расчёт: видеокарта — перенос, растекание, оседание и размыв, грунт, стекание; остальное пока считает процессор`
-        + (r ? `\nНа видеокарте за обновление: ${r.surface.toFixed(1)} мс с ожиданием (подготовка ${r.parts[0].toFixed(1)}, видеокарта с чтением ${r.parts[1].toFixed(1)}, разбор ${r.parts[2].toFixed(1)}); суммы долей точны` : '')
+      ? `Расчёт: видеокарта — течения от света, перенос, растекание, оседание и размыв, грунт, стекание; остальное пока считает процессор`
+        + (r ? `\nНа видеокарте за обновление: ${r.surface.toFixed(1)} мс с ожиданием (подготовка ${r.parts[0].toFixed(1)}, видеокарта с чтением ${r.parts[1].toFixed(1)}, разбор ${r.parts[2].toFixed(1)}); суммы долей точны`
+          + (r.drift > 0 ? `\nПоле течений на видеокарте: ${r.drift.toFixed(1)} мс с ожиданием, ${r.driftIterations} шагов решателя` : '') : '')
       : `Расчёт: процессор${state.unavailable ? `\nВидеокарта недоступна: ${state.unavailable}` : ''}`;
     this.computeButton.title = on ? `${this.computeText}\nНажмите, чтобы считать на процессоре` : `${this.computeText}\nНажмите, чтобы считать на видеокарте`;
   }

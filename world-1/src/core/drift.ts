@@ -16,7 +16,7 @@
  */
 import { finishCalculation, type Calculation } from './task.ts';
 import { DRIFT_CELL, DRIFT_DRAG, DRIFT_MAX, DRIFT_PERIOD, DRIFT_SPEED, LIGHT_DRIFT_SPEED } from './constants.ts';
-import { lightBackground, rasterizeSpotIntensityTask, sunAt, type LightMap } from './light.ts';
+import { lightBackground, lightFieldUniforms, rasterizeSpotIntensityTask, sunAt, type LightMap } from './light.ts';
 import type { WorldParams } from './params.ts';
 import { cellInsideDish } from './dish.ts';
 import { isBlocked, type PartitionLayout } from './partitions.ts';
@@ -402,6 +402,39 @@ function* driftSystemTask(world: Sources, t: number, ground: Ground): Calculatio
 }
 
 /**
+ * Вход расчёта поля течений для ускорителя (видеокарта, план docs/plan/world-gpu-engine.md):
+ * всё, из чего `computeDriftFieldTask` собирает поле в шаге t. Неизменное до
+ * смены местности — одни и те же объекты, их можно держать на видеокарте.
+ */
+export interface DriftStage {
+  t: number; cols: number; rows: number; cell: number;
+  blocked: Uint8Array; region: Int32Array; regions: number; levels: readonly Level[];
+  /** Сила солнца, фон тени (доля пятна), отклик среды. */
+  sun: number; bg: number; response: number;
+  /** Увлечение: сила на единицу вклада пятен; скорость дрейфа пятен, единиц за шаг. */
+  pull: number; vx: number; vy: number;
+  /** Пятна для шейдера в шаге t. */
+  light: ReturnType<typeof lightFieldUniforms>;
+}
+
+/** Ускоритель поля течений: поле или null — тогда считает CPU. */
+export interface DriftAccelerator { field(s: DriftStage): Calculation<DriftField | null> }
+
+function driftStage(world: Sources, t: number, ground: Ground): DriftStage | null {
+  const cols = Math.ceil(world.partitions.dish.width / DRIFT_CELL), rows = Math.ceil(world.partitions.dish.height / DRIFT_CELL);
+  const sun = sunAt(world.light, t);
+  if (sun <= 0) return null;
+  const map = world.light;
+  return {
+    t, cols, rows, cell: DRIFT_CELL, blocked: ground.blocked, region: ground.region, regions: ground.regions,
+    levels: driftLevels(levelOf(cols, rows, ground.cond)),
+    sun, bg: lightBackground(map), response: DRIFT_SPEED * world.params.driftResponse,
+    pull: DRIFT_DRAG * sun / LIGHT_DRIFT_SPEED, vx: map.laws.speed * Math.cos(map.angle), vy: map.laws.speed * Math.sin(map.angle),
+    light: lightFieldUniforms(map, t),
+  };
+}
+
+/**
  * Снос во времени: поля в узлах через DRIFT_PERIOD шагов, между ними —
  * линейный переход. Держит два последних узла.
  */
@@ -409,6 +442,8 @@ export class Drift {
   private readonly world: Sources;
   private readonly cache = new Map<number, DriftField>();
   private ground: Ground | null = null;
+  /** Ускоритель — только для генераторов (`nodesTask`): синхронные `nodes`, `at` всегда считают на CPU. */
+  accelerator: DriftAccelerator | null = null;
 
   constructor(world: Sources) {
     this.world = world;
@@ -417,14 +452,15 @@ export class Drift {
   private node(k: number): DriftField {
     const cached = this.cache.get(k);
     if (cached) return cached;
-    return finishCalculation(this.nodeTask(k));
+    return finishCalculation(this.nodeTask(k, false));
   }
 
-  private *nodeTask(k: number): Calculation<DriftField> {
+  private *nodeTask(k: number, accelerate: boolean): Calculation<DriftField> {
     let f = this.cache.get(k);
     if (!f) {
       this.ground ??= yield* groundOf(this.world, Math.ceil(this.world.partitions.dish.width / DRIFT_CELL), Math.ceil(this.world.partitions.dish.height / DRIFT_CELL), DRIFT_CELL);
-      f = yield* computeDriftFieldTask(this.world, k * DRIFT_PERIOD, this.ground);
+      const stage = accelerate && this.accelerator ? driftStage(this.world, k * DRIFT_PERIOD, this.ground) : null;
+      f = (stage && (yield* this.accelerator!.field(stage))) || (yield* computeDriftFieldTask(this.world, k * DRIFT_PERIOD, this.ground));
       this.cache.set(k, f);
       while (this.cache.size > 3) this.cache.delete(this.cache.keys().next().value!);
     }
@@ -450,13 +486,18 @@ export class Drift {
     const k = Math.floor(t / DRIFT_PERIOD);
     const a = this.cache.get(k), b = this.cache.get(k + 1);
     if (a && b) return { a, b, u: t / DRIFT_PERIOD - k };
-    return finishCalculation(this.nodesTask(t));
+    return finishCalculation(this.pairTask(t, false));
   }
 
-  *nodesTask(t: number): Calculation<{ a: DriftField; b: DriftField; u: number }> {
+  /** Узлы вокруг шага t — генератором; если задан ускоритель, недостающие поля считает он. */
+  nodesTask(t: number): Calculation<{ a: DriftField; b: DriftField; u: number }> {
+    return this.pairTask(t, true);
+  }
+
+  private *pairTask(t: number, accelerate: boolean): Calculation<{ a: DriftField; b: DriftField; u: number }> {
     const k = Math.floor(t / DRIFT_PERIOD);
-    const a = yield* this.nodeTask(k);
-    const b = yield* this.nodeTask(k + 1);
+    const a = yield* this.nodeTask(k, accelerate);
+    const b = yield* this.nodeTask(k + 1, accelerate);
     return { a, b, u: t / DRIFT_PERIOD - k };
   }
 
