@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Замер: цена прохода видеокарты</title>
+<style>body { font: 13px/1.4 ui-monospace, Menlo, monospace; background: #111; color: #ddd; margin: 16px; } pre { white-space: pre-wrap; }</style>
+</head>
+<body>
+<h3>Цена прохода WebGPU на сетке мира (200 × 150) и сравнение с CPU</h3>
+<pre id="out"></pre>
+<script type="module">
+const out = document.getElementById('out');
+const log = (s) => { out.textContent += s + '\n'; };
+const W = 200, H = 150, N = W * H;
+const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+const device = await adapter.requestDevice();
+// Пустой проход: одна группа, ничего не делает — пол цены.
+// Трафарет: каждая ячейка — среднее с 4 соседями (как шаг переноса или итерация решателя), туда-обратно.
+const code = /* wgsl */`
+@group(0) @binding(0) var<storage, read> a: array<f32>;
+@group(0) @binding(1) var<storage, read_write> b: array<f32>;
+@compute @workgroup_size(64) fn empty() {}
+@compute @workgroup_size(16, 16) fn stencil(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x >= ${W}u || g.y >= ${H}u) { return; }
+  let k = g.y * ${W}u + g.x;
+  let l = select(k, k - 1u, g.x > 0u); let r = select(k, k + 1u, g.x + 1u < ${W}u);
+  let u = select(k, k - ${W}u, g.y > 0u); let d = select(k, k + ${W}u, g.y + 1u < ${H}u);
+  b[k] = a[k] + 0.2 * (a[l] + a[r] + a[u] + a[d] - 4.0 * a[k]);
+}`;
+const module = device.createShaderModule({ code });
+const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+const A = device.createBuffer({ size: N * 4, usage: S }), Bf = device.createBuffer({ size: N * 4, usage: S });
+const pipe = (e) => device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: e } });
+const pe = pipe('empty'), ps = pipe('stencil');
+const ge = device.createBindGroup({ layout: pe.getBindGroupLayout(0), entries: [] });
+const gs = [[A, Bf], [Bf, A]].map(([x, y]) => device.createBindGroup({ layout: ps.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: x } }, { binding: 1, resource: { buffer: y } }] }));
+
+async function measure(kind, perPass, passes) {
+  // perPass проходов в одном compute pass, passes отдельных pass — одно отправление
+  const run = async () => {
+    const enc = device.createCommandEncoder();
+    for (let p = 0; p < passes; p++) {
+      const pass = enc.beginComputePass();
+      for (let i = 0; i < perPass; i++) {
+        if (kind === 'empty') { pass.setPipeline(pe); pass.setBindGroup(0, ge); pass.dispatchWorkgroups(1); }
+        else { pass.setPipeline(ps); pass.setBindGroup(0, gs[i & 1]); pass.dispatchWorkgroups(Math.ceil(W / 16), Math.ceil(H / 16)); }
+      }
+      pass.end();
+    }
+    const t0 = performance.now();
+    device.queue.submit([enc.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    return performance.now() - t0;
+  };
+  await run();
+  const times = [];
+  for (let r = 0; r < 5; r++) times.push(await run());
+  times.sort((x, y) => x - y);
+  return times[2] * 1000 / (perPass * passes); // мкс на проход
+}
+
+log(`${adapter.info?.architecture ?? ''}; мкс на один проход (медиана 5 повторов):`);
+for (const [kind, label] of [['empty', 'пустой'], ['stencil', 'трафарет 200×150']]) {
+  for (const [perPass, passes] of [[1000, 1], [100, 10], [1, 1000]]) {
+    const us = await measure(kind, perPass, passes);
+    log(`  ${label.padEnd(17)} ${String(perPass).padStart(4)} в pass × ${String(passes).padStart(4)} pass: ${us.toFixed(2)} мкс`);
+  }
+}
+// тот же трафарет на CPU (одно ядро, JS)
+const a = new Float32Array(N).map(() => Math.random()), b2 = new Float32Array(N);
+let src = a, dst = b2;
+const cpuStep = () => {
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const k = y * W + x;
+    const l = x > 0 ? k - 1 : k, r = x + 1 < W ? k + 1 : k, u = y > 0 ? k - W : k, d = y + 1 < H ? k + W : k;
+    dst[k] = src[k] + 0.2 * (src[l] + src[r] + src[u] + src[d] - 4 * src[k]);
+  }
+  const t = src; src = dst; dst = t;
+};
+for (let i = 0; i < 50; i++) cpuStep();
+const t0 = performance.now(); for (let i = 0; i < 1000; i++) cpuStep();
+log(`  трафарет 200×150 на CPU (JS, одно ядро): ${((performance.now() - t0)).toFixed(2)} мкс на проход`);
+window.dispatchBench = { done: true, text: out.textContent };
+</script>
+</body>
+</html>
