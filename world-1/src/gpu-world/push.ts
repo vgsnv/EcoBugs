@@ -49,6 +49,21 @@ export interface PushRun { field: PushField; ms: number }
 
 export class GpuPush {
   private readonly device: GPUDevice;
+  /** Окна единичных полей на видеокарте (скорость клетки окна, vec2f) — для суммы течений без загрузки. */
+  private readonly windows = new WeakMap<PushField, GPUBuffer>();
+
+  /** Буфер окна поля: свой, если решалось здесь, иначе загружается из CPU-поля. */
+  windowBuffer(field: PushField): GPUBuffer {
+    let buf = this.windows.get(field);
+    if (!buf) {
+      const n = field.vx.length, data = new Float32Array(n * 2);
+      for (let q = 0; q < n; q++) { data[2 * q] = field.vx[q]; data[2 * q + 1] = field.vy[q]; }
+      buf = this.device.createBuffer({ label: 'окно толчка (загружено)', size: Math.max(16, n * 8), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      this.device.queue.writeBuffer(buf, 0, data);
+      this.windows.set(field, buf);
+    }
+    return buf;
+  }
   private readonly relax: GPUComputePipeline;
   private readonly velocity: GPUComputePipeline;
 
@@ -65,7 +80,7 @@ export class GpuPush {
     const d = this.device, n = sys.w * sys.h;
     const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const made: GPUBuffer[] = [];
-    const mk = (bytes: number, usage = S) => { const b = d.createBuffer({ size: Math.max(16, Math.ceil(bytes / 16) * 16), usage }); made.push(b); return b; };
+    const mk = (bytes: number, usage = S) => { const b = d.createBuffer({ label: 'толчок', size: Math.max(16, Math.ceil(bytes / 16) * 16), usage }); made.push(b); return b; };
     const up = (a: Float64Array) => { const f = Float32Array.from(a), b = mk(f.byteLength); d.queue.writeBuffer(b, 0, f); return b; };
     try {
       const uniforms = [0, 1].map((color) => {
@@ -100,7 +115,12 @@ export class GpuPush {
       read.unmap();
       const vx = new Float32Array(n), vy = new Float32Array(n);
       for (let q = 0; q < n; q++) { vx[q] = v[2 * q]; vy[q] = v[2 * q + 1]; }
-      return { field: { vx, vy, cols: sys.w, i0: sys.i0, i1: sys.i1, j0: sys.j0, j1: sys.j1 }, ms: performance.now() - t0 };
+      const field: PushField = { vx, vy, cols: sys.w, i0: sys.i0, i1: sys.i1, j0: sys.j0, j1: sys.j1 };
+      // Окно скоростей остаётся на видеокарте для суммы течений.
+      const keep = made.indexOf(data[6]);
+      made.splice(keep, 1);
+      this.windows.set(field, data[6]);
+      return { field, ms: performance.now() - t0 };
     } finally {
       for (const b of made) b.destroy();
     }

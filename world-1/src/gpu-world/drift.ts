@@ -12,7 +12,7 @@
  * Суммы и остановка — на видеокарте; шагов даётся столько, сколько было в прошлый раз, с
  * запасом, и если не сошлось — досчитывается следующей отправкой.
  */
-import { DRIFT_COARSEST_SWEEPS, DRIFT_MAX, DRIFT_MAX_ITERATIONS, DRIFT_TOLERANCE, MAX_SPOTS, SPOT_EDGE, SPOT_REACH, type DriftField, type DriftStage, type Level } from '../core/index.ts';
+import { DRIFT_COARSEST_SWEEPS, DRIFT_MAX, DRIFT_MAX_ITERATIONS, DRIFT_PERIOD, DRIFT_TOLERANCE, MAX_SPOTS, SPOT_EDGE, SPOT_REACH, type DriftField, type DriftStage, type Level } from '../core/index.ts';
 
 const MAX_LEVELS = 8;
 /** С какого уровня грубые считаются одной группой (замер 5: уровни от 50×38). */
@@ -319,6 +319,36 @@ export class GpuDrift {
   private regions = 0;
   /** Шагов в прошлом решении — с запасом даётся столько же. */
   private lastIterations = 20;
+  /** Узлы течений на видеокарте по номеру узла (скорость клетки, vec2f): для суммы течений без загрузки. */
+  private readonly nodes = new Map<number, { field: DriftField; buf: GPUBuffer }>();
+
+  /** Буфер узла `k` с полем `field`: свой, если считался здесь, иначе загружается из CPU-поля. */
+  nodeBuffer(k: number, field: DriftField): GPUBuffer {
+    const hit = this.nodes.get(k);
+    if (hit && hit.field === field) {
+      // Порядок в Map — давность обращения: свежий узел — в конец.
+      this.nodes.delete(k); this.nodes.set(k, hit);
+      return hit.buf;
+    }
+    const n = field.vx.length, data = new Float32Array(n * 2);
+    for (let q = 0; q < n; q++) { data[2 * q] = field.vx[q]; data[2 * q + 1] = field.vy[q]; }
+    const buf = this.keepNode(k, field, n);
+    this.device.queue.writeBuffer(buf, 0, data);
+    return buf;
+  }
+
+  private keepNode(k: number, field: DriftField, n: number): GPUBuffer {
+    const old = this.nodes.get(k);
+    if (old) { old.buf.destroy(); this.nodes.delete(k); }
+    const buf = this.device.createBuffer({ label: `узел течений ${k}`, size: n * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    // Держим четыре узла: нужны k и k + 1, остальное — запас на переход. Выбрасываем давно не нужный.
+    while (this.nodes.size >= 4) {
+      const [oldest, entry] = this.nodes.entries().next().value!;
+      entry.buf.destroy(); this.nodes.delete(oldest);
+    }
+    this.nodes.set(k, { field, buf });
+    return buf;
+  }
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -493,7 +523,13 @@ export class GpuDrift {
     this.lastIterations = Math.max(1, iterations);
     const vx = new Float32Array(n), vy = new Float32Array(n);
     for (let k = 0; k < n; k++) { vx[k] = out.vel[2 * k]; vy[k] = out.vel[2 * k + 1]; }
-    return { field: { cols: s.cols, rows: s.rows, cell: s.cell, vx, vy }, iterations, submits, ms: performance.now() - t0, rebuilt };
+    const field: DriftField = { cols: s.cols, rows: s.rows, cell: s.cell, vx, vy };
+    // Узел остаётся на видеокарте для суммы течений.
+    const node = this.keepNode(Math.round(s.t / DRIFT_PERIOD), field, n);
+    const copy = this.device.createCommandEncoder();
+    copy.copyBufferToBuffer(this.buf.vel, 0, node, 0, n * 8);
+    this.device.queue.submit([copy.finish()]);
+    return { field, iterations, submits, ms: performance.now() - t0, rebuilt };
   }
 
   /** Отсеков в текущей местности (для отладки). */

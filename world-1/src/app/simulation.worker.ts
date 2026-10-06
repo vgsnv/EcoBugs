@@ -68,9 +68,10 @@ function* awaitGpu<T>(job: Promise<T>): Generator<void, T | null, void> {
 
 /** Этапы обновления минерала на видеокарте; что не перенесено — считает ядро. */
 const accelerator: MineralAccelerator = {
+  sumsFlows: true,
   *surface(a) {
     const g = gpu;
-    const run = g?.usable ? yield* awaitGpu(g.mineral.surface(a, g.mineralExponent, g.groundExponent)) : null;
+    const run = g?.usable ? yield* awaitGpu(g.mineral.surface(a, g.mineralExponent, g.groundExponent, a.flows && g.flowBuffers(a.flows))) : null;
     if (run?.exact) { lastStages.surface = run.ms; lastStages.parts = [run.prepMs, run.gpuMs, run.doneMs]; return; }
     gpuFailed(run, g);
     // Не сошлось — состояние уже записано из видеокарты: обновление не повторить честно, мир останавливается с ошибкой.

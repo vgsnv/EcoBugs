@@ -259,6 +259,34 @@ fn drop(h: f32, ok: bool, n: u32) -> f32 { if (!ok || blocked(n)) { return 0.0; 
 }
 `;
 
+// Сумма течений: свет (между двумя узлами) + толчок и тяга (окна полей × сила) — как «сумма течений» ядра.
+const FLOWS = /* wgsl */`
+struct FU { n: u32, u: f32, p0: u32, p1: u32 };
+struct PU { i0: u32, j0: u32, w: u32, h: u32, cols: u32, s: f32, p0: u32, p1: u32 };
+@group(0) @binding(0) var<uniform> fu: FU;
+@group(0) @binding(1) var<storage, read> nodeA: array<vec2f>;
+@group(0) @binding(2) var<storage, read> nodeB: array<vec2f>;
+@group(0) @binding(3) var<storage, read> mask: array<u32>;
+@group(0) @binding(4) var<storage, read_write> flowOut: array<vec2f>;
+@group(0) @binding(5) var<storage, read_write> pushOut: array<vec2f>;
+@group(0) @binding(6) var<storage, read> win: array<vec2f>;
+@group(0) @binding(7) var<uniform> pu: PU;
+@compute @workgroup_size(64) fn flowBase(@builtin(global_invocation_id) g: vec3u) {
+  let k = g.x; if (k >= fu.n) { return; }
+  if ((mask[k] & 1u) != 0u) { flowOut[k] = vec2f(0.0); return; }
+  flowOut[k] = nodeA[k] + (nodeB[k] - nodeA[k]) * fu.u;
+}
+@compute @workgroup_size(64) fn pushAdd(@builtin(global_invocation_id) g: vec3u) {
+  let q = g.x; if (q >= pu.w * pu.h) { return; }
+  let k = (pu.j0 + q / pu.w) * pu.cols + pu.i0 + q % pu.w;
+  let v = pu.s * win[q];
+  pushOut[k] += v;
+  if ((mask[k] & 1u) == 0u) { flowOut[k] += v; }
+}`;
+
+/** Слагаемые суммы течений на видеокарте: узлы течений и окна полей толчка. */
+export interface FlowBuffers { a: GPUBuffer; b: GPUBuffer; u: number; pushes: { buf: GPUBuffer; i0: number; j0: number; w: number; h: number; strength: number }[] }
+
 export interface StageRun {
   /** От загрузки до готового результата, мс: подготовка на CPU (доли, загрузка), видеокарта с чтением, разбор ответа. */
   ms: number;
@@ -293,11 +321,53 @@ export class GpuMineral {
   private mobData = new Float32Array(0);
   private maskData = new Uint32Array(0);
 
+  private readonly flowBase: GPUComputePipeline;
+  private readonly pushAdd: GPUComputePipeline;
+  private flowsU: GPUBuffer | null = null;
+  private pushU: GPUBuffer[] = [];
+  private pushOut: GPUBuffer | null = null;
+
   constructor(device: GPUDevice) {
     this.device = device;
     const module = device.createShaderModule({ code: WGSL });
     this.pipes = Object.fromEntries((Object.keys(USED) as Name[]).map((e) => [e, device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: e } })])) as Record<Name, GPUComputePipeline>;
+    const fm = device.createShaderModule({ code: FLOWS });
+    this.flowBase = device.createComputePipeline({ layout: 'auto', compute: { module: fm, entryPoint: 'flowBase' } });
+    this.pushAdd = device.createComputePipeline({ layout: 'auto', compute: { module: fm, entryPoint: 'pushAdd' } });
   }
+
+  /** Сумма течений в буфер `flow` (и толчок в `pushOut`) — первыми проходами отправки. */
+  private encodeFlows(enc: GPUCommandEncoder, f: FlowBuffers, n: number): void {
+    const d = this.device, b = this.b!;
+    if (!this.pushOut || this.pushOut.size < n * 8) {
+      this.pushOut?.destroy();
+      this.pushOut = d.createBuffer({ size: n * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    }
+    this.flowsU ??= d.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const fu = new ArrayBuffer(16); new Uint32Array(fu)[0] = n; new Float32Array(fu)[1] = f.u;
+    d.queue.writeBuffer(this.flowsU, 0, fu);
+    enc.clearBuffer(this.pushOut);
+    const pass = enc.beginComputePass();
+    pass.setPipeline(this.flowBase);
+    pass.setBindGroup(0, d.createBindGroup({ layout: this.flowBase.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: this.flowsU } }, { binding: 1, resource: { buffer: f.a } }, { binding: 2, resource: { buffer: f.b } },
+      { binding: 3, resource: { buffer: b.mask } }, { binding: 4, resource: { buffer: b.flow } },
+    ] }));
+    pass.dispatchWorkgroups(Math.ceil(n / 64));
+    f.pushes.forEach((p, i) => {
+      if (!this.pushU[i]) this.pushU[i] = d.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ub = new ArrayBuffer(32); new Uint32Array(ub).set([p.i0, p.j0, p.w, p.h, this.cols]); new Float32Array(ub)[5] = p.strength;
+      d.queue.writeBuffer(this.pushU[i], 0, ub);
+      pass.setPipeline(this.pushAdd);
+      pass.setBindGroup(0, d.createBindGroup({ layout: this.pushAdd.getBindGroupLayout(0), entries: [
+        { binding: 3, resource: { buffer: b.mask } }, { binding: 4, resource: { buffer: b.flow } }, { binding: 5, resource: { buffer: this.pushOut! } },
+        { binding: 6, resource: { buffer: p.buf } }, { binding: 7, resource: { buffer: this.pushU[i] } },
+      ] }));
+      pass.dispatchWorkgroups(Math.ceil(p.w * p.h / 64));
+    });
+    pass.end();
+  }
+  private cols = 0;
 
   private ensure(n: number): void {
     if (n === this.cells && this.b) return;
@@ -308,7 +378,7 @@ export class GpuMineral {
       uniform: make(96, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST),
       F: make(n * 8), A: make(n * 8), flow: make(n * 8), mob: make(n * 4), mask: make(n * 4), B: make(n * 8),
       dep: make(n * 8), ground: make(n * 8), erosion: make(n * 4), settling: make(n * 4), G: make(n * 8), lift: make(n * 4),
-      read: make(n * 36, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
+      read: make(n * 52, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
     };
     const b = this.b;
     const order = [b.uniform, b.F, b.A, b.flow, b.mob, b.mask, b.B, b.dep, b.ground, b.erosion, b.settling, b.G, b.lift];
@@ -327,7 +397,7 @@ export class GpuMineral {
   }
 
   /** Среда, перенос и осыпание грунта, стекание — как `surfaceTask` ядра. */
-  async surface(s: SurfaceStage, mExp: number, gExp: number): Promise<StageRun> {
+  async surface(s: SurfaceStage, mExp: number, gExp: number, flows?: FlowBuffers): Promise<StageRun> {
     const t0 = performance.now();
     const { cols, rows, cell, blocked } = s.m, n = cols * rows, n8 = n * 8;
     this.ensure(n);
@@ -341,16 +411,22 @@ export class GpuMineral {
       SAND_TOP, SAND_UNDER, SLUMP_RATE, s.slope], 4);
     q.writeBuffer(b.uniform, 0, ub);
     toShares(s.src, mExp, this.fShares); toShares(s.terrain.deposits, mExp, this.dShares); toShares(s.terrain.ground, gExp, this.gShares);
+    this.cols = cols;
     for (let k = 0; k < n; k++) {
-      this.flowData[2 * k] = s.tvx[k]; this.flowData[2 * k + 1] = s.tvy[k]; this.mobData[k] = s.mobility[k];
+      this.mobData[k] = s.mobility[k];
       this.maskData[k] = (blocked[k] ? 1 : 0) | (s.holes[k] ? 2 : 0);
     }
+    if (!flows) {
+      for (let k = 0; k < n; k++) { this.flowData[2 * k] = s.tvx[k]; this.flowData[2 * k + 1] = s.tvy[k]; }
+      q.writeBuffer(b.flow, 0, this.flowData);
+    }
     q.writeBuffer(b.F, 0, this.fShares); q.writeBuffer(b.dep, 0, this.dShares); q.writeBuffer(b.ground, 0, this.gShares);
-    q.writeBuffer(b.flow, 0, this.flowData); q.writeBuffer(b.mob, 0, this.mobData); q.writeBuffer(b.mask, 0, this.maskData);
+    q.writeBuffer(b.mob, 0, this.mobData); q.writeBuffer(b.mask, 0, this.maskData);
     const mineralBefore = shareSum(this.fShares) + shareSum(this.dShares), groundBefore = shareSum(this.gShares);
     const t1 = performance.now();
     this.device.pushErrorScope('validation');
     const enc = this.device.createCommandEncoder();
+    if (flows) this.encodeFlows(enc, flows, n);
     // Среда: перенос F → A, растекание A → B, оседание и размыв в B и залежах.
     enc.clearBuffer(b.A);
     this.pass(enc, 'transport');
@@ -369,9 +445,9 @@ export class GpuMineral {
     enc.copyBufferToBuffer(b.B, 0, b.A, 0, n8);
     this.pass(enc, 'runoff');
     let at = 0;
-    for (const [buf, size] of [[b.A, n8], [b.dep, n8], [b.ground, n8], [b.erosion, n * 4], [b.settling, n * 4], [b.lift, n * 4]] as const) {
-      enc.copyBufferToBuffer(buf, 0, b.read, at, size); at += size;
-    }
+    const parts: [GPUBuffer, number][] = [[b.A, n8], [b.dep, n8], [b.ground, n8], [b.erosion, n * 4], [b.settling, n * 4], [b.lift, n * 4]];
+    if (flows) parts.push([b.flow, n8], [this.pushOut!, n8]);
+    for (const [buf, size] of parts) { enc.copyBufferToBuffer(buf, 0, b.read, at, size); at += size; }
     q.submit([enc.finish()]);
     const failure = await this.device.popErrorScope();
     if (failure) throw Error(`видеокарта отклонила поверхность: ${failure.message.split('\n')[0]}`);
@@ -388,6 +464,11 @@ export class GpuMineral {
     for (let k = 0; k < n; k++) { s.net[k] += gr[k] - before[k]; s.lift[k] += lift[k]; }
     s.erosionOut.set(new Float32Array(data, 3 * n8, n));
     s.settlingOut.set(new Float32Array(data, 3 * n8 + n * 4, n));
+    if (flows && s.flows) {
+      const fl = new Float32Array(data, 3 * n8 + 3 * n * 4, n * 2), pu = new Float32Array(data, 4 * n8 + 3 * n * 4, n * 2);
+      const { pushX, pushY } = s.flows;
+      for (let k = 0; k < n; k++) { s.tvx[k] = fl[2 * k]; s.tvy[k] = fl[2 * k + 1]; pushX[k] = pu[2 * k]; pushY[k] = pu[2 * k + 1]; }
+    }
     const t3 = performance.now();
     return { ms: t3 - t0, prepMs: t1 - t0, gpuMs: t2 - t1, doneMs: t3 - t2,
       exact: shareSum(field) + shareSum(deposits) === mineralBefore && shareSum(ground) === groundBefore };

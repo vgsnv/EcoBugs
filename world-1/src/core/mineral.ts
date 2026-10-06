@@ -17,11 +17,11 @@ import { traceThrow, type ThrowWorld } from './throw.ts';
 import { finishCalculation, type Calculation } from './task.ts';
 import {
   ERUPTION_DURATION, ERUPTION_RADIUS, ERUPTION_RADIUS_MIN, ERUPTION_SHARE, ERUPTION_BURST, ERUPTION_TAIL_AREA, ERUPTION_BURSTS_MAX, BURST_WIDTH, BURST_FROM, THROW_RAYS, THROW_SAMPLES, MINERAL_SPREAD,
-  MINERAL_CELL, MINERAL_PERIOD, MINERAL_SINK_SETTLE, MINERAL_LAYER, MINERAL_MOBILITY, TRANSPORT_SUBSTEPS, DRIFT_REFERENCE, EROSION, EROSION_RATIO, GROUND_PER_LEVEL, RUNOFF, SAND_RATE, SAND_TOP, SAND_UNDER, SLUMP_RATE,
+  DRIFT_PERIOD, MINERAL_CELL, MINERAL_PERIOD, MINERAL_SINK_SETTLE, MINERAL_LAYER, MINERAL_MOBILITY, TRANSPORT_SUBSTEPS, DRIFT_REFERENCE, EROSION, EROSION_RATIO, GROUND_PER_LEVEL, RUNOFF, SAND_RATE, SAND_TOP, SAND_UNDER, SLUMP_RATE,
   FUNNEL_DEPOSIT, FUNNEL_SHAPE, FUNNEL_CORE_LEVEL, FUNNEL_MIN_CELLS, FUNNEL_HOLE_SHARE, FUNNEL_RAMP, FUNNEL_REACH, FUNNEL_DRAW, FUNNEL_LIFT, FUNNEL_SINK, DEPOSIT_DISSOLVE, ERUPTION_DURATION_SCALE, GENESIS_SPEEDUP,
   VOLCANO_MIN_GAP, VOLCANO_POWER, VOLCANO_BIRTH, VOLCANO_MATURE, VOLCANO_EXTINCT_CHANCE, VOLCANO_WAKE_CHANCE, VOLCANO_DORMANT_LIFE, VOLCANO_FADE, VOLCANO_DEPOSIT_AVOID,
 } from './constants.ts';
-import type { Drift } from './drift.ts';
+import type { Drift, DriftField } from './drift.ts';
 import type { LightMap } from './light.ts';
 import { moveGround, type TerrainState } from './terrain.ts';
 import type { WorldParams } from './params.ts';
@@ -513,6 +513,8 @@ export interface MineralAccelerator {
    * `erosionOut`, `settlingOut`, прибавляет к `lift` и `net`.
    */
   surface?(a: SurfaceStage): Calculation;
+  /** Ускоритель умеет сам складывать течения (`SurfaceStage.flows`). */
+  sumsFlows?: boolean;
   /** Решение единичного течения толчка или тяги (как `solvePushSystem`) — при смене местности и новых источниках. */
   push?: PushAccelerator;
 }
@@ -525,7 +527,20 @@ export interface SurfaceStage extends MediumStage {
   lift: Float32Array; net: Float32Array;
   /** Поле после стекания. */
   out: Float64Array;
+  /**
+   * Если задано — суммы течений (`tvx`, `tvy`) ещё не посчитаны: ускоритель складывает их
+   * сам из узлов течений от света и полей толчка, пишет в `tvx`, `tvy` и сумму толчка в `pushX`, `pushY`.
+   */
+  flows?: FlowStage;
 }
+
+/** Слагаемые суммы течений: узлы течений от света (номера узлов и доля пути) и поля толчка с силой. */
+export interface FlowStage {
+  a: DriftField; b: DriftField; u: number; ka: number; kb: number;
+  pushes: readonly PushSource[];
+  pushX: Float32Array; pushY: Float32Array;
+}
+export interface PushSource { field: PushField; strength: number }
 
 /** Вход этапа «среда»: всё, что ядро передаёт своим функциям переноса, растекания и оседания. */
 export interface MediumStage {
@@ -593,8 +608,22 @@ export function* groundTask(s: SurfaceStage): Calculation {
   gr.set(sand);
 }
 
+/** Сумма течений на CPU из входа `flows` (как «сумма течений» ядра): `tvx`, `tvy`, сумма толчка. */
+export function sumFlows(s: SurfaceStage): void {
+  const f = s.flows;
+  if (!f) return;
+  const { m, tvx, tvy } = s, n = m.cols * m.rows;
+  const push = sumPush(m, f.pushes, f.pushX, f.pushY);
+  for (let k = 0; k < n; k++) {
+    if (m.blocked[k]) continue;
+    tvx[k] = f.a.vx[k] + (f.b.vx[k] - f.a.vx[k]) * f.u + (push ? push.vx[k] : 0);
+    tvy[k] = f.a.vy[k] + (f.b.vy[k] - f.a.vy[k]) * f.u + (push ? push.vy[k] : 0);
+  }
+}
+
 /** Поверхность на CPU: среда, грунт, стекание в `out` (запасной путь ускорителя — тот же). */
 export function* surfaceTask(s: SurfaceStage): Calculation {
+  sumFlows(s);
   yield* mediumTask(s);
   yield* groundTask(s);
   phase('стекание');
@@ -634,31 +663,38 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   // Воронки и течения от вулканов и воронок — по состоянию на начало промежутка.
   yield* updateFunnels(m, params, terrain, P);
   phase('течения вулканов и воронок');
-  m.flow = yield* pushFlow(m, params, terrain, step - P, step, accel?.push);
-
-  // Сумма течений (свет + вулканы и воронки) по клеткам — для переноса шажками.
-  phase('сумма течений');
+  const pushes = yield* pushSources(m, params, terrain, step - P, step, accel?.push);
   const n = cols * rows;
   const { tvx, tvy } = work;
-  const pvx = m.flow?.vx, pvy = m.flow?.vy;
-  for (let j = 0; j < rows; j++) {
-    yield;
-    for (let i = 0; i < cols; i++) {
-      const k = j * cols + i;
-      if (blocked[k]) continue;
-      if (sameGrid) {
-        v[0] = fa.vx[k] + (fb.vx[k] - fa.vx[k]) * fu;
-        v[1] = fa.vy[k] + (fb.vy[k] - fa.vy[k]) * fu;
-      } else {
-        drift.at((i + 0.5) * cell, (j + 0.5) * cell, tMid, v);
+  // Сумма течений на ускорителе — вместе с поверхностью; иначе — здесь.
+  const kNode = Math.floor(tMid / DRIFT_PERIOD);
+  const flowsOnAccel = !!(accel?.surface && accel.sumsFlows && sameGrid);
+  if (flowsOnAccel) {
+    m.flow = sumPushShape(m, work.pushX, work.pushY);
+  } else {
+    m.flow = sumPush(m, pushes, work.pushX, work.pushY);
+    // Сумма течений (свет + вулканы и воронки) по клеткам — для переноса шажками.
+    phase('сумма течений');
+    const pvx = m.flow?.vx, pvy = m.flow?.vy;
+    for (let j = 0; j < rows; j++) {
+      yield;
+      for (let i = 0; i < cols; i++) {
+        const k = j * cols + i;
+        if (blocked[k]) continue;
+        if (sameGrid) {
+          v[0] = fa.vx[k] + (fb.vx[k] - fa.vx[k]) * fu;
+          v[1] = fa.vy[k] + (fb.vy[k] - fa.vy[k]) * fu;
+        } else {
+          drift.at((i + 0.5) * cell, (j + 0.5) * cell, tMid, v);
+        }
+        const x = v[0] + (pvx ? pvx[k] : 0), y = v[1] + (pvy ? pvy[k] : 0);
+        tvx[k] = x; tvy[k] = y;
+        speed[k] = Math.sqrt(x * x + y * y);
+        flowX[k] = x; flowY[k] = y;
       }
-      const x = v[0] + (pvx ? pvx[k] : 0), y = v[1] + (pvy ? pvy[k] : 0);
-      tvx[k] = x; tvy[k] = y;
-      speed[k] = Math.sqrt(x * x + y * y);
-      flowX[k] = x; flowY[k] = y;
     }
+    processes.vx.set(tvx); processes.vy.set(tvy);
   }
-  processes.vx.set(tvx); processes.vy.set(tvy);
   // Отверстия воронок: сквозь них ничего не проходит — попавшее остаётся.
   const holes = work.holes;
   holes.fill(0);
@@ -675,9 +711,18 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
     erosionOver: EROSION_RATIO * groundThreshold(params), erosion: EROSION * P * area, sinkSettle: MINERAL_SINK_SETTLE * P,
     erosionOut: processes.erosion, settlingOut: processes.settling,
     sandOver: groundThreshold(params), slope: params.slopeLimit * m.cell / 10,
-    lift: work.groundChanges.lift, net: work.groundChanges.net, out: work.runoff };
+    lift: work.groundChanges.lift, net: work.groundChanges.net, out: work.runoff,
+    ...(flowsOnAccel ? { flows: { a: fa, b: fb, u: fu, ka: kNode, kb: kNode + 1, pushes, pushX: work.pushX, pushY: work.pushY } } : {}) };
   if (accel?.surface) { phase('перенос'); yield* accel.surface(stage); }
   else yield* surfaceTask(stage);
+  if (flowsOnAccel) {
+    // Суммы течений пришли с ускорителя: рабочие массивы для бросков и показа.
+    for (let k = 0; k < n; k++) {
+      const x = tvx[k], y = tvy[k];
+      speed[k] = Math.sqrt(x * x + y * y); flowX[k] = x; flowY[k] = y;
+    }
+    processes.vx.set(tvx); processes.vy.set(tvy);
+  }
   m.field = work.runoff;
   work.groundChanges.steps += P;
 
@@ -1186,12 +1231,36 @@ function* updateFunnels(m: MineralState, params: WorldParams, terrain: TerrainSt
   }
 }
 
-function* pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, from: number, to: number, accel?: PushAccelerator): Calculation<{ vx: Float32Array; vy: Float32Array } | null> {
-  const erupting = m.volcanoes.filter((v) => v.stage === 'erupting');
-  if (erupting.length === 0 && m.funnels.length === 0) return null;
-  const { pushX: vx, pushY: vy } = workspace(m);
+/** Источники толчка и тяги за промежуток: единичные поля (решаются при нужде) и их сила. */
+function* pushSources(m: MineralState, params: WorldParams, terrain: TerrainState, from: number, to: number, accel?: PushAccelerator): Calculation<PushSource[]> {
+  const out: PushSource[] = [];
+  for (const vol of m.volcanoes.filter((v) => v.stage === 'erupting')) {
+    const q = ventPushAverage(params, vol, from, to);
+    if (q <= 0) continue;
+    const vent = Math.floor(vol.y / m.cell) * m.cols + Math.floor(vol.x / m.cell);
+    out.push({ field: yield* pushFieldTask(m, terrain.applied, `v${vent}`, [vent], accel), strength: q });
+  }
+  // Тяга воронки — сила × единичное течение её отверстия (место и форма постоянны — кеш по номеру).
+  for (const f of m.funnels) {
+    if (f.strength <= 0) continue;
+    out.push({ field: yield* pushFieldTask(m, terrain.applied, `f${f.id}`, f.cells, accel), strength: -FUNNEL_DRAW * Math.PI * f.reach * f.reach * f.strength });
+  }
+  return out;
+}
+
+/** Сумма толчка и тяги посчитает ускоритель в эти массивы; null — источников нет. */
+function sumPushShape(m: MineralState, vx: Float32Array, vy: Float32Array): { vx: Float32Array; vy: Float32Array } | null {
+  const erupting = m.volcanoes.some((v) => v.stage === 'erupting');
+  if (!erupting && m.funnels.length === 0) return null;
+  return { vx, vy };
+}
+
+/** Сумма толчка и тяги на сетке минерала; null — источников нет. */
+function sumPush(m: MineralState, sources: readonly PushSource[], vx: Float32Array, vy: Float32Array): { vx: Float32Array; vy: Float32Array } | null {
+  const erupting = m.volcanoes.some((v) => v.stage === 'erupting');
+  if (!erupting && m.funnels.length === 0) return null;
   vx.fill(0); vy.fill(0);
-  const add = (f: PushField, s: number) => {
+  for (const { field: f, strength: s } of sources) {
     for (let j = f.j0; j <= f.j1; j++) {
       let q = (j - f.j0) * f.cols;
       for (let k = j * m.cols + f.i0, end = j * m.cols + f.i1; k <= end; k++, q++) {
@@ -1199,17 +1268,6 @@ function* pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, 
         vy[k] += s * f.vy[q];
       }
     }
-  };
-  for (const vol of erupting) {
-    const q = ventPushAverage(params, vol, from, to);
-    if (q <= 0) continue;
-    const vent = Math.floor(vol.y / m.cell) * m.cols + Math.floor(vol.x / m.cell);
-    add(yield* pushFieldTask(m, terrain.applied, `v${vent}`, [vent], accel), q);
-  }
-  // Тяга воронки — сила × единичное течение её отверстия (место и форма постоянны — кеш по номеру).
-  for (const f of m.funnels) {
-    if (f.strength <= 0) continue;
-    add(yield* pushFieldTask(m, terrain.applied, `f${f.id}`, f.cells, accel), -FUNNEL_DRAW * Math.PI * f.reach * f.reach * f.strength);
   }
   return { vx, vy };
 }

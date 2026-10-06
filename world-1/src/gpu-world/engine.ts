@@ -8,8 +8,8 @@
  * чтобы любая сумма долей оставалась меньше 2^53 — тогда перевод из f64 и
  * обратно в JS точен, а сложение долей на видеокарте сохраняет сумму точно.
  */
-import { groundTotal, mineralInDeposits, mineralInEruptions, mineralInMedium, type World } from '../core/index.ts';
-import { GpuMineral } from './mineral.ts';
+import { groundTotal, mineralInDeposits, mineralInEruptions, mineralInMedium, type FlowStage, type World } from '../core/index.ts';
+import { GpuMineral, type FlowBuffers } from './mineral.ts';
 import { GpuDrift } from './drift.ts';
 import { GpuPush } from './push.ts';
 
@@ -88,6 +88,14 @@ export class GpuWorld {
   /** Поле течений от света. */
   get drift(): GpuDrift { return this.driftStage ??= new GpuDrift(this.device); }
   private pushStage: GpuPush | null = null;
+
+  /** Слагаемые суммы течений на видеокарте: свои буферы узлов и полей толчка или загрузка из CPU. */
+  flowBuffers(f: FlowStage): FlowBuffers {
+    return {
+      a: this.drift.nodeBuffer(f.ka, f.a), b: this.drift.nodeBuffer(f.kb, f.b), u: f.u,
+      pushes: f.pushes.map(({ field, strength }) => ({ buf: this.push.windowBuffer(field), i0: field.i0, j0: field.j0, w: field.i1 - field.i0 + 1, h: field.j1 - field.j0 + 1, strength })),
+    };
+  }
   /** Единичные течения толчка и тяги. */
   get push(): GpuPush { return this.pushStage ??= new GpuPush(this.device); }
 
