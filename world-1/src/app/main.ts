@@ -94,6 +94,7 @@ const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#pa
   onFocusMode: (on) => renderer.setDarkTable(on),
   onRulers: (enabled) => renderer.setRulers(enabled),
   onStreamView: (view) => { renderer.streamView = view; },
+  onCompute: (mode) => send({ type: 'compute', epoch, mode }),
   onProcesses: (enabled) => {
     renderer.showProcesses = enabled;
     send({ type: 'processes', epoch, enabled });
@@ -145,6 +146,7 @@ simulation.onmessage = ({ data }: MessageEvent<SimulationReply>) => {
       if (data.ground) renderer.acceptGround(data.ground);
       actualRate = data.rate;
       behind = data.behind;
+      panel.setCompute(data.compute);
       send({ type: 'ack', epoch });
       break;
     }

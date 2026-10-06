@@ -16,3 +16,5 @@ npm --prefix world-1 run dev -- --host 127.0.0.1 --port 5173 --strictPort
 Отрисовка — WebGL2 (поля) и Canvas 2D (объекты), см. [план](../docs/plan/world-webgl.md). Проверка отрисовки — страница с `?check` в адресе: `renderCheck.all()`, `renderCheck.against(...)`, `renderCheck.timing(...)` (подробности — в плане).
 
 `world-2` (отложен) запускается на порту 5174.
+
+Расчёт на видеокарте (в работе, [план](../docs/plan/world-gpu-engine.md)): кнопка «Видеокарта» рядом со скоростью; проверка движка — страница `/engine-check.html`.

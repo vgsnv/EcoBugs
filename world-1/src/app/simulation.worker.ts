@@ -1,6 +1,7 @@
 /** Мир считает шаги независимо от кадров; показ получает не больше 20 снимков/с. */
-import { createWorld, mineralExchanges, mineralProcesses, takeGroundChanges, DRIFT_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, WorldFileError, type World } from '../core/index.ts';
-import type { SimulationCommand, SimulationReply, SimulationSnapshot } from './simulation.ts';
+import { createWorld, mineralExchanges, mineralProcesses, takeGroundChanges, DRIFT_PERIOD, MINERAL_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, WorldFileError, type World } from '../core/index.ts';
+import type { ComputeMode, ComputeState, SimulationCommand, SimulationReply, SimulationSnapshot } from './simulation.ts';
+import { GpuWorld, type RoundTrip } from '../gpu-world/engine.ts';
 import { STEPS_PER_SECOND } from '../core/units.ts';
 
 // Отдельный интерфейс сохраняет проверку типов без подключения DOM + WebWorker lib вместе.
@@ -28,9 +29,56 @@ const wake = new MessageChannel();
 wake.port1.onmessage = ({ data }: MessageEvent<number>) => { if (data === scheduleId) tick(); };
 const commands: SimulationCommand[] = [];
 
+// Расчёт на видеокарте (план docs/plan/world-gpu-engine.md). Пока ожидается ответ видеокарты,
+// шаг не крутится вхолостую: Worker засыпает и продолжает, когда ответ готов.
+let computeMode: ComputeMode = 'cpu';
+let gpu: GpuWorld | null = null;
+let gpuUnavailable: string | null = null;
+let gpuStarting = false;
+let waiting: Promise<void> | null = null;
+let lastRoundTrip: RoundTrip | null = null;
+
+function computeState(): ComputeState {
+  const r = lastRoundTrip;
+  return { mode: computeMode, unavailable: gpuUnavailable,
+    ...(r && computeMode === 'gpu' ? { roundTrip: { ms: r.ms, mineralMax: r.mineralMax, groundMax: r.groundMax, exact: r.exact } } : {}) };
+}
+
+function useCpu(reason: string): void {
+  computeMode = 'cpu'; gpu = null; gpuUnavailable = reason; lastRoundTrip = null;
+}
+
+function requestCompute(mode: ComputeMode): void {
+  if (mode === 'cpu') { computeMode = 'cpu'; lastRoundTrip = null; return; }
+  if (gpu?.usable) { computeMode = 'gpu'; return; }
+  if (gpuStarting) return;
+  gpuStarting = true;
+  GpuWorld.create().then((result) => {
+    if (typeof result === 'string') useCpu(result);
+    else { gpu = result; gpuUnavailable = null; computeMode = 'gpu'; }
+  }, (error) => useCpu(`видеокарта не запустилась: ${String(error)}`)).finally(() => {
+    gpuStarting = false;
+    publish(false, true);
+  });
+}
+
+/** Этап 1 плана: мир считает CPU, после обновления минерала состояние проходит видеокарту туда и обратно. */
+function* gpuExchange(next: World): Generator<void, void, void> {
+  if (!gpu) return;
+  if (!gpu.usable) { useCpu('устройство видеокарты потеряно'); return; }
+  let done = false;
+  waiting = gpu.roundTrip(next).then((r) => {
+    lastRoundTrip = r;
+    if (!r.exact) host.postMessage({ type: 'error', epoch, problems: ['Видеокарта: суммы долей после обмена не совпали — расчёт возвращён на процессор'] });
+    if (!r.exact) useCpu('суммы долей после обмена не совпали');
+  }, (error) => useCpu(`ошибка видеокарты: ${String(error)}`)).finally(() => { done = true; waiting = null; });
+  while (!done) yield;
+}
+
 /** Снимок включает готовые узлы поля: publish никогда не запускает решатель. */
 function* calculateStep(next: World): Generator<void, void, void> {
   yield* stepWorldTask(next);
+  if (computeMode === 'gpu' && next.step % MINERAL_PERIOD === 0) yield* gpuExchange(next);
   const key = `${next.viscosity.version}:${Math.floor(next.step / DRIFT_PERIOD)}`;
   if (key !== preparedDriftKey) {
     yield* next.drift.nodesTask(next.step);
@@ -61,7 +109,7 @@ function publish(initial = false, force = false): void {
     ...(showProcesses ? { processes: mineralProcesses(world.mineral) } : {}),
     ...(mineralChanged ? { ground: takeGroundChanges(world.mineral) } : {}),
     exchanges: mineralExchanges(world.mineral), step: world.step, light: world.light,
-    ...(drift ? { drift: { a: drift.a, b: drift.b } } : {}), rate: paused ? 0 : rate, behind,
+    ...(drift ? { drift: { a: drift.a, b: drift.b } } : {}), rate: paused ? 0 : rate, behind, compute: computeState(),
   });
   const buffers = new Set<ArrayBuffer>();
   const visit = (value: unknown): void => {
@@ -106,7 +154,9 @@ function advance(): void {
   let n = 0;
   while (n < want || calculation) {
     calculation ??= calculateStep(world);
-    if (calculation.next().done) {
+    const finished = calculation.next().done;
+    if (waiting) break;
+    if (finished) {
       calculation = null; n++;
       // Выйти на готовом состоянии, прежде чем начать следующее тяжёлое обновление.
       if (performance.now() - lastSnapshot >= SNAPSHOT_MS) break;
@@ -125,6 +175,7 @@ function advance(): void {
     while (!calculation && commands.length) handleCommand(commands.shift()!);
     if (performance.now() - lastSnapshot >= SNAPSHOT_MS) publish();
   }
+  if (waiting) { clearTimeout(timer); const id = ++scheduleId; waiting.then(() => { if (id === scheduleId) tick(); }); return; }
   schedule(calculation || carry >= 1 ? 0 : Math.max(1, Math.min(16, (1 - carry) * 1000 / (BASE_RATE * speed))));
 }
 
@@ -183,6 +234,10 @@ function handleCommand(command: SimulationCommand): void {
         break;
       case 'processes':
         showProcesses = command.enabled;
+        publish(false, true);
+        break;
+      case 'compute':
+        requestCompute(command.mode);
         publish(false, true);
         break;
       case 'ack':

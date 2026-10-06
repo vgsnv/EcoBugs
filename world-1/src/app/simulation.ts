@@ -10,7 +10,20 @@ export type SimulationCommand =
   /** Новые законы живого мира; параметры генератора в них не учитываются. */
   | { type: 'laws'; epoch: number; params: WorldParams }
   | { type: 'ack'; epoch: number }
-  | { type: 'processes'; epoch: number; enabled: boolean };
+  | { type: 'processes'; epoch: number; enabled: boolean }
+  /** Где считается неживой мир (план docs/plan/world-gpu-engine.md). */
+  | { type: 'compute'; epoch: number; mode: ComputeMode };
+
+export type ComputeMode = 'cpu' | 'gpu';
+
+/** Состояние расчёта для показа: режим, доступность видеокарты, сверка последнего обмена. */
+export interface ComputeState {
+  mode: ComputeMode;
+  /** null — видеокарта ещё не проверялась; строка — почему недоступна. */
+  unavailable: string | null;
+  /** Последняя загрузка → снимок: время, мс; наибольшее отличие в клетке; суммы долей равны. */
+  roundTrip?: { ms: number; mineralMax: number; groundMax: number; exact: boolean };
+}
 
 type MineralSnapshot = Omit<MineralState, 'blocked' | 'nearWall' | 'region'>;
 type TerrainSnapshot = Omit<TerrainState, 'applied'> & { applied?: Float32Array };
@@ -29,6 +42,7 @@ export type SimulationSnapshot = {
   exchanges: MineralExchanges;
   rate: number;
   behind: boolean;
+  compute: ComputeState;
 } & ({
   initial: Pick<World, 'dish' | 'params' | 'light' | 'partitions'>;
   mineral: MineralState;
