@@ -9,6 +9,7 @@
  * обратно в JS точен, а сложение долей на видеокарте сохраняет сумму точно.
  */
 import { groundTotal, mineralInDeposits, mineralInEruptions, mineralInMedium, type World } from '../core/index.ts';
+import { GpuTransport } from './transport.ts';
 
 /** Запас 2^4 на рост сумм (подвижки меняют грунт) и на округление. */
 const HEADROOM = 16;
@@ -76,6 +77,10 @@ export class GpuWorld {
   ground!: GPUBuffer;
   private staging: Uint32Array<ArrayBuffer>[] = [];
   private lost = false;
+  private transportStage: GpuTransport | null = null;
+
+  /** Этап 2: перенос минерала. */
+  get transport(): GpuTransport { return this.transportStage ??= new GpuTransport(this.device); }
 
   private constructor(device: GPUDevice) {
     this.device = device;

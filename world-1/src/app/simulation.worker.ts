@@ -1,7 +1,7 @@
 /** Мир считает шаги независимо от кадров; показ получает не больше 20 снимков/с. */
-import { createWorld, mineralExchanges, mineralProcesses, takeGroundChanges, DRIFT_PERIOD, MINERAL_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, WorldFileError, type World } from '../core/index.ts';
+import { createWorld, mineralExchanges, mineralProcesses, takeGroundChanges, DRIFT_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, transportRange, WorldFileError, type MineralAccelerator, type World } from '../core/index.ts';
 import type { ComputeMode, ComputeState, SimulationCommand, SimulationReply, SimulationSnapshot } from './simulation.ts';
-import { GpuWorld, type RoundTrip } from '../gpu-world/engine.ts';
+import { GpuWorld } from '../gpu-world/engine.ts';
 import { STEPS_PER_SECOND } from '../core/units.ts';
 
 // Отдельный интерфейс сохраняет проверку типов без подключения DOM + WebWorker lib вместе.
@@ -36,20 +36,20 @@ let gpu: GpuWorld | null = null;
 let gpuUnavailable: string | null = null;
 let gpuStarting = false;
 let waiting: Promise<void> | null = null;
-let lastRoundTrip: RoundTrip | null = null;
+/** Последний перенос на видеокарте: время с ожиданием, мс; суммы долей сошлись. */
+let lastTransport: { ms: number; exact: boolean } | null = null;
 
 function computeState(): ComputeState {
-  const r = lastRoundTrip;
-  return { mode: computeMode, unavailable: gpuUnavailable,
-    ...(r && computeMode === 'gpu' ? { roundTrip: { ms: r.ms, mineralMax: r.mineralMax, groundMax: r.groundMax, exact: r.exact } } : {}) };
+  const r = lastTransport;
+  return { mode: computeMode, unavailable: gpuUnavailable, ...(r && computeMode === 'gpu' ? { transport: r } : {}) };
 }
 
 function useCpu(reason: string): void {
-  computeMode = 'cpu'; gpu = null; gpuUnavailable = reason; lastRoundTrip = null;
+  computeMode = 'cpu'; gpu = null; gpuUnavailable = reason; lastTransport = null;
 }
 
 function requestCompute(mode: ComputeMode): void {
-  if (mode === 'cpu') { computeMode = 'cpu'; lastRoundTrip = null; return; }
+  if (mode === 'cpu') { computeMode = 'cpu'; lastTransport = null; return; }
   if (gpu?.usable) { computeMode = 'gpu'; return; }
   if (gpuStarting) return;
   gpuStarting = true;
@@ -62,23 +62,34 @@ function requestCompute(mode: ComputeMode): void {
   });
 }
 
-/** Этап 1 плана: мир считает CPU, после обновления минерала состояние проходит видеокарту туда и обратно. */
-function* gpuExchange(next: World): Generator<void, void, void> {
-  if (!gpu) return;
-  if (!gpu.usable) { useCpu('устройство видеокарты потеряно'); return; }
-  let done = false;
-  waiting = gpu.roundTrip(next).then((r) => {
-    lastRoundTrip = r;
-    if (!r.exact) host.postMessage({ type: 'error', epoch, problems: ['Видеокарта: суммы долей после обмена не совпали — расчёт возвращён на процессор'] });
-    if (!r.exact) useCpu('суммы долей после обмена не совпали');
-  }, (error) => useCpu(`ошибка видеокарты: ${String(error)}`)).finally(() => { done = true; waiting = null; });
+/** Дождаться видеокарты, не крутясь вхолостую: Worker засыпает, пока ответ не готов. */
+function* awaitGpu<T>(job: Promise<T>): Generator<void, T | null, void> {
+  let done = false, result: T | null = null;
+  waiting = job.then((r) => { result = r; }, (error) => useCpu(`ошибка видеокарты: ${String(error)}`)).finally(() => { done = true; waiting = null; });
   while (!done) yield;
+  return result;
 }
+
+/** Этапы обновления минерала на видеокарте; что не перенесено — считает ядро. */
+const accelerator: MineralAccelerator = {
+  *transport(m, src, dst, holes, mobility, tvx, tvy, P) {
+    const g = gpu;
+    const run = g?.usable ? yield* awaitGpu(g.transport.run(m, src, dst, holes, mobility, tvx, tvy, P, g.mineralExponent)) : null;
+    if (run?.exact) { lastTransport = run; return; }
+    // Видеокарта не ответила или суммы не сошлись: это обновление — на CPU, дальше — CPU.
+    if (run && !run.exact) {
+      useCpu('суммы долей после переноса не совпали');
+      host.postMessage({ type: 'error', epoch, problems: ['Видеокарта: суммы долей после переноса не совпали — расчёт возвращён на процессор'] });
+    } else if (g && !g.usable) useCpu('устройство видеокарты потеряно');
+    dst.fill(0);
+    transportRange(m, src, dst, holes, mobility, tvx, tvy, P, 0, m.cols * m.rows);
+  },
+};
 
 /** Снимок включает готовые узлы поля: publish никогда не запускает решатель. */
 function* calculateStep(next: World): Generator<void, void, void> {
-  yield* stepWorldTask(next);
-  if (computeMode === 'gpu' && next.step % MINERAL_PERIOD === 0) yield* gpuExchange(next);
+  if (computeMode === 'gpu' && gpu && !gpu.attached(next)) gpu.attach(next);
+  yield* stepWorldTask(next, computeMode === 'gpu' && gpu ? accelerator : undefined);
   const key = `${next.viscosity.version}:${Math.floor(next.step / DRIFT_PERIOD)}`;
   if (key !== preparedDriftKey) {
     yield* next.drift.nodesTask(next.step);

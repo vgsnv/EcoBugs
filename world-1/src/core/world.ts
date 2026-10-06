@@ -15,7 +15,7 @@ import { Drift } from './drift.ts';
 import { MINERAL_CELL, MINERAL_PERIOD, TERRAIN_PERIOD } from './constants.ts';
 import { createTerrain, levelFromGround, rescheduleMoves, type TerrainState } from './terrain.ts';
 import { applyLevels, applyLevelsTask } from './viscosity.ts';
-import { createMineral, transparencyAt, updateMineralTask, volcanoNumbers, funnelNumbers, type MineralState } from './mineral.ts';
+import { createMineral, transparencyAt, updateMineralTask, volcanoNumbers, funnelNumbers, type MineralAccelerator, type MineralState } from './mineral.ts';
 
 export interface World {
   readonly dish: Dish;
@@ -98,11 +98,11 @@ export function stepWorld(world: World): void {
 }
 
 /** Пока задача не завершена, массивы промежуточные: их нельзя показывать или сохранять. */
-export function* stepWorldTask(world: World): Calculation {
+export function* stepWorldTask(world: World, accel?: MineralAccelerator): Calculation {
   const step = world.step + 1;
   advanceLight(world.light, step);
   if (step % MINERAL_PERIOD === 0) {
-    yield* updateMineralTask(world.mineral, world.params, world.drift, world.partitions, world.terrain, world.light, step);
+    yield* updateMineralTask(world.mineral, world.params, world.drift, world.partitions, world.terrain, world.light, step, accel);
   }
   if (step % TERRAIN_PERIOD === 0) {
     phase('смена местности');

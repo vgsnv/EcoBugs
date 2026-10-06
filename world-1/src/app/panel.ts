@@ -278,11 +278,10 @@ export class Panel {
   setCompute(state: ComputeState): void {
     const on = state.mode === 'gpu';
     if (this.computeButton.getAttribute('aria-pressed') !== String(on)) this.computeButton.setAttribute('aria-pressed', String(on));
-    const r = state.roundTrip;
-    const fmt = (x: number) => x === 0 ? '0' : x.toExponential(1);
+    const r = state.transport;
     this.computeText = on
-      ? `Расчёт: видеокарта (этап 1 — мир считает процессор, после каждого обновления минерала состояние проходит видеокарту)`
-        + (r ? `\nОбмен с видеокартой: ${r.ms.toFixed(1)} мс; отличие в клетке до ${fmt(r.mineralMax)} минерала, ${fmt(r.groundMax)} грунта; суммы долей ${r.exact ? 'точны' : 'НЕ совпали'}` : '')
+      ? `Расчёт: видеокарта — перенос минерала; остальное пока считает процессор`
+        + (r ? `\nПеренос на видеокарте: ${r.ms.toFixed(1)} мс с ожиданием; суммы долей ${r.exact ? 'точны' : 'НЕ совпали'}` : '')
       : `Расчёт: процессор${state.unavailable ? `\nВидеокарта недоступна: ${state.unavailable}` : ''}`;
     this.computeButton.title = on ? `${this.computeText}\nНажмите, чтобы считать на процессоре` : `${this.computeText}\nНажмите, чтобы считать на видеокарте`;
   }

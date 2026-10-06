@@ -500,7 +500,17 @@ function spreadRows(field: Float64Array, mobility: Float64Array, blocked: Uint8A
   }
 }
 
-export function* updateMineralTask(m: MineralState, params: WorldParams, drift: Drift, partitions: PartitionLayout, terrain: TerrainState, _light: LightMap, step: number): Calculation {
+/**
+ * Ускоритель обновления минерала: этапы, которые можно посчитать в другом месте
+ * (видеокарта, план docs/plan/world-gpu-engine.md). Ядро о нём ничего не знает:
+ * если этап есть, вызывает его вместо своего расчёта, с теми же входами и выходом.
+ */
+export interface MineralAccelerator {
+  /** Перенос: из `src` в обнулённый `dst` по суммам течений, как `transportRange` по всей сетке. */
+  transport?(m: MineralState, src: Float64Array, dst: Float64Array, holes: Uint8Array, mobility: Float64Array, tvx: Float32Array, tvy: Float32Array, P: number): Calculation;
+}
+
+export function* updateMineralTask(m: MineralState, params: WorldParams, drift: Drift, partitions: PartitionLayout, terrain: TerrainState, _light: LightMap, step: number, accel?: MineralAccelerator): Calculation {
   const { cols, rows, cell, blocked } = m;
   const P = MINERAL_PERIOD;
   const tMid = step - P / 2;
@@ -559,9 +569,12 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   phase('перенос');
   // 1. Снос: перенос с сохранением количества — по линиям суммы течений
   // шажками не длиннее клетки (быстрое течение не перепрыгивает острова).
-  for (let first = 0; first < n; first += 256) {
-    yield;
-    transportRange(m, src, dst, holes, mobility, tvx, tvy, P, first, Math.min(n, first + 256));
+  if (accel?.transport) yield* accel.transport(m, src, dst, holes, mobility, tvx, tvy, P);
+  else {
+    for (let first = 0; first < n; first += 256) {
+      yield;
+      transportRange(m, src, dst, holes, mobility, tvx, tvy, P, first, Math.min(n, first + 256));
+    }
   }
 
   phase('растекание');
