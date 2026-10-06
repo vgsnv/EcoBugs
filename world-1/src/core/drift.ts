@@ -45,7 +45,7 @@ interface Sources {
  * сверху и снизу (клетка k хранится в k + cols), чтобы соседи читались без
  * проверок: у краёв и преград проводимость грани — 0.
  */
-interface Level {
+export interface Level {
   readonly cols: number;
   readonly rows: number;
   readonly east: Float64Array;
@@ -246,7 +246,8 @@ function* solve(fine: Level, source: Float64Array): Calculation<Float64Array> {
   let z = yield* precondition();
   d.set(z);
   let rz = dot(r, z);
-  for (let it = 0; it < DRIFT_MAX_ITERATIONS && Math.sqrt(dot(r, r)) > stop; it++) {
+  let it = 0;
+  for (; it < DRIFT_MAX_ITERATIONS && Math.sqrt(dot(r, r)) > stop; it++) {
     apply(fine, d, q);
     const a = rz / dot(d, q);
     for (let i = 0; i < p.length; i++) { p[i] += a * d[i]; r[i] -= a * q[i]; }
@@ -256,6 +257,7 @@ function* solve(fine: Level, source: Float64Array): Calculation<Float64Array> {
     for (let i = 0; i < d.length; i++) d[i] = z[i] + beta * d[i];
     yield;
   }
+  lastIterations = it;
   return p.subarray(cols, cols + n);
 }
 
@@ -264,10 +266,44 @@ function* solve(fine: Level, source: Float64Array): Calculation<Float64Array> {
  * невязке (скорость течений отличается от точного решения меньше чем на 0,5%)
  * и предел шагов на случай, если сходимость не наступит.
  */
-const DRIFT_COARSEST = 26;
-const DRIFT_COARSEST_SWEEPS = 40;
-const DRIFT_TOLERANCE = 0.01;
-const DRIFT_MAX_ITERATIONS = 60;
+export const DRIFT_COARSEST = 26;
+export const DRIFT_COARSEST_SWEEPS = 40;
+export const DRIFT_TOLERANCE = 0.01;
+export const DRIFT_MAX_ITERATIONS = 60;
+let lastIterations = 0;
+
+/** Система давления течений: уровень с гранями, источник и увлечение на гранях. */
+export interface DriftSystem {
+  readonly cols: number;
+  readonly rows: number;
+  readonly cell: number;
+  readonly fine: Level;
+  readonly source: Float64Array;
+  readonly fEast: Float64Array;
+  readonly fSouth: Float64Array;
+  readonly response: number;
+}
+
+/** Для замеров: система давления в шаге t (null — солнца нет). */
+export function driftSystem(world: Sources, t: number): DriftSystem | null {
+  return finishCalculation((function* () {
+    const cols = Math.ceil(world.partitions.dish.width / DRIFT_CELL), rows = Math.ceil(world.partitions.dish.height / DRIFT_CELL);
+    return yield* driftSystemTask(world, t, yield* groundOf(world, cols, rows, DRIFT_CELL));
+  })());
+}
+
+/** Для замеров: давление решателем ядра и число шагов сопряжённых градиентов. */
+export function solveDriftSystem(sys: DriftSystem): { p: Float64Array; iterations: number } {
+  const p = finishCalculation(solve(sys.fine, sys.source));
+  return { p: Float64Array.from(p), iterations: lastIterations };
+}
+
+/** Для замеров: уровни многосеточного решателя, от тонкого к самому грубому. */
+export function driftLevels(fine: Level): Level[] {
+  const levels = [fine];
+  while (levels[levels.length - 1].cols > DRIFT_COARSEST) levels.push(coarsen(levels[levels.length - 1]));
+  return levels;
+}
 
 /** Течения в шаге t. */
 export function computeDriftField(world: Sources, t: number, ground?: Ground): DriftField {
@@ -279,10 +315,39 @@ function* computeDriftFieldTask(world: Sources, t: number, ground?: Ground): Cal
   ground ??= yield* groundOf(world, cols, rows, cell);
   const vx = new Float32Array(n);
   const vy = new Float32Array(n);
+  const sys = yield* driftSystemTask(world, t, ground);
+  if (!sys) return { cols, rows, cell, vx, vy };
+  const { fine, source, fEast, fSouth, response } = sys;
+  const { east, south } = fine;
+  const { blocked } = ground;
+  const p = yield* solve(fine, source);
+  // Плотность потока в клетке — среднее потоков через её грани (давление + увлечение).
+  for (let j = 0; j < rows; j++) {
+    if ((j & 3) === 0) yield;
+    for (let i = 0; i < cols; i++) {
+      const k = j * cols + i;
+      if (blocked[k]) continue;
+      const fw = i > 0 ? east[k - 1] * (p[k - 1] - p[k] + fEast[k - 1]) : 0;
+      const fe = i < cols - 1 ? east[k] * (p[k] - p[k + 1] + fEast[k]) : 0;
+      const fn = j > 0 ? south[k - cols] * (p[k - cols] - p[k] + fSouth[k - cols]) : 0;
+      const fs = j < rows - 1 ? south[k] * (p[k] - p[k + cols] + fSouth[k]) : 0;
+      let x = response * (fw + fe) / 2, y = response * (fn + fs) / 2;
+      const v = Math.hypot(x, y);
+      if (v > DRIFT_MAX) { x *= DRIFT_MAX / v; y *= DRIFT_MAX / v; }
+      vx[k] = x;
+      vy[k] = y;
+    }
+  }
+  return { cols, rows, cell, vx, vy };
+}
+
+/** Источник давления и увлечение на гранях в шаге t; null — солнца нет, течений нет. */
+function* driftSystemTask(world: Sources, t: number, ground: Ground): Calculation<DriftSystem | null> {
+  const cell = DRIFT_CELL, cols = Math.ceil(world.partitions.dish.width / cell), rows = Math.ceil(world.partitions.dish.height / cell), n = cols * rows;
   const sun = sunAt(world.light, t);
   // Отклик среды на свет — для знатоков: множитель к обычному.
   const response = DRIFT_SPEED * world.params.driftResponse;
-  if (sun <= 0) return { cols, rows, cell, vx, vy };
+  if (sun <= 0) return null;
   // Свет места: фон + пятна; источник — отклонение от среднего по отсеку.
   const bg = lightBackground(world.light);
   const spotV = { vx: new Float32Array(n), vy: new Float32Array(n) };
@@ -333,25 +398,7 @@ function* computeDriftFieldTask(world: Sources, t: number, ground?: Ground): Cal
       source[k] = s;
     }
   }
-  const p = yield* solve(fine, source);
-  // Плотность потока в клетке — среднее потоков через её грани (давление + увлечение).
-  for (let j = 0; j < rows; j++) {
-    if ((j & 3) === 0) yield;
-    for (let i = 0; i < cols; i++) {
-      const k = j * cols + i;
-      if (blocked[k]) continue;
-      const fw = i > 0 ? east[k - 1] * (p[k - 1] - p[k] + fEast[k - 1]) : 0;
-      const fe = i < cols - 1 ? east[k] * (p[k] - p[k + 1] + fEast[k]) : 0;
-      const fn = j > 0 ? south[k - cols] * (p[k - cols] - p[k] + fSouth[k - cols]) : 0;
-      const fs = j < rows - 1 ? south[k] * (p[k] - p[k + cols] + fSouth[k]) : 0;
-      let x = response * (fw + fe) / 2, y = response * (fn + fs) / 2;
-      const v = Math.hypot(x, y);
-      if (v > DRIFT_MAX) { x *= DRIFT_MAX / v; y *= DRIFT_MAX / v; }
-      vx[k] = x;
-      vy[k] = y;
-    }
-  }
-  return { cols, rows, cell, vx, vy };
+  return { cols, rows, cell, fine, source, fEast, fSouth, response };
 }
 
 /**
