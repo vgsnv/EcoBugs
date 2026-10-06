@@ -6,8 +6,8 @@
  * добавляют сюда сравнения своих этапов обновления минерала.
  */
 import {
-  createWorld, groundTotal, makeParams, mediumTask, mineralInDeposits, mineralInMedium, MINERAL_PERIOD, runoffTask, stepWorld, stepWorldTask,
-  type MediumStage, type MineralAccelerator, type RunoffStage, type TerrainState, type World,
+  createWorld, groundTotal, makeParams, mineralInDeposits, mineralInMedium, MINERAL_PERIOD, stepWorld, stepWorldTask, surfaceTask,
+  type MineralAccelerator, type SurfaceStage, type TerrainState, type World,
 } from '../core/index.ts';
 import { finishCalculation, type Calculation } from '../core/task.ts';
 import { GpuWorld, mineralTotal } from './engine.ts';
@@ -20,24 +20,18 @@ const steps = (q.get('steps') ?? '0,20000,50000').split(',').map(Number);
 const results: { stage: number; seed: number; step: number; ok: boolean }[] = [];
 
 const copyTerrain = (t: TerrainState): TerrainState => ({ ...t, ground: Float64Array.from(t.ground), deposits: Float64Array.from(t.deposits) });
-/** Вход и выход этапов на CPU — снятые «шпионом» на месте ускорителя во время настоящего шага ядра. */
-interface Captured {
-  medium: { input: MediumStage; dst: Float64Array; deposits: Float64Array };
-  runoff: { input: RunoffStage; out: Float64Array };
-}
+/** Вход и выход этапа «поверхность» на CPU — снятые «шпионом» на месте ускорителя во время настоящего шага ядра. */
+interface Captured { input: SurfaceStage; out: Float64Array; deposits: Float64Array; ground: Float64Array; lift: Float32Array }
 function* spy(world: World, into: Partial<Captured>): Calculation {
   const accel: MineralAccelerator = {
-    *medium(st) {
-      const input: MediumStage = { ...st, src: Float64Array.from(st.src), dst: new Float64Array(st.dst.length), terrain: copyTerrain(st.terrain),
-        erosionOut: new Float32Array(st.erosionOut.length), settlingOut: new Float32Array(st.settlingOut.length) };
-      yield* mediumTask(st);
-      into.medium = { input, dst: Float64Array.from(st.dst), deposits: Float64Array.from(st.terrain.deposits) };
-    },
-    *runoff(st) {
-      const input: RunoffStage = { ...st, field: Float64Array.from(st.field), ground: Float64Array.from(st.ground), deposits: Float64Array.from(st.deposits), out: new Float64Array(st.out.length) };
-      const out = yield* runoffTask(st);
-      into.runoff = { input, out: Float64Array.from(out) };
-      return out;
+    *surface(st) {
+      const n = st.src.length;
+      const input: SurfaceStage = { ...st, src: Float64Array.from(st.src), dst: new Float64Array(n), out: new Float64Array(n), terrain: copyTerrain(st.terrain),
+        erosionOut: new Float32Array(n), settlingOut: new Float32Array(n), lift: new Float32Array(n), net: new Float32Array(n) };
+      const lift0 = Float32Array.from(st.lift);
+      yield* surfaceTask(st);
+      Object.assign(into, { input, out: Float64Array.from(st.out), deposits: Float64Array.from(st.terrain.deposits), ground: Float64Array.from(st.terrain.ground),
+        lift: Float32Array.from(st.lift, (v, k) => v - lift0[k]) });
     },
   };
   yield* stepWorldTask(world, accel);
@@ -67,7 +61,7 @@ async function main(): Promise<void> {
         + `суммы долей ${r.exact ? 'равны' : 'НЕ равны'}; ${r.ms.toFixed(1)} мс — ${ok ? 'да' : 'НЕТ'}`);
     }
   }
-  log('Этапы 2–3: среда (перенос, растекание, оседание и размыв) и стекание — ядро против видеокарты на одном входе');
+  log('Этапы 2–4: поверхность (перенос, растекание, оседание и размыв, грунт, стекание) — ядро против видеокарты на одном входе');
   for (const seed of seeds) {
     const world = createWorld(makeParams({ seed }));
     for (const target of steps.filter((x) => x > 0)) {
@@ -75,14 +69,14 @@ async function main(): Promise<void> {
       gpu.attach(world);
       const c: Partial<Captured> = {};
       finishCalculation(spy(world, c));
-      const md = c.medium!, ro = c.runoff!;
-      const rm = await gpu.mineral.medium(md.input, gpu.mineralExponent, gpu.groundExponent);
-      const rr = await gpu.mineral.runoff(ro.input, gpu.mineralExponent, gpu.groundExponent);
-      const dField = relDiff(md.dst, md.input.dst), dDep = relDiff(md.deposits, md.input.terrain.deposits), dRun = relDiff(ro.out, ro.input.out);
-      const ok = rm.exact && rr.exact && dField < 1e-4 && dDep < 1e-4 && dRun < 1e-4;
-      results.push({ stage: 3, seed, step: target, ok });
-      log(`  сид ${seed}, шаг ${target}: отличие от ядра — поле после среды ${(100 * dField).toFixed(5)}%, залежи ${(100 * dDep).toFixed(5)}%, поле после стекания ${(100 * dRun).toFixed(5)}%; `
-        + `суммы долей ${rm.exact && rr.exact ? 'равны' : 'НЕ равны'}; видеокарта с загрузкой и чтением: среда ${rm.ms.toFixed(1)} мс, стекание ${rr.ms.toFixed(1)} мс — ${ok ? 'да' : 'НЕТ'}`);
+      const cap = c as Captured, inp = cap.input;
+      const r = await gpu.mineral.surface(inp, gpu.mineralExponent, gpu.groundExponent);
+      const dField = relDiff(cap.out, inp.out), dDep = relDiff(cap.deposits, inp.terrain.deposits), dGround = relDiff(cap.ground, inp.terrain.ground);
+      const dLift = relDiff(cap.lift, inp.lift);
+      const ok = r.exact && dField < 1e-4 && dDep < 1e-4 && dGround < 1e-6 && dLift < 1e-3;
+      results.push({ stage: 4, seed, step: target, ok });
+      log(`  сид ${seed}, шаг ${target}: отличие от ядра — поле ${(100 * dField).toFixed(5)}%, залежи ${(100 * dDep).toFixed(5)}%, грунт ${(100 * dGround).toFixed(7)}%, подъём грунта течением ${(100 * dLift).toFixed(3)}%; `
+        + `суммы долей ${r.exact ? 'равны' : 'НЕ равны'}; видеокарта с загрузкой и чтением ${r.ms.toFixed(1)} мс — ${ok ? 'да' : 'НЕТ'}`);
     }
   }
   // Ход мира с ускорителем: генератор ждёт видеокарту, драйвер ждёт её обещание.
@@ -94,31 +88,31 @@ async function main(): Promise<void> {
     return value as T;
   };
   const accel: MineralAccelerator = {
-    *medium(st) { yield* wait(gpu.mineral.medium(st, gpu.mineralExponent, gpu.groundExponent)); },
-    *runoff(st) { yield* wait(gpu.mineral.runoff(st, gpu.mineralExponent, gpu.groundExponent)); return st.out; },
+    *surface(st) { yield* wait(gpu.mineral.surface(st, gpu.mineralExponent, gpu.groundExponent)); },
   };
   const stepWith = async (w: World) => {
     const task = stepWorldTask(w, accel);
     while (!task.next().done) if (pending) { await pending; pending = null; }
   };
   const updates = Number(q.get('updates') ?? 50);
-  log(`Ход мира: два одинаковых мира ещё ${updates} обновлений минерала — CPU и с этапами 2–3 на видеокарте`);
+  log(`Ход мира: два одинаковых мира ещё ${updates} обновлений минерала — CPU и с поверхностью на видеокарте`);
   for (const seed of seeds) {
     const a = createWorld(makeParams({ seed })), b = createWorld(makeParams({ seed }));
     const start = steps[1] ?? 20000;
     while (a.step < start) { stepWorld(a); stepWorld(b); }
     gpu.attach(b);
-    const before = mineralTotal(a);
+    const before = mineralTotal(a), groundA0 = groundTotal(a.terrain);
     const t0 = performance.now();
     while (a.step < start + updates * MINERAL_PERIOD) stepWorld(a);
     const cpuMs = performance.now() - t0, t1 = performance.now();
     while (b.step < start + updates * MINERAL_PERIOD) await stepWith(b);
     const gpuMs = performance.now() - t1;
     const ta = mineralTotal(a), tb = mineralTotal(b);
-    const ok = Math.abs(tb - before) < 1e-3 * updates * 1e-3 + 1e-6 * before;
-    results.push({ stage: 3, seed, step: start, ok });
+    const ok = Math.abs(tb - before) < 1e-3 * updates * 1e-3 + 1e-6 * before && Math.abs(groundTotal(b.terrain) - groundTotal(a.terrain)) < 1e-3;
+    results.push({ stage: 4, seed, step: start, ok });
     log(`  сид ${seed}: минерал всего ${before.toFixed(6)} → CPU ${ta.toFixed(6)}, видеокарта ${tb.toFixed(6)}; `
       + `в среде CPU ${mineralInMedium(a.mineral).toFixed(1)} / видеокарта ${mineralInMedium(b.mineral).toFixed(1)}, в залежах ${mineralInDeposits(a.terrain).toFixed(1)} / ${mineralInDeposits(b.terrain).toFixed(1)}; `
+      + `грунт ${groundA0.toFixed(3)} → CPU ${groundTotal(a.terrain).toFixed(3)}, видеокарта ${groundTotal(b.terrain).toFixed(3)}; `
       + `время ${(cpuMs / 1000).toFixed(1)} / ${(gpuMs / 1000).toFixed(1)} с — ${ok ? 'да' : 'НЕТ'}`);
   }
   log(results.every((r) => r.ok) ? 'Всё сходится.' : 'ЕСТЬ РАСХОЖДЕНИЯ.');

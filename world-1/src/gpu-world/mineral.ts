@@ -10,7 +10,7 @@
  * раскладки — последнему), поэтому сумма долей сохраняется точно. Сложение из
  * многих потоков — `atomicAdd` младших слов и перенос в старшие.
  */
-import { MINERAL_LAYER, MINERAL_MOBILITY, RUNOFF, TRANSPORT_SUBSTEPS, type MediumStage, type RunoffStage } from '../core/index.ts';
+import { MINERAL_LAYER, MINERAL_MOBILITY, RUNOFF, SAND_RATE, SAND_TOP, SAND_UNDER, SLUMP_RATE, TRANSPORT_SUBSTEPS, type SurfaceStage } from '../core/index.ts';
 import { fromShares, shareSum, toShares } from './engine.ts';
 
 const WGSL = /* wgsl */`
@@ -19,7 +19,8 @@ struct U {
   cell: f32, P: f32, layerK: f32, scaleM: f32,
   scaleG: f32, spread: f32, sMax: f32, settle: f32,
   dissolve: f32, perLvl: f32, erosionOver: f32, erosion: f32,
-  sinkSettle: f32, runoffK: f32, p0: f32, p1: f32,
+  sinkSettle: f32, runoffK: f32, sandOver: f32, sandK: f32,
+  sandTop: f32, sandUnder: f32, slumpRate: f32, slope: f32,
 };
 @group(0) @binding(0) var<uniform> U0: U;
 @group(0) @binding(1) var<storage, read> F: array<vec2u>;            // поле на входе этапа
@@ -32,6 +33,8 @@ struct U {
 @group(0) @binding(8) var<storage, read> ground: array<vec2u>;
 @group(0) @binding(9) var<storage, read_write> erosionOut: array<f32>;
 @group(0) @binding(10) var<storage, read_write> settlingOut: array<f32>;
+@group(0) @binding(11) var<storage, read_write> G: array<atomic<u32>>;  // грунт после переноса и осыпания
+@group(0) @binding(12) var<storage, read_write> liftOut: array<f32>;
 
 // ---- 64-битные целые: (младшие, старшие), со знаком в старших ----
 fn add64(a: vec2u, b: vec2u) -> vec2u { let lo = a.x + b.x; return vec2u(lo, a.y + b.y + select(0u, 1u, lo < a.x)); }
@@ -54,9 +57,12 @@ fn atomicAdd64(buf: u32, k: u32, v: vec2u) {
   if (buf == 0u) {
     let old = atomicAdd(&A[2u * k], v.x);
     atomicAdd(&A[2u * k + 1u], v.y + select(0u, 1u, old + v.x < old));
-  } else {
+  } else if (buf == 1u) {
     let old = atomicAdd(&Bm[2u * k], v.x);
     atomicAdd(&Bm[2u * k + 1u], v.y + select(0u, 1u, old + v.x < old));
+  } else {
+    let old = atomicAdd(&G[2u * k], v.x);
+    atomicAdd(&G[2u * k + 1u], v.y + select(0u, 1u, old + v.x < old));
   }
 }
 fn loadB(k: u32) -> vec2u { return vec2u(atomicLoad(&Bm[2u * k]), atomicLoad(&Bm[2u * k + 1u])); }
@@ -174,6 +180,57 @@ fn pairFlow(k: u32, n: u32) {
   settlingOut[k] = toF(settled) / U0.scaleM;
 }
 
+// ---- перенос грунта течением (sandRows): G = снимок + перенос, по снимку ground и залежам после оседания ----
+fn level(n: u32) -> f32 { return (toFs(ground[n]) / U0.scaleG + toFs(dep[n]) / U0.scaleM) / U0.perLvl; }
+fn open(n: u32) -> bool { return !blocked(n) && level(n) < U0.sandTop; }
+@compute @workgroup_size(64) fn sand(@builtin(global_invocation_id) g: vec3u) {
+  let k = g.x; if (k >= U0.n || !(U0.sMax > 0.0)) { return; }
+  let gr = ground[k];
+  if (blocked(k) || isNeg(gr) || isZero(gr) || toFs(dep[k]) / U0.scaleM > U0.sandUnder * U0.perLvl || !open(k)) { return; }
+  let f = flow[k];
+  let over = (length(f) - U0.sandOver) / U0.sMax;
+  if (!(over > 0.0)) { return; }
+  let ax = abs(f.x); let ay = abs(f.y); let sum = ax + ay;
+  if (sum == 0.0) { return; }
+  let cols = U0.cols; let rows = U0.rows; let i = k % cols; let j = k / cols;
+  let amount = min64(gr, fromF(U0.sandK * over * U0.scaleG));
+  let af = toF(amount);
+  var left = amount;
+  var moved = vec2u(0u);
+  // Цели по течению; закрытая цель — её часть остаётся дома.
+  var tx = -1; if (f.x > 0.0 && i + 1u < cols) { tx = i32(k + 1u); } if (f.x <= 0.0 && i > 0u) { tx = i32(k - 1u); }
+  var ty = -1; if (f.y > 0.0 && j + 1u < rows) { ty = i32(k + cols); } if (f.y <= 0.0 && j > 0u) { ty = i32(k - cols); }
+  if (tx >= 0 && ax > 0.0 && open(u32(tx))) { let p = part(left, af, ax / sum); left = sub64(left, p); moved = add64(moved, p); atomicAdd64(2u, u32(tx), p); }
+  if (ty >= 0 && ay > 0.0 && open(u32(ty))) { let p = part(left, af, ay / sum); left = sub64(left, p); moved = add64(moved, p); atomicAdd64(2u, u32(ty), p); }
+  atomicAdd64(2u, k, neg64(moved));
+  liftOut[k] = toF(moved) / U0.scaleG;
+}
+
+// ---- осыпание (slumpRows): G = снимок + сползание к соседям ниже устойчивого склона ----
+fn slopeDrop(hk: f32, ok: bool, n: u32) -> f32 { if (!ok || blocked(n)) { return 0.0; } return max(0.0, hk - level(n) - U0.slope); }
+@compute @workgroup_size(64) fn slump(@builtin(global_invocation_id) g: vec3u) {
+  let k = g.x; if (k >= U0.n) { return; }
+  let gr = ground[k];
+  if (blocked(k) || isNeg(gr) || isZero(gr)) { return; }
+  let cols = U0.cols; let rows = U0.rows; let i = k % cols; let j = k / cols;
+  let hk = level(k);
+  let dl = slopeDrop(hk, i > 0u, k - 1u); let dr = slopeDrop(hk, i < cols - 1u, k + 1u);
+  let du = slopeDrop(hk, j > 0u, k - cols); let dd = slopeDrop(hk, j < rows - 1u, k + cols);
+  let total = dl + dr + du + dd;
+  if (total == 0.0) { return; }
+  let moved = min64(gr, fromF(min(U0.slumpRate, 0.25) * total * U0.perLvl * U0.scaleG));
+  if (isZero(moved)) { return; }
+  atomicAdd64(2u, k, neg64(moved));
+  let mf = toF(moved);
+  var left = moved;
+  var last = 0u;
+  if (dl > 0.0) { last = 1u; } if (dr > 0.0) { last = 2u; } if (du > 0.0) { last = 3u; } if (dd > 0.0) { last = 4u; }
+  if (dl > 0.0) { let p = select(part(left, mf, dl / total), left, last == 1u); left = sub64(left, p); atomicAdd64(2u, k - 1u, p); }
+  if (dr > 0.0) { let p = select(part(left, mf, dr / total), left, last == 2u); left = sub64(left, p); atomicAdd64(2u, k + 1u, p); }
+  if (du > 0.0) { let p = select(part(left, mf, du / total), left, last == 3u); left = sub64(left, p); atomicAdd64(2u, k - cols, p); }
+  if (dd > 0.0) { atomicAdd64(2u, k + cols, left); }
+}
+
 // ---- стекание (runoff): A = F + сток к соседям ниже ----
 fn surf(n: u32) -> f32 { return (toFs(ground[n]) / U0.scaleG + (toFs(dep[n]) + toFs(F[n])) / U0.scaleM) / U0.perLvl; }
 fn drop(h: f32, ok: bool, n: u32) -> f32 { if (!ok || blocked(n)) { return 0.0; } return max(0.0, h - surf(n)); }
@@ -212,20 +269,22 @@ export interface StageRun {
   exact: boolean;
 }
 
-type Name = 'transport' | 'spreadPairs' | 'settle' | 'runoff';
+type Name = 'transport' | 'spreadPairs' | 'settle' | 'sand' | 'slump' | 'runoff';
 const USED: Record<Name, number[]> = {
-  transport: [0, 1, 2, 3, 4, 5, 6],
-  spreadPairs: [0, 2, 4, 5, 6],
+  transport: [0, 1, 2, 3, 4, 5, 6, 11],
+  spreadPairs: [0, 2, 4, 5, 6, 11],
   settle: [0, 3, 5, 6, 7, 8, 9, 10],
-  runoff: [0, 1, 2, 5, 6, 7, 8],
+  sand: [0, 2, 3, 5, 6, 7, 8, 11, 12],
+  slump: [0, 2, 5, 6, 7, 8, 11],
+  runoff: [0, 1, 2, 5, 6, 7, 8, 11],
 };
 
-/** Минерал на видеокарте: «среда» и «стекание»; вход — из CPU-мира, выход — обратно. */
+/** Поверхность мира на видеокарте: среда, грунт, стекание за одну отправку; вход — из CPU-мира, выход — обратно. */
 export class GpuMineral {
   private readonly device: GPUDevice;
   private readonly pipes: Record<Name, GPUComputePipeline>;
   private cells = 0;
-  private b: Record<'uniform' | 'F' | 'A' | 'flow' | 'mob' | 'mask' | 'B' | 'dep' | 'ground' | 'erosion' | 'settling' | 'read', GPUBuffer> | null = null;
+  private b: Record<'uniform' | 'F' | 'A' | 'flow' | 'mob' | 'mask' | 'B' | 'dep' | 'ground' | 'erosion' | 'settling' | 'G' | 'lift' | 'read', GPUBuffer> | null = null;
   private groups: Record<Name, GPUBindGroup> | null = null;
   private fShares = new Uint32Array(0);
   private dShares = new Uint32Array(0);
@@ -246,12 +305,13 @@ export class GpuMineral {
     const d = this.device, S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const make = (size: number, usage = S) => d.createBuffer({ size: Math.ceil(size / 16) * 16, usage });
     this.b = {
-      uniform: make(80, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST),
+      uniform: make(96, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST),
       F: make(n * 8), A: make(n * 8), flow: make(n * 8), mob: make(n * 4), mask: make(n * 4), B: make(n * 8),
-      dep: make(n * 8), ground: make(n * 8), erosion: make(n * 4), settling: make(n * 4),
-      read: make(n * 24, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
+      dep: make(n * 8), ground: make(n * 8), erosion: make(n * 4), settling: make(n * 4), G: make(n * 8), lift: make(n * 4),
+      read: make(n * 36, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
     };
-    const order = [this.b.uniform, this.b.F, this.b.A, this.b.flow, this.b.mob, this.b.mask, this.b.B, this.b.dep, this.b.ground, this.b.erosion, this.b.settling];
+    const b = this.b;
+    const order = [b.uniform, b.F, b.A, b.flow, b.mob, b.mask, b.B, b.dep, b.ground, b.erosion, b.settling, b.G, b.lift];
     this.groups = Object.fromEntries((Object.keys(USED) as Name[]).map((e) => [e, d.createBindGroup({
       layout: this.pipes[e].getBindGroupLayout(0), entries: USED[e].map((binding) => ({ binding, resource: { buffer: order[binding] } })),
     })])) as Record<Name, GPUBindGroup>;
@@ -260,86 +320,73 @@ export class GpuMineral {
     this.cells = n;
   }
 
-  private uniform(cols: number, rows: number, cell: number, mExp: number, gExp: number, s: Partial<MediumStage> & { P: number; perLvl: number }): void {
-    const ub = new ArrayBuffer(80), u = new Uint32Array(ub), f = new Float32Array(ub);
-    u.set([cols, rows, cols * rows, TRANSPORT_SUBSTEPS]);
-    f.set([cell, s.P, MINERAL_LAYER * MINERAL_MOBILITY * s.P * cell * cell, 2 ** mExp,
-      2 ** gExp, s.spread ?? 0, s.sMax ?? 0, s.settle ?? 0,
-      s.dissolve ?? 0, s.perLvl, s.erosionOver ?? 0, s.erosion ?? 0,
-      s.sinkSettle ?? 0, RUNOFF * s.P, 0, 0], 4);
-    this.device.queue.writeBuffer(this.b!.uniform, 0, ub);
-  }
-
   private pass(enc: GPUCommandEncoder, name: Name): void {
     const p = enc.beginComputePass();
     p.setPipeline(this.pipes[name]); p.setBindGroup(0, this.groups![name]); p.dispatchWorkgroups(Math.ceil(this.cells / 64));
     p.end();
   }
 
-  private mask(blocked: Uint8Array, holes: Uint8Array): void {
-    for (let k = 0; k < this.cells; k++) this.maskData[k] = (blocked[k] ? 1 : 0) | (holes[k] ? 2 : 0);
-    this.device.queue.writeBuffer(this.b!.mask, 0, this.maskData);
-  }
-
-  private async read(enc: GPUCommandEncoder, parts: [GPUBuffer, number][]): Promise<ArrayBuffer> {
-    let at = 0;
-    for (const [buf, size] of parts) { enc.copyBufferToBuffer(buf, 0, this.b!.read, at, size); at += size; }
-    this.device.queue.submit([enc.finish()]);
-    await this.b!.read.mapAsync(GPUMapMode.READ, 0, at);
-    const data = this.b!.read.getMappedRange(0, at).slice(0);
-    this.b!.read.unmap();
-    return data;
-  }
-
-  /** Перенос, растекание, оседание и размыв: как три этапа ядра подряд. */
-  async medium(s: MediumStage, mExp: number, gExp: number): Promise<StageRun> {
+  /** Среда, перенос и осыпание грунта, стекание — как `surfaceTask` ядра. */
+  async surface(s: SurfaceStage, mExp: number, gExp: number): Promise<StageRun> {
     const t0 = performance.now();
-    const { cols, rows, cell, blocked } = s.m, n = cols * rows;
+    const { cols, rows, cell, blocked } = s.m, n = cols * rows, n8 = n * 8;
     this.ensure(n);
     const b = this.b!, q = this.device.queue;
-    this.uniform(cols, rows, cell, mExp, gExp, s);
+    const ub = new ArrayBuffer(96), u = new Uint32Array(ub), f = new Float32Array(ub);
+    u.set([cols, rows, n, TRANSPORT_SUBSTEPS]);
+    f.set([cell, s.P, MINERAL_LAYER * MINERAL_MOBILITY * s.P * cell * cell, 2 ** mExp,
+      2 ** gExp, s.spread, s.sMax, s.settle,
+      s.dissolve, s.perLvl, s.erosionOver, s.erosion,
+      s.sinkSettle, RUNOFF * s.P, s.sandOver, SAND_RATE * s.perLvl,
+      SAND_TOP, SAND_UNDER, SLUMP_RATE, s.slope], 4);
+    q.writeBuffer(b.uniform, 0, ub);
     toShares(s.src, mExp, this.fShares); toShares(s.terrain.deposits, mExp, this.dShares); toShares(s.terrain.ground, gExp, this.gShares);
-    for (let k = 0; k < n; k++) { this.flowData[2 * k] = s.tvx[k]; this.flowData[2 * k + 1] = s.tvy[k]; this.mobData[k] = s.mobility[k]; }
+    for (let k = 0; k < n; k++) {
+      this.flowData[2 * k] = s.tvx[k]; this.flowData[2 * k + 1] = s.tvy[k]; this.mobData[k] = s.mobility[k];
+      this.maskData[k] = (blocked[k] ? 1 : 0) | (s.holes[k] ? 2 : 0);
+    }
     q.writeBuffer(b.F, 0, this.fShares); q.writeBuffer(b.dep, 0, this.dShares); q.writeBuffer(b.ground, 0, this.gShares);
-    q.writeBuffer(b.flow, 0, this.flowData); q.writeBuffer(b.mob, 0, this.mobData);
-    this.mask(blocked, s.holes);
-    const before = shareSum(this.fShares) + shareSum(this.dShares);
+    q.writeBuffer(b.flow, 0, this.flowData); q.writeBuffer(b.mob, 0, this.mobData); q.writeBuffer(b.mask, 0, this.maskData);
+    const mineralBefore = shareSum(this.fShares) + shareSum(this.dShares), groundBefore = shareSum(this.gShares);
     const t1 = performance.now();
     const enc = this.device.createCommandEncoder();
+    // Среда: перенос F → A, растекание A → B, оседание и размыв в B и залежах.
     enc.clearBuffer(b.A);
     this.pass(enc, 'transport');
-    enc.copyBufferToBuffer(b.A, 0, b.B, 0, n * 8);
+    enc.copyBufferToBuffer(b.A, 0, b.B, 0, n8);
     this.pass(enc, 'spreadPairs');
     this.pass(enc, 'settle');
-    const data = await this.read(enc, [[b.B, n * 8], [b.dep, n * 8], [b.erosion, n * 4], [b.settling, n * 4]]);
-    const t2 = performance.now();
-    const field = new Uint32Array(data, 0, n * 2), deposits = new Uint32Array(data, n * 8, n * 2);
-    fromShares(field, mExp, s.dst);
-    fromShares(deposits, mExp, s.terrain.deposits);
-    s.erosionOut.set(new Float32Array(data, n * 16, n));
-    s.settlingOut.set(new Float32Array(data, n * 20, n));
-    const t3 = performance.now();
-    return { ms: t3 - t0, prepMs: t1 - t0, gpuMs: t2 - t1, doneMs: t3 - t2, exact: shareSum(field) + shareSum(deposits) === before };
-  }
-
-  /** Стекание: как `runoff` ядра. */
-  async runoff(s: RunoffStage, mExp: number, gExp: number): Promise<StageRun> {
-    const t0 = performance.now();
-    const { cols, rows, cell, blocked } = s.m, n = cols * rows;
-    this.ensure(n);
-    const b = this.b!, q = this.device.queue;
-    this.uniform(cols, rows, cell, mExp, gExp, s);
-    toShares(s.field, mExp, this.fShares); toShares(s.deposits, mExp, this.dShares); toShares(s.ground, gExp, this.gShares);
-    q.writeBuffer(b.F, 0, this.fShares); q.writeBuffer(b.dep, 0, this.dShares); q.writeBuffer(b.ground, 0, this.gShares);
-    this.mask(blocked, s.holes);
-    const t1 = performance.now();
-    const enc = this.device.createCommandEncoder();
-    enc.copyBufferToBuffer(b.F, 0, b.A, 0, n * 8);
+    // Грунт: перенос течением по снимку ground → G, затем осыпание по новому снимку.
+    enc.clearBuffer(b.lift);
+    enc.copyBufferToBuffer(b.ground, 0, b.G, 0, n8);
+    this.pass(enc, 'sand');
+    enc.copyBufferToBuffer(b.G, 0, b.ground, 0, n8);
+    this.pass(enc, 'slump');
+    enc.copyBufferToBuffer(b.G, 0, b.ground, 0, n8);
+    // Стекание: поле после среды B → F (вход) и A (выход).
+    enc.copyBufferToBuffer(b.B, 0, b.F, 0, n8);
+    enc.copyBufferToBuffer(b.B, 0, b.A, 0, n8);
     this.pass(enc, 'runoff');
-    const out = new Uint32Array(await this.read(enc, [[b.A, n * 8]]));
+    let at = 0;
+    for (const [buf, size] of [[b.A, n8], [b.dep, n8], [b.ground, n8], [b.erosion, n * 4], [b.settling, n * 4], [b.lift, n * 4]] as const) {
+      enc.copyBufferToBuffer(buf, 0, b.read, at, size); at += size;
+    }
+    q.submit([enc.finish()]);
+    await b.read.mapAsync(GPUMapMode.READ, 0, at);
+    const data = b.read.getMappedRange(0, at).slice(0);
+    b.read.unmap();
     const t2 = performance.now();
-    fromShares(out, mExp, s.out);
+    const field = new Uint32Array(data, 0, n * 2), deposits = new Uint32Array(data, n8, n * 2), ground = new Uint32Array(data, 2 * n8, n * 2);
+    fromShares(field, mExp, s.out);
+    fromShares(deposits, mExp, s.terrain.deposits);
+    const gr = s.terrain.ground, before = Float64Array.from(gr);
+    fromShares(ground, gExp, gr);
+    const lift = new Float32Array(data, 3 * n8 + 2 * n * 4, n);
+    for (let k = 0; k < n; k++) { s.net[k] += gr[k] - before[k]; s.lift[k] += lift[k]; }
+    s.erosionOut.set(new Float32Array(data, 3 * n8, n));
+    s.settlingOut.set(new Float32Array(data, 3 * n8 + n * 4, n));
     const t3 = performance.now();
-    return { ms: t3 - t0, prepMs: t1 - t0, gpuMs: t2 - t1, doneMs: t3 - t2, exact: shareSum(out) === shareSum(this.fShares) };
+    return { ms: t3 - t0, prepMs: t1 - t0, gpuMs: t2 - t1, doneMs: t3 - t2,
+      exact: shareSum(field) + shareSum(deposits) === mineralBefore && shareSum(ground) === groundBefore };
   }
 }

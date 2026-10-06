@@ -22,7 +22,7 @@ export interface ComputeState {
   /** null — видеокарта ещё не проверялась; строка — почему недоступна. */
   unavailable: string | null;
   /** Последние этапы на видеокарте: время с ожиданием, мс (суммы долей сошлись — иначе режим уже процессор). */
-  stages?: { medium: number; runoff: number; parts: number[] };
+  stages?: { surface: number; parts: number[] };
 }
 
 type MineralSnapshot = Omit<MineralState, 'blocked' | 'nearWall' | 'region'>;

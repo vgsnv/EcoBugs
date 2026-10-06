@@ -390,7 +390,7 @@ function settleRange(m: MineralState, erosionOver: number, terrain: TerrainState
  * копятся в `out`. Не кладёт в перегородки, за край, в клетки выше верха
  * отмели; под залежами толще SAND_UNDER грунт не трогает (сначала размываются они).
  */
-function sandRows(m: MineralState, params: WorldParams, terrain: TerrainState, work: MineralWork, sMax: number, perLvl: number, out: Float64Array, first: number, last: number): void {
+function sandRows(m: MineralState, sandOver: number, terrain: TerrainState, work: MineralWork, sMax: number, perLvl: number, out: Float64Array, first: number, last: number): void {
   const { cols, rows, blocked } = m;
   const { speed, flowX, flowY } = work;
   const lift = work.groundChanges.lift;
@@ -401,7 +401,7 @@ function sandRows(m: MineralState, params: WorldParams, terrain: TerrainState, w
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
       if (blocked[k] || gr[k] <= 0 || dep[k] > SAND_UNDER * perLvl || !open(k)) continue;
-      const over = (speed[k] - groundThreshold(params)) / sMax;
+      const over = (speed[k] - sandOver) / sMax;
       if (!(over > 0)) continue;
       const vx = flowX[k], vy = flowY[k];
       const ax = Math.abs(vx), ay = Math.abs(vy), sum = ax + ay;
@@ -423,11 +423,11 @@ const groundThreshold = (params: WorldParams) => params.groundThreshold / STEPS_
  * осыпается — грунт сползает к нижним соседям, SLUMP_RATE от превышения,
  * поровну по превышению; ровная середина суши стоит. От снимка, в `out`.
  */
-function slumpRows(m: MineralState, params: WorldParams, terrain: TerrainState, perLvl: number, out: Float64Array, first: number, last: number): void {
+function slumpRows(m: MineralState, slope: number, terrain: TerrainState, perLvl: number, out: Float64Array, first: number, last: number): void {
   const { cols, rows, blocked } = m;
   const gr = terrain.ground, dep = terrain.deposits;
   const h = (n: number) => (gr[n] + dep[n]) / perLvl;
-  const rate = SLUMP_RATE, slope = params.slopeLimit * m.cell / 10;
+  const rate = SLUMP_RATE;
   for (let j = first; j < last; j++) {
     for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
@@ -507,13 +507,22 @@ function spreadRows(field: Float64Array, mobility: Float64Array, blocked: Uint8A
  */
 export interface MineralAccelerator {
   /**
-   * Среда за обновление: перенос из `src` в обнулённый `dst` (как `transportRange`),
-   * растекание `dst` (как `spread`), оседание и размыв (как `settleRange`): меняет
-   * `dst` и `terrain.deposits`, пишет `erosion` и `settling` для показа.
+   * Поверхность за обновление — как `surfaceTask`: среда (перенос из `src` в
+   * обнулённый `dst`, растекание, оседание и размыв), перенос и осыпание грунта,
+   * стекание в `out`. Меняет `terrain.deposits` и `terrain.ground`, пишет показ:
+   * `erosionOut`, `settlingOut`, прибавляет к `lift` и `net`.
    */
-  medium?(a: MediumStage): Calculation;
-  /** Стекание: из `field` в `out` (как `runoff`); возвращает `out`. */
-  runoff?(a: RunoffStage): Calculation<Float64Array>;
+  surface?(a: SurfaceStage): Calculation;
+}
+
+/** Вход этапа «поверхность»: среда, грунт, стекание. */
+export interface SurfaceStage extends MediumStage {
+  /** Порог скорости срыва грунта (за шаг); устойчивый склон, уровней на клетку. */
+  sandOver: number; slope: number;
+  /** Показ изменений грунта: подъём течением и итог — копятся. */
+  lift: Float32Array; net: Float32Array;
+  /** Поле после стекания. */
+  out: Float64Array;
 }
 
 /** Вход этапа «среда»: всё, что ядро передаёт своим функциям переноса, растекания и оседания. */
@@ -556,6 +565,39 @@ export function* mediumTask(s: MediumStage): Calculation {
     yield;
     settleRange(m, s.erosionOver, terrain, work, dst, s.sMax, s.settle, s.dissolve, s.perLvl, P, first, Math.min(n, first + 512));
   }
+}
+
+/** Перенос и осыпание грунта на CPU: меняет `terrain.ground`, копит показ в `lift` и `net`. */
+export function* groundTask(s: SurfaceStage): Calculation {
+  const { m, terrain, sMax, perLvl } = s;
+  const { cols, rows } = m, n = cols * rows;
+  const work = workspace(m), gr = terrain.ground;
+  phase('перенос и осыпание грунта');
+  // Грунт: течение переносит его вниз по течению, крутые склоны осыпаются.
+  // Каждый проход — от снимка, с сохранением количества.
+  const sand = work.ground;
+  sand.set(gr);
+  for (let first = 0; first < rows; first += 8) {
+    yield;
+    sandRows(m, s.sandOver, terrain, work, sMax, perLvl, sand, first, Math.min(rows, first + 8));
+  }
+  for (let k = 0; k < n; k++) s.net[k] += sand[k] - gr[k];
+  gr.set(sand);
+  for (let first = 0; first < rows; first += 8) {
+    yield;
+    slumpRows(m, s.slope, terrain, perLvl, sand, first, Math.min(rows, first + 8));
+  }
+  for (let k = 0; k < n; k++) s.net[k] += sand[k] - gr[k];
+  gr.set(sand);
+}
+
+/** Поверхность на CPU: среда, грунт, стекание в `out` (запасной путь ускорителя — тот же). */
+export function* surfaceTask(s: SurfaceStage): Calculation {
+  yield* mediumTask(s);
+  yield* groundTask(s);
+  phase('стекание');
+  // Стекание: растворённый минерал стекает к соседям ниже — с суши к воде.
+  yield* runoffTask({ m: s.m, field: s.dst, ground: s.terrain.ground, deposits: s.terrain.deposits, holes: s.holes, perLvl: s.perLvl, P: s.P, out: s.out });
 }
 
 /** Стекание на CPU (запасной путь ускорителя — тот же). */
@@ -626,39 +668,16 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   const dissolve = (1 - (1 - DEPOSIT_DISSOLVE) ** P);
   const area = cell * cell;
   const perLvl = GROUND_PER_LEVEL * area;
-  const dep = terrain.deposits;
   const gr = terrain.ground;
-  const stage: MediumStage = { m, terrain, src, dst, holes, mobility, tvx, tvy, P, spread: MINERAL_SPREAD, sMax, settle, dissolve, perLvl,
+  const stage: SurfaceStage = { m, terrain, src, dst, holes, mobility, tvx, tvy, P, spread: MINERAL_SPREAD, sMax, settle, dissolve, perLvl,
     erosionOver: EROSION_RATIO * groundThreshold(params), erosion: EROSION * P * area, sinkSettle: MINERAL_SINK_SETTLE * P,
-    erosionOut: processes.erosion, settlingOut: processes.settling };
-  if (accel?.medium) { phase('перенос'); yield* accel.medium(stage); }
-  else yield* mediumTask(stage);
-  m.field = dst;
-
-  phase('перенос и осыпание грунта');
-  // Грунт: течение переносит его вниз по течению, крутые склоны осыпаются.
-  // Каждый проход — от снимка, с сохранением количества.
-  const sand = work.ground;
-  sand.set(gr);
-  for (let first = 0; first < rows; first += 8) {
-    yield;
-    sandRows(m, params, terrain, work, sMax, perLvl, sand, first, Math.min(rows, first + 8));
-  }
-  const shown = work.groundChanges;
-  for (let k = 0; k < n; k++) shown.net[k] += sand[k] - gr[k];
-  gr.set(sand);
-  for (let first = 0; first < rows; first += 8) {
-    yield;
-    slumpRows(m, params, terrain, perLvl, sand, first, Math.min(rows, first + 8));
-  }
-  for (let k = 0; k < n; k++) shown.net[k] += sand[k] - gr[k];
-  shown.steps += P;
-  gr.set(sand);
-
-  phase('стекание');
-  // Стекание: растворённый минерал стекает к соседям ниже — с суши к воде.
-  const runoffStage: RunoffStage = { m, field: m.field, ground: gr, deposits: dep, holes, perLvl, P, out: work.runoff };
-  m.field = accel?.runoff ? yield* accel.runoff(runoffStage) : yield* runoffTask(runoffStage);
+    erosionOut: processes.erosion, settlingOut: processes.settling,
+    sandOver: groundThreshold(params), slope: params.slopeLimit * m.cell / 10,
+    lift: work.groundChanges.lift, net: work.groundChanges.net, out: work.runoff };
+  if (accel?.surface) { phase('перенос'); yield* accel.surface(stage); }
+  else yield* surfaceTask(stage);
+  m.field = work.runoff;
+  work.groundChanges.steps += P;
 
   phase('воронки, подвижки, извержения');
   // Воронки: что дошло до отверстия, уходит в недра; залежи в отверстии поднимаются (см. sinkFunnel).

@@ -1,5 +1,5 @@
 /** Мир считает шаги независимо от кадров; показ получает не больше 20 снимков/с. */
-import { createWorld, mediumTask, mineralExchanges, mineralProcesses, runoffTask, takeGroundChanges, DRIFT_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, WorldFileError, type MineralAccelerator, type World } from '../core/index.ts';
+import { createWorld, mineralExchanges, mineralProcesses, surfaceTask, takeGroundChanges, DRIFT_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, WorldFileError, type MineralAccelerator, type World } from '../core/index.ts';
 import type { ComputeMode, ComputeState, SimulationCommand, SimulationReply, SimulationSnapshot } from './simulation.ts';
 import { GpuWorld } from '../gpu-world/engine.ts';
 import { STEPS_PER_SECOND } from '../core/units.ts';
@@ -37,7 +37,7 @@ let gpuUnavailable: string | null = null;
 let gpuStarting = false;
 let waiting: Promise<void> | null = null;
 function computeState(): ComputeState {
-  return { mode: computeMode, unavailable: gpuUnavailable, ...(computeMode === 'gpu' && lastStages.medium > 0 ? { stages: { ...lastStages } } : {}) };
+  return { mode: computeMode, unavailable: gpuUnavailable, ...(computeMode === 'gpu' && lastStages.surface > 0 ? { stages: { surface: lastStages.surface, parts: [...lastStages.parts] } } : {}) };
 }
 
 function useCpu(reason: string): void {
@@ -68,27 +68,18 @@ function* awaitGpu<T>(job: Promise<T>): Generator<void, T | null, void> {
 
 /** Этапы обновления минерала на видеокарте; что не перенесено — считает ядро. */
 const accelerator: MineralAccelerator = {
-  *medium(a) {
+  *surface(a) {
     const g = gpu;
-    const run = g?.usable ? yield* awaitGpu(g.mineral.medium(a, g.mineralExponent, g.groundExponent)) : null;
-    if (run?.exact) { lastStages.medium = run.ms; lastStages.parts = [run.prepMs, run.gpuMs, run.doneMs]; return; }
+    const run = g?.usable ? yield* awaitGpu(g.mineral.surface(a, g.mineralExponent, g.groundExponent)) : null;
+    if (run?.exact) { lastStages.surface = run.ms; lastStages.parts = [run.prepMs, run.gpuMs, run.doneMs]; return; }
     gpuFailed(run, g);
-    // Это обновление — на CPU теми же функциями ядра (deposits не тронуты, если видеокарта не ответила).
-    // Не сошлось — залежи уже записаны из видеокарты: обновление не повторить честно, мир останавливается с ошибкой.
-    if (run) throw Error('Видеокарта: суммы долей в среде не совпали');
-    a.dst.fill(0);
-    yield* mediumTask(a);
-  },
-  *runoff(a) {
-    const g = gpu;
-    const run = g?.usable ? yield* awaitGpu(g.mineral.runoff(a, g.mineralExponent, g.groundExponent)) : null;
-    if (run?.exact) { lastStages.runoff = run.ms; return a.out; }
-    gpuFailed(run, g);
-    return yield* runoffTask(a);
+    // Не сошлось — состояние уже записано из видеокарты: обновление не повторить честно, мир останавливается с ошибкой.
+    if (run) throw Error('Видеокарта: суммы долей на поверхности не совпали');
+    yield* surfaceTask(a);
   },
 };
-/** Последние этапы на видеокарте: время с ожиданием, мс. */
-const lastStages = { medium: 0, runoff: 0, parts: [0, 0, 0] };
+/** Последний этап на видеокарте: время с ожиданием, мс, и его части. */
+const lastStages = { surface: 0, parts: [0, 0, 0] };
 
 function gpuFailed(run: { exact: boolean } | null, g: GpuWorld | null): void {
   if (run && !run.exact) {
