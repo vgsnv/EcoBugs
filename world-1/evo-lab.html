@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Эволюционная лаборатория</title>
+<style>
+  :root {
+    --bg: #e9e7e1; --panel: #f7f6f2; --raised: #fffefb; --line: #d8d4ca; --line-strong: #c4bfb2;
+    --text: #2a2925; --muted: #76716a; --faint: #a39e94;
+    --accent: #a8572b; --accent-soft: #f2e2d5;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, sans-serif; }
+  .app { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; padding: 12px; min-height: 100vh; }
+  .stage { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  button, select, input[type=number] { font: inherit; height: 28px; border: 1px solid var(--line-strong); background: var(--raised); color: var(--text); border-radius: 6px; padding: 0 10px; }
+  input[type=number] { width: 72px; }
+  button.on { background: var(--accent-soft); border-color: var(--accent); }
+  .bar label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  .bar .clock { font-family: var(--mono); color: var(--muted); margin-left: auto; }
+  canvas#map { width: 100%; image-rendering: pixelated; background: #10202a; border-radius: 6px; cursor: crosshair; aspect-ratio: 4 / 3; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 12px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  aside { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; overflow: auto; max-height: calc(100vh - 24px); }
+  h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 6px; }
+  h2:first-child { margin-top: 0; }
+  .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; font-size: 12px; margin-bottom: 4px; }
+  .row span { color: var(--muted); }
+  .row b { font-weight: 400; font-family: var(--mono); font-size: 11px; }
+  .row canvas { grid-column: 1 / -1; width: 100%; height: 30px; display: block; }
+  .probe { font-size: 12px; }
+  .probe ol { margin: 4px 0 0; padding-left: 18px; font-family: var(--mono); font-size: 11px; }
+  .note { color: var(--muted); font-size: 12px; }
+  @media (max-width: 800px) { .app { grid-template-columns: 1fr; } aside { max-height: none; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="stage">
+    <div class="bar">
+      <button id="run">Пауза</button>
+      <label>Ходов за кадр <input id="speed" type="range" min="1" max="60" value="10"></label>
+      <label>Сид <input id="seed" type="number" value="1" min="1"></label>
+      <button id="reset">Заново</button>
+      <select id="color">
+        <option value="action">Цвет: что делает</option>
+        <option value="lineage">Цвет: родство</option>
+        <option value="rules">Цвет: длина генома</option>
+      </select>
+      <span class="clock" id="clock"></span>
+    </div>
+    <canvas id="map"></canvas>
+    <div class="legend" id="legend"></div>
+    <p class="note">Карта 160 × 120 мест, в месте — не больше одного организма. Свет — дрейфующие пятна (фон светлее), минерал — сиреневый, останки — бурые. Организм — список правил «если сигнал больше/меньше порога → действие»; за ход срабатывает первое выполнимое. Нажмите на организм, чтобы увидеть его правила.</p>
+  </div>
+  <aside>
+    <h2>Организм</h2>
+    <div class="probe" id="probe"><span class="note">Нажмите на карту.</span></div>
+    <h2>Ход эволюции</h2>
+    <div id="charts"></div>
+  </aside>
+</div>
+<script type="module" src="/src/evo/lab.ts"></script>
+</body>
+</html>
