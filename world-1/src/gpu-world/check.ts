@@ -5,7 +5,11 @@
  * снимок: состояние возвращается тем же, суммы долей равны. Следующие этапы
  * добавляют сюда сравнения своих этапов обновления минерала.
  */
-import { createWorld, groundTotal, makeParams, mineralInDeposits, mineralInMedium, MINERAL_PERIOD, multiplierForLevel, stepWorld, stepWorldTask, transportRange, type MineralAccelerator, type World } from '../core/index.ts';
+import {
+  createWorld, groundTotal, makeParams, mediumTask, mineralInDeposits, mineralInMedium, MINERAL_PERIOD, runoffTask, stepWorld, stepWorldTask,
+  type MediumStage, type MineralAccelerator, type RunoffStage, type TerrainState, type World,
+} from '../core/index.ts';
+import { finishCalculation, type Calculation } from '../core/task.ts';
 import { GpuWorld, mineralTotal } from './engine.ts';
 
 const out = document.getElementById('out')!;
@@ -15,20 +19,30 @@ const seeds = (q.get('seeds') ?? '1,2,3').split(',').map(Number);
 const steps = (q.get('steps') ?? '0,20000,50000').split(',').map(Number);
 const results: { stage: number; seed: number; step: number; ok: boolean }[] = [];
 
-/** Вход этапа «перенос» на шаге обновления — как в updateMineralTask. */
-function transportInput(world: World) {
-  const m = world.mineral, n = m.cols * m.rows, P = MINERAL_PERIOD;
-  const { a, b, u } = world.drift.nodes(world.step + 1 - P / 2);
-  const tvx = new Float32Array(n), tvy = new Float32Array(n);
-  for (let k = 0; k < n; k++) {
-    if (m.blocked[k]) continue;
-    tvx[k] = a.vx[k] + (b.vx[k] - a.vx[k]) * u + (m.flow ? m.flow.vx[k] : 0);
-    tvy[k] = a.vy[k] + (b.vy[k] - a.vy[k]) * u + (m.flow ? m.flow.vy[k] : 0);
-  }
-  const holes = new Uint8Array(n);
-  for (const f of m.funnels) for (const k of f.cells) holes[k] = 1;
-  return { src: Float64Array.from(m.field), mobility: Float64Array.from(world.terrain.applied, multiplierForLevel), tvx, tvy, holes, P };
+const copyTerrain = (t: TerrainState): TerrainState => ({ ...t, ground: Float64Array.from(t.ground), deposits: Float64Array.from(t.deposits) });
+/** Вход и выход этапов на CPU — снятые «шпионом» на месте ускорителя во время настоящего шага ядра. */
+interface Captured {
+  medium: { input: MediumStage; dst: Float64Array; deposits: Float64Array };
+  runoff: { input: RunoffStage; out: Float64Array };
 }
+function* spy(world: World, into: Partial<Captured>): Calculation {
+  const accel: MineralAccelerator = {
+    *medium(st) {
+      const input: MediumStage = { ...st, src: Float64Array.from(st.src), dst: new Float64Array(st.dst.length), terrain: copyTerrain(st.terrain),
+        erosionOut: new Float32Array(st.erosionOut.length), settlingOut: new Float32Array(st.settlingOut.length) };
+      yield* mediumTask(st);
+      into.medium = { input, dst: Float64Array.from(st.dst), deposits: Float64Array.from(st.terrain.deposits) };
+    },
+    *runoff(st) {
+      const input: RunoffStage = { ...st, field: Float64Array.from(st.field), ground: Float64Array.from(st.ground), deposits: Float64Array.from(st.deposits), out: new Float64Array(st.out.length) };
+      const out = yield* runoffTask(st);
+      into.runoff = { input, out: Float64Array.from(out) };
+      return out;
+    },
+  };
+  yield* stepWorldTask(world, accel);
+}
+const relDiff = (a: ArrayLike<number>, b: ArrayLike<number>) => { let d = 0, t = 0; for (let k = 0; k < a.length; k++) { d += Math.abs(a[k] - b[k]); t += Math.abs(a[k]); } return t > 0 ? d / t : 0; };
 const state = { results, done: false };
 (window as unknown as { engineCheck: typeof state }).engineCheck = state;
 
@@ -53,41 +67,42 @@ async function main(): Promise<void> {
         + `суммы долей ${r.exact ? 'равны' : 'НЕ равны'}; ${r.ms.toFixed(1)} мс — ${ok ? 'да' : 'НЕТ'}`);
     }
   }
-  log('Этап 2: перенос — ядро против видеокарты на одном входе');
+  log('Этапы 2–3: среда (перенос, растекание, оседание и размыв) и стекание — ядро против видеокарты на одном входе');
   for (const seed of seeds) {
     const world = createWorld(makeParams({ seed }));
-    for (const target of steps.filter((s) => s > 0)) {
+    for (const target of steps.filter((x) => x > 0)) {
       while (world.step < target - 1) stepWorld(world);
       gpu.attach(world);
-      const m = world.mineral, n = m.cols * m.rows, inp = transportInput(world);
-      const cpu = new Float64Array(n), gpuOut = new Float64Array(n);
-      const t0 = performance.now();
-      transportRange(m, inp.src, cpu, inp.holes, inp.mobility, inp.tvx, inp.tvy, inp.P, 0, n);
-      const cpuMs = performance.now() - t0;
-      const r = await gpu.transport.run(m, inp.src, gpuOut, inp.holes, inp.mobility, inp.tvx, inp.tvy, inp.P, gpu.mineralExponent);
-      let total = 0, diff = 0, cpuSum = 0, gpuSum = 0;
-      for (let k = 0; k < n; k++) { total += inp.src[k]; cpuSum += cpu[k]; gpuSum += gpuOut[k]; diff += Math.abs(cpu[k] - gpuOut[k]); }
-      const ok = r.exact && diff / total < 1e-4;
-      results.push({ stage: 2, seed, step: target, ok });
-      log(`  сид ${seed}, шаг ${target}: отличие от ядра ${(100 * diff / total).toFixed(5)}% минерала; сумма ${total.toFixed(4)} → ядро ${cpuSum.toFixed(4)}, видеокарта ${gpuSum.toFixed(4)}; `
-        + `суммы долей ${r.exact ? 'равны' : 'НЕ равны'}; ядро ${cpuMs.toFixed(1)} мс, видеокарта с загрузкой и чтением ${r.ms.toFixed(1)} мс — ${ok ? 'да' : 'НЕТ'}`);
+      const c: Partial<Captured> = {};
+      finishCalculation(spy(world, c));
+      const md = c.medium!, ro = c.runoff!;
+      const rm = await gpu.mineral.medium(md.input, gpu.mineralExponent, gpu.groundExponent);
+      const rr = await gpu.mineral.runoff(ro.input, gpu.mineralExponent, gpu.groundExponent);
+      const dField = relDiff(md.dst, md.input.dst), dDep = relDiff(md.deposits, md.input.terrain.deposits), dRun = relDiff(ro.out, ro.input.out);
+      const ok = rm.exact && rr.exact && dField < 1e-4 && dDep < 1e-4 && dRun < 1e-4;
+      results.push({ stage: 3, seed, step: target, ok });
+      log(`  сид ${seed}, шаг ${target}: отличие от ядра — поле после среды ${(100 * dField).toFixed(5)}%, залежи ${(100 * dDep).toFixed(5)}%, поле после стекания ${(100 * dRun).toFixed(5)}%; `
+        + `суммы долей ${rm.exact && rr.exact ? 'равны' : 'НЕ равны'}; видеокарта с загрузкой и чтением: среда ${rm.ms.toFixed(1)} мс, стекание ${rr.ms.toFixed(1)} мс — ${ok ? 'да' : 'НЕТ'}`);
     }
   }
   // Ход мира с ускорителем: генератор ждёт видеокарту, драйвер ждёт её обещание.
   let pending: Promise<unknown> | null = null;
+  const wait = function* <T>(job: Promise<T>): Generator<void, T, void> {
+    let done = false, value: T | undefined;
+    pending = job.then((v) => { value = v; }).finally(() => { done = true; });
+    while (!done) yield;
+    return value as T;
+  };
   const accel: MineralAccelerator = {
-    *transport(m, src, dst, holes, mobility, tvx, tvy, P) {
-      let done = false;
-      pending = gpu.transport.run(m, src, dst, holes, mobility, tvx, tvy, P, gpu.mineralExponent).finally(() => { done = true; });
-      while (!done) yield;
-    },
+    *medium(st) { yield* wait(gpu.mineral.medium(st, gpu.mineralExponent, gpu.groundExponent)); },
+    *runoff(st) { yield* wait(gpu.mineral.runoff(st, gpu.mineralExponent, gpu.groundExponent)); return st.out; },
   };
   const stepWith = async (w: World) => {
     const task = stepWorldTask(w, accel);
     while (!task.next().done) if (pending) { await pending; pending = null; }
   };
   const updates = Number(q.get('updates') ?? 50);
-  log(`Ход мира: два одинаковых мира ещё ${updates} обновлений минерала — CPU и с переносом на видеокарте`);
+  log(`Ход мира: два одинаковых мира ещё ${updates} обновлений минерала — CPU и с этапами 2–3 на видеокарте`);
   for (const seed of seeds) {
     const a = createWorld(makeParams({ seed })), b = createWorld(makeParams({ seed }));
     const start = steps[1] ?? 20000;
@@ -101,7 +116,7 @@ async function main(): Promise<void> {
     const gpuMs = performance.now() - t1;
     const ta = mineralTotal(a), tb = mineralTotal(b);
     const ok = Math.abs(tb - before) < 1e-3 * updates * 1e-3 + 1e-6 * before;
-    results.push({ stage: 2, seed, step: start, ok });
+    results.push({ stage: 3, seed, step: start, ok });
     log(`  сид ${seed}: минерал всего ${before.toFixed(6)} → CPU ${ta.toFixed(6)}, видеокарта ${tb.toFixed(6)}; `
       + `в среде CPU ${mineralInMedium(a.mineral).toFixed(1)} / видеокарта ${mineralInMedium(b.mineral).toFixed(1)}, в залежах ${mineralInDeposits(a.terrain).toFixed(1)} / ${mineralInDeposits(b.terrain).toFixed(1)}; `
       + `время ${(cpuMs / 1000).toFixed(1)} / ${(gpuMs / 1000).toFixed(1)} с — ${ok ? 'да' : 'НЕТ'}`);

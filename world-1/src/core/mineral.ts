@@ -352,7 +352,7 @@ export function transportRange(m: MineralState, src: Float64Array, dst: Float64A
   }
 }
 
-function settleRange(m: MineralState, params: WorldParams, terrain: TerrainState, work: MineralWork, dst: Float64Array, sMax: number, settle: number, dissolve: number, perLvl: number, P: number, first: number, last: number): void {
+function settleRange(m: MineralState, erosionOver: number, terrain: TerrainState, work: MineralWork, dst: Float64Array, sMax: number, settle: number, dissolve: number, perLvl: number, P: number, first: number, last: number): void {
   const { cols, rows, cell, blocked } = m;
   const { speed, flowX, flowY, processes } = work;
   const area = cell * cell, gr = terrain.ground, dep = terrain.deposits;
@@ -372,7 +372,7 @@ function settleRange(m: MineralState, params: WorldParams, terrain: TerrainState
     const settled = dst[k] * (1 - (1 - settle * calm * calm) * (1 - sink)) * room;
     // Размыв: заметное течение срывает залежи обратно в среду (грунт под ними
     // не растворяется — его переносит moveSand).
-    const over = speed[k] - EROSION_RATIO * groundThreshold(params);
+    const over = speed[k] - erosionOver;
     const erode = Math.min(dep[k], over > 0 ? EROSION * over * P * area : 0);
     // Залежи понемногу растворяются обратно — на месте.
     const dissolved = (dep[k] - erode) * dissolve;
@@ -506,8 +506,62 @@ function spreadRows(field: Float64Array, mobility: Float64Array, blocked: Uint8A
  * если этап есть, вызывает его вместо своего расчёта, с теми же входами и выходом.
  */
 export interface MineralAccelerator {
-  /** Перенос: из `src` в обнулённый `dst` по суммам течений, как `transportRange` по всей сетке. */
-  transport?(m: MineralState, src: Float64Array, dst: Float64Array, holes: Uint8Array, mobility: Float64Array, tvx: Float32Array, tvy: Float32Array, P: number): Calculation;
+  /**
+   * Среда за обновление: перенос из `src` в обнулённый `dst` (как `transportRange`),
+   * растекание `dst` (как `spread`), оседание и размыв (как `settleRange`): меняет
+   * `dst` и `terrain.deposits`, пишет `erosion` и `settling` для показа.
+   */
+  medium?(a: MediumStage): Calculation;
+  /** Стекание: из `field` в `out` (как `runoff`); возвращает `out`. */
+  runoff?(a: RunoffStage): Calculation<Float64Array>;
+}
+
+/** Вход этапа «среда»: всё, что ядро передаёт своим функциям переноса, растекания и оседания. */
+export interface MediumStage {
+  m: MineralState; terrain: TerrainState;
+  src: Float64Array; dst: Float64Array; holes: Uint8Array; mobility: Float64Array; tvx: Float32Array; tvy: Float32Array;
+  /** Шагов в обновлении; доля растекания; мерило «спокойной» воды; доля оседания за обновление; доля растворения залежей. */
+  P: number; spread: number; sMax: number; settle: number; dissolve: number;
+  /** Количество на уровень местности в клетке; порог скорости размыва; размыв на единицу превышения за обновление; оседание на единицу схождения за обновление. */
+  perLvl: number; erosionOver: number; erosion: number; sinkSettle: number;
+  erosionOut: Float32Array; settlingOut: Float32Array;
+}
+
+/** Вход этапа «стекание». */
+export interface RunoffStage {
+  m: MineralState; field: Float64Array; ground: Float64Array; deposits: Float64Array; holes: Uint8Array;
+  perLvl: number; P: number; out: Float64Array;
+}
+
+/** Среда за обновление на CPU: перенос, растекание, оседание и размыв (запасной путь ускорителя — тот же). */
+export function* mediumTask(s: MediumStage): Calculation {
+  const { m, terrain, src, dst, holes, mobility, tvx, tvy, P } = s;
+  const { cols, rows, blocked } = m, n = cols * rows;
+  const work = workspace(m);
+  phase('перенос');
+  // 1. Снос: перенос с сохранением количества — по линиям суммы течений
+  // шажками не длиннее клетки (быстрое течение не перепрыгивает острова).
+  for (let first = 0; first < n; first += 256) {
+    yield;
+    transportRange(m, src, dst, holes, mobility, tvx, tvy, P, first, Math.min(n, first + 256));
+  }
+
+  phase('растекание');
+  // 1б. Растекание: от густого к редкому, медленнее там, где вязкость выше.
+  yield* spread(dst, mobility, blocked, holes, cols, rows, s.spread, work.spread);
+
+  // 2. Местность и залежи.
+  phase('оседание и размыв');
+  for (let first = 0; first < n; first += 512) {
+    yield;
+    settleRange(m, s.erosionOver, terrain, work, dst, s.sMax, s.settle, s.dissolve, s.perLvl, P, first, Math.min(n, first + 512));
+  }
+}
+
+/** Стекание на CPU (запасной путь ускорителя — тот же). */
+export function runoffTask(s: RunoffStage): Calculation<Float64Array> {
+  const { m } = s;
+  return runoff(s.field, s.ground, s.deposits, m.blocked, s.holes, m.cols, m.rows, s.perLvl, s.P, s.out);
 }
 
 export function* updateMineralTask(m: MineralState, params: WorldParams, drift: Drift, partitions: PartitionLayout, terrain: TerrainState, _light: LightMap, step: number, accel?: MineralAccelerator): Calculation {
@@ -566,23 +620,6 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   holes.fill(0);
   for (const f of m.funnels) for (const k of f.cells) holes[k] = 1;
 
-  phase('перенос');
-  // 1. Снос: перенос с сохранением количества — по линиям суммы течений
-  // шажками не длиннее клетки (быстрое течение не перепрыгивает острова).
-  if (accel?.transport) yield* accel.transport(m, src, dst, holes, mobility, tvx, tvy, P);
-  else {
-    for (let first = 0; first < n; first += 256) {
-      yield;
-      transportRange(m, src, dst, holes, mobility, tvx, tvy, P, first, Math.min(n, first + 256));
-    }
-  }
-
-  phase('растекание');
-  // 1б. Растекание: от густого к редкому, медленнее там, где вязкость выше.
-  yield* spread(dst, mobility, blocked, holes, cols, rows, MINERAL_SPREAD, work.spread);
-
-  // 2. Местность и залежи.
-  phase('оседание и размыв');
   // Мерило «спокойной» воды и шкала превышения порогов — постоянная скорость, от света не зависит.
   const sMax = DRIFT_REFERENCE;
   const settle = 1 - 0.5 ** (P / stepsFromSeconds(params.settleHalf * 60));
@@ -591,10 +628,11 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   const perLvl = GROUND_PER_LEVEL * area;
   const dep = terrain.deposits;
   const gr = terrain.ground;
-  for (let first = 0; first < n; first += 512) {
-    yield;
-    settleRange(m, params, terrain, work, dst, sMax, settle, dissolve, perLvl, P, first, Math.min(n, first + 512));
-  }
+  const stage: MediumStage = { m, terrain, src, dst, holes, mobility, tvx, tvy, P, spread: MINERAL_SPREAD, sMax, settle, dissolve, perLvl,
+    erosionOver: EROSION_RATIO * groundThreshold(params), erosion: EROSION * P * area, sinkSettle: MINERAL_SINK_SETTLE * P,
+    erosionOut: processes.erosion, settlingOut: processes.settling };
+  if (accel?.medium) { phase('перенос'); yield* accel.medium(stage); }
+  else yield* mediumTask(stage);
   m.field = dst;
 
   phase('перенос и осыпание грунта');
@@ -619,7 +657,8 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
 
   phase('стекание');
   // Стекание: растворённый минерал стекает к соседям ниже — с суши к воде.
-  m.field = yield* runoff(m.field, gr, dep, blocked, holes, cols, rows, perLvl, P, work.runoff);
+  const runoffStage: RunoffStage = { m, field: m.field, ground: gr, deposits: dep, holes, perLvl, P, out: work.runoff };
+  m.field = accel?.runoff ? yield* accel.runoff(runoffStage) : yield* runoffTask(runoffStage);
 
   phase('воронки, подвижки, извержения');
   // Воронки: что дошло до отверстия, уходит в недра; залежи в отверстии поднимаются (см. sinkFunnel).

@@ -21,8 +21,8 @@ export interface ComputeState {
   mode: ComputeMode;
   /** null — видеокарта ещё не проверялась; строка — почему недоступна. */
   unavailable: string | null;
-  /** Последний перенос минерала на видеокарте: время с ожиданием, мс; суммы долей равны. */
-  transport?: { ms: number; exact: boolean };
+  /** Последние этапы на видеокарте: время с ожиданием, мс (суммы долей сошлись — иначе режим уже процессор). */
+  stages?: { medium: number; runoff: number; parts: number[] };
 }
 
 type MineralSnapshot = Omit<MineralState, 'blocked' | 'nearWall' | 'region'>;

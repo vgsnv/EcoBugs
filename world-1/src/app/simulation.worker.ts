@@ -1,5 +1,5 @@
 /** Мир считает шаги независимо от кадров; показ получает не больше 20 снимков/с. */
-import { createWorld, mineralExchanges, mineralProcesses, takeGroundChanges, DRIFT_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, transportRange, WorldFileError, type MineralAccelerator, type World } from '../core/index.ts';
+import { createWorld, mediumTask, mineralExchanges, mineralProcesses, runoffTask, takeGroundChanges, DRIFT_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, WorldFileError, type MineralAccelerator, type World } from '../core/index.ts';
 import type { ComputeMode, ComputeState, SimulationCommand, SimulationReply, SimulationSnapshot } from './simulation.ts';
 import { GpuWorld } from '../gpu-world/engine.ts';
 import { STEPS_PER_SECOND } from '../core/units.ts';
@@ -36,20 +36,16 @@ let gpu: GpuWorld | null = null;
 let gpuUnavailable: string | null = null;
 let gpuStarting = false;
 let waiting: Promise<void> | null = null;
-/** Последний перенос на видеокарте: время с ожиданием, мс; суммы долей сошлись. */
-let lastTransport: { ms: number; exact: boolean } | null = null;
-
 function computeState(): ComputeState {
-  const r = lastTransport;
-  return { mode: computeMode, unavailable: gpuUnavailable, ...(r && computeMode === 'gpu' ? { transport: r } : {}) };
+  return { mode: computeMode, unavailable: gpuUnavailable, ...(computeMode === 'gpu' && lastStages.medium > 0 ? { stages: { ...lastStages } } : {}) };
 }
 
 function useCpu(reason: string): void {
-  computeMode = 'cpu'; gpu = null; gpuUnavailable = reason; lastTransport = null;
+  computeMode = 'cpu'; gpu = null; gpuUnavailable = reason;
 }
 
 function requestCompute(mode: ComputeMode): void {
-  if (mode === 'cpu') { computeMode = 'cpu'; lastTransport = null; return; }
+  if (mode === 'cpu') { computeMode = 'cpu'; return; }
   if (gpu?.usable) { computeMode = 'gpu'; return; }
   if (gpuStarting) return;
   gpuStarting = true;
@@ -72,19 +68,34 @@ function* awaitGpu<T>(job: Promise<T>): Generator<void, T | null, void> {
 
 /** Этапы обновления минерала на видеокарте; что не перенесено — считает ядро. */
 const accelerator: MineralAccelerator = {
-  *transport(m, src, dst, holes, mobility, tvx, tvy, P) {
+  *medium(a) {
     const g = gpu;
-    const run = g?.usable ? yield* awaitGpu(g.transport.run(m, src, dst, holes, mobility, tvx, tvy, P, g.mineralExponent)) : null;
-    if (run?.exact) { lastTransport = run; return; }
-    // Видеокарта не ответила или суммы не сошлись: это обновление — на CPU, дальше — CPU.
-    if (run && !run.exact) {
-      useCpu('суммы долей после переноса не совпали');
-      host.postMessage({ type: 'error', epoch, problems: ['Видеокарта: суммы долей после переноса не совпали — расчёт возвращён на процессор'] });
-    } else if (g && !g.usable) useCpu('устройство видеокарты потеряно');
-    dst.fill(0);
-    transportRange(m, src, dst, holes, mobility, tvx, tvy, P, 0, m.cols * m.rows);
+    const run = g?.usable ? yield* awaitGpu(g.mineral.medium(a, g.mineralExponent, g.groundExponent)) : null;
+    if (run?.exact) { lastStages.medium = run.ms; lastStages.parts = [run.prepMs, run.gpuMs, run.doneMs]; return; }
+    gpuFailed(run, g);
+    // Это обновление — на CPU теми же функциями ядра (deposits не тронуты, если видеокарта не ответила).
+    // Не сошлось — залежи уже записаны из видеокарты: обновление не повторить честно, мир останавливается с ошибкой.
+    if (run) throw Error('Видеокарта: суммы долей в среде не совпали');
+    a.dst.fill(0);
+    yield* mediumTask(a);
+  },
+  *runoff(a) {
+    const g = gpu;
+    const run = g?.usable ? yield* awaitGpu(g.mineral.runoff(a, g.mineralExponent, g.groundExponent)) : null;
+    if (run?.exact) { lastStages.runoff = run.ms; return a.out; }
+    gpuFailed(run, g);
+    return yield* runoffTask(a);
   },
 };
+/** Последние этапы на видеокарте: время с ожиданием, мс. */
+const lastStages = { medium: 0, runoff: 0, parts: [0, 0, 0] };
+
+function gpuFailed(run: { exact: boolean } | null, g: GpuWorld | null): void {
+  if (run && !run.exact) {
+    useCpu('суммы долей после этапа не совпали');
+    host.postMessage({ type: 'error', epoch, problems: ['Видеокарта: суммы долей после этапа не совпали — расчёт возвращён на процессор'] });
+  } else if (g && !g.usable) useCpu('устройство видеокарты потеряно');
+}
 
 /** Снимок включает готовые узлы поля: publish никогда не запускает решатель. */
 function* calculateStep(next: World): Generator<void, void, void> {
