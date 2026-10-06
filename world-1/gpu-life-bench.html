@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Замер: жизнь на WebGPU</title>
+<style>
+  body { font: 13px/1.4 ui-monospace, Menlo, monospace; background: #111; color: #ddd; margin: 16px; }
+  pre { white-space: pre-wrap; }
+  canvas { width: 640px; height: 480px; background: #000; display: block; margin: 8px 0; }
+</style>
+</head>
+<body>
+<h3>Жизнь на WebGPU: деление, смерть, связи, минерал, отрисовка</h3>
+<p>Параметры: <code>?n=100000,250000</code> — численности, <code>&amp;k=4,16,64,0</code> — уплотнение раз в K ходов (0 — никогда).</p>
+<canvas id="view" width="960" height="720"></canvas>
+<pre id="out"></pre>
+<script type="module">
+const out = document.getElementById('out');
+const log = (s) => { out.textContent += s + '\n'; };
+const q = new URLSearchParams(location.search);
+const NS = (q.get('n') ?? '100000,250000,500000,1000000').split(',').map(Number);
+const KS = (q.get('k') ?? '1,2,4,16').split(',').map(Number);
+
+const W = 1600, H = 1200, CELL = 2.5, GW = W / CELL, GH = H / CELL, B = GW * GH, B1 = B + 1, NB = Math.ceil(B1 / 512);
+const LW = 160, LH = 120, LN = LW * LH, LB = LN * 4, RING = 32, NG = 10, CELL_BYTES = 48;
+
+const WGSL = /* wgsl */`
+struct Cell { vel: vec2f, e: f32, m: f32, age: f32, mn: u32, pad0: u32, pad1: u32, bonds: vec4i };
+struct Prm { popCap: u32, slotCap: u32, gw: u32, gh: u32, B: u32, nb: u32, p0: u32, p1: u32 };
+@group(0) @binding(0) var<uniform> prm: Prm;
+@group(0) @binding(1) var<storage, read> posR: array<vec4f>;
+@group(0) @binding(2) var<storage, read_write> posW: array<vec4f>;
+@group(0) @binding(3) var<storage, read_write> cells: array<Cell>;
+@group(0) @binding(4) var<storage, read_write> genes: array<vec4f>;
+@group(0) @binding(5) var<storage, read_write> info: array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read_write> counts: array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read_write> start: array<u32>;
+@group(0) @binding(8) var<storage, read_write> cursor: array<atomic<u32>>;
+@group(0) @binding(9) var<storage, read_write> blockSum: array<u32>;
+@group(0) @binding(10) var<storage, read_write> blockOff: array<u32>;
+@group(0) @binding(11) var<storage, read_write> items: array<u32>;
+@group(0) @binding(12) var<storage, read> light: array<f32>;
+@group(0) @binding(13) var<storage, read_write> field: array<atomic<u32>>;
+@group(0) @binding(14) var<storage, read_write> args: array<u32>;
+@group(0) @binding(15) var<storage, read_write> newIndex: array<u32>;
+@group(0) @binding(16) var<storage, read_write> cellsDst: array<Cell>;
+@group(0) @binding(17) var<storage, read_write> genesDst: array<vec4f>;
+@group(0) @binding(18) var<storage, read_write> posDst: array<vec4f>;
+
+const W = ${W}.0; const H = ${H}.0; const CELL = ${CELL}; const LW = ${LW}u; const LH = ${LH}u; const NG = ${NG}u;
+// info: 0 занятых мест, 1 рождений за ход, 2 живых, 3 ход, 4 всего рождений, 5 всего смертей, 6 клеток в сетке, 7 отказов в рождении
+
+fn pcg(v: u32) -> u32 { let s = v * 747796405u + 2891336453u; let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+fn rnd(a: u32, b: u32) -> f32 { return f32(pcg(a ^ pcg(b)) >> 8u) / 16777216.0; }
+fn radius(m: f32) -> f32 { return 0.5 * sqrt(m); }
+fn bucket2(x: vec2f) -> vec2u { return vec2u(clamp(vec2i(x / CELL), vec2i(0), vec2i(i32(prm.gw) - 1, i32(prm.gh) - 1))); }
+fn bucketIdx(x: vec2f) -> u32 { let b = bucket2(x); return b.y * prm.gw + b.x; }
+fn walls(q: vec2f) -> vec2f { return clamp(q, vec2f(1.0), vec2f(W - 1.0, H - 1.0)); }
+fn lightAt(x: vec2f) -> f32 {
+  let fx = clamp(x.x / W * f32(LW - 1u), 0.0, f32(LW) - 1.001);
+  let fy = clamp(x.y / H * f32(LH - 1u), 0.0, f32(LH) - 1.001);
+  let ix = u32(fx); let iy = u32(fy); let tx = fx - f32(ix); let ty = fy - f32(iy); let o = iy * LW + ix;
+  return mix(mix(light[o], light[o + 1u], tx), mix(light[o + LW], light[o + LW + 1u], tx), ty);
+}
+fn fieldIdx(x: vec2f) -> u32 {
+  let ix = min(u32(max(x.x, 0.0) / (W / f32(LW))), LW - 1u); let iy = min(u32(max(x.y, 0.0) / (H / f32(LH))), LH - 1u);
+  return iy * LW + ix;
+}
+fn takeQuantum(fi: u32) -> bool {
+  var old = atomicLoad(&field[fi]);
+  for (var t = 0; t < 8; t++) {
+    if (old == 0u) { return false; }
+    let r = atomicCompareExchangeWeak(&field[fi], old, old - 1u);
+    if (r.exchanged) { return true; }
+    old = r.old_value;
+  }
+  return false;
+}
+
+// ---- сетка: подсчёт по корзинам, префиксная сумма, раскладка номеров ----
+@compute @workgroup_size(256) fn clearCounts(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x < prm.B + 1u) { atomicStore(&counts[g.x], 0u); }
+}
+@compute @workgroup_size(256) fn count(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= atomicLoad(&info[0])) { return; }
+  let p = posR[i]; if (p.z <= 0.0) { return; }
+  atomicAdd(&counts[bucketIdx(p.xy)], 1u);
+}
+var<workgroup> sh: array<u32, 256>;
+@compute @workgroup_size(256) fn scanBlocks(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) w: vec3u) {
+  let base = w.x * 512u + l.x * 2u; let n = prm.B + 1u;
+  var a = 0u; var b = 0u;
+  if (base < n) { a = atomicLoad(&counts[base]); }
+  if (base + 1u < n) { b = atomicLoad(&counts[base + 1u]); }
+  sh[l.x] = a + b; workgroupBarrier();
+  for (var off = 1u; off < 256u; off <<= 1u) {
+    var v = 0u; if (l.x >= off) { v = sh[l.x - off]; }
+    workgroupBarrier(); sh[l.x] += v; workgroupBarrier();
+  }
+  let ex = sh[l.x] - (a + b);
+  if (base < n) { start[base] = ex; }
+  if (base + 1u < n) { start[base + 1u] = ex + a; }
+  if (l.x == 255u) { blockSum[w.x] = sh[255]; }
+}
+@compute @workgroup_size(256) fn scanSums(@builtin(local_invocation_id) l: vec3u) {
+  let chunk = (prm.nb + 255u) / 256u; let s0 = l.x * chunk;
+  var sum = 0u;
+  for (var k = 0u; k < chunk; k++) { let i = s0 + k; if (i < prm.nb) { sum += blockSum[i]; } }
+  sh[l.x] = sum; workgroupBarrier();
+  for (var off = 1u; off < 256u; off <<= 1u) {
+    var v = 0u; if (l.x >= off) { v = sh[l.x - off]; }
+    workgroupBarrier(); sh[l.x] += v; workgroupBarrier();
+  }
+  var run = sh[l.x] - sum;
+  for (var k = 0u; k < chunk; k++) { let i = s0 + k; if (i < prm.nb) { blockOff[i] = run; run += blockSum[i]; } }
+}
+@compute @workgroup_size(256) fn scanAdd(@builtin(global_invocation_id) g: vec3u) {
+  let e = g.x; if (e > prm.B) { return; }
+  let v = start[e] + blockOff[e / 512u];
+  start[e] = v; atomicStore(&cursor[e], v);
+  if (e == prm.B) { atomicStore(&info[6], v); args[3] = (v + 255u) / 256u; args[4] = 1u; args[5] = 1u; }
+}
+@compute @workgroup_size(256) fn scatter(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= atomicLoad(&info[0])) { return; }
+  let p = posR[i]; if (p.z <= 0.0) { return; }
+  items[atomicAdd(&cursor[bucketIdx(p.xy)], 1u)] = i;
+}
+
+// ---- ход клетки ----
+@compute @workgroup_size(256) fn update(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x;
+  let slots = atomicLoad(&info[0]);
+  if (i >= slots) { return; }
+  var c = cells[i];
+  if (c.m <= 0.0) { posW[i] = vec4f(0.0); return; }
+  let tick = atomicLoad(&info[3]);
+  let p = posR[i]; let x = p.xy; let r = p.z;
+  let bc = vec2i(bucket2(x));
+  var push = vec2f(0.0); var nb = 0u;
+  for (var dy = -1; dy <= 1; dy++) {
+    let yy = bc.y + dy; if (yy < 0 || yy >= i32(prm.gh)) { continue; }
+    for (var dx = -1; dx <= 1; dx++) {
+      let xx = bc.x + dx; if (xx < 0 || xx >= i32(prm.gw)) { continue; }
+      let bi = u32(yy) * prm.gw + u32(xx);
+      let e = start[bi + 1u];
+      for (var k = start[bi]; k < e; k++) {
+        let j = items[k]; if (j == i) { continue; }
+        let qj = posR[j]; let d = x - qj.xy; let d2 = dot(d, d); let md = r + qj.z;
+        if (d2 < md * md && d2 > 1e-12) { let dl = sqrt(d2); push += d * ((md - dl) * 0.5 / dl); nb++; }
+      }
+    }
+  }
+  var spring = vec2f(0.0); var nbond = 0u;
+  for (var s = 0; s < 4; s++) {
+    let j = c.bonds[s]; if (j < 0) { continue; }
+    let qj = posR[u32(j)];
+    if (qj.z <= 0.0) { c.bonds[s] = -1; continue; }
+    let d = qj.xy - x; let dl = max(length(d), 1e-6); let rest = r + qj.z;
+    if (dl > 4.0 * rest) { c.bonds[s] = -1; continue; }
+    spring += d / dl * (dl - rest) * 0.3; nbond++;
+  }
+  let L = lightAt(x);
+  let gr = vec2f(lightAt(x + vec2f(10.0, 0.0)) - lightAt(x - vec2f(10.0, 0.0)), lightAt(x + vec2f(0.0, 10.0)) - lightAt(x - vec2f(0.0, 10.0)));
+  let sg = vec4f(L, c.e, f32(nb) / 8.0, f32(nbond) / 4.0);
+  let o = i * NG;
+  let b0 = genes[o]; let b1 = genes[o + 1u];
+  // шесть генов с регуляцией: база + добавки на четыре сигнала
+  let eff = clamp(0.5 + b0.x + dot(genes[o + 4u], sg), 0.0, 1.0);
+  let swim = clamp(b0.y + dot(genes[o + 5u], sg), 0.0, 1.0);
+  let photo = b0.z + dot(genes[o + 6u], sg);
+  let divS = 1.5 + clamp(b0.w + dot(genes[o + 7u], sg), 0.0, 1.5);
+  let life = 300.0 + 300.0 * clamp(b1.x + dot(genes[o + 8u], sg), 0.0, 1.0);
+  let sticky = clamp(b1.y + dot(genes[o + 9u], sg), 0.0, 1.0);
+  let hue = b1.z;
+  let h = pcg(i * 9781u + tick * 6271u);
+  let nz = vec2f(f32(h & 0xffffu), f32(h >> 16u)) / 65535.0 - 0.5;
+  var v = c.vel * 0.85 + push * 0.4 + spring * 0.2 + gr * photo * 3.0 + nz * swim * 0.2;
+  var q = walls(x + v);
+  c.vel = v;
+  c.e = min(c.e + L * eff * 0.06 - 0.004 * c.m - 0.003 * swim, 2.0);
+  c.age += 1.0;
+  let fi = fieldIdx(q);
+  if (c.e > 0.6 && c.m < 3.4 && takeQuantum(fi)) { c.mn += 1u; c.m += 0.03; c.e -= 0.04; }
+  if (c.e <= 0.0 || c.age > life) {
+    atomicAdd(&field[fi], c.mn); c.m = 0.0;
+    atomicSub(&info[2], 1u); atomicAdd(&info[5], 1u);
+    cells[i] = c; posW[i] = vec4f(q, 0.0, hue);
+    return;
+  }
+  if (c.m > divS && c.e > 0.4 && atomicLoad(&info[2]) < prm.popCap) {
+    if (atomicAdd(&info[2], 1u) < prm.popCap) {
+      let k = atomicAdd(&info[1], 1u); let s = slots + k;
+      if (s < prm.slotCap) {
+        c.m *= 0.5; c.e *= 0.5;
+        var d = c; d.age = 0.0; d.vel = vec2f(0.0); d.bonds = vec4i(-1); d.mn = c.mn / 2u; c.mn -= d.mn;
+        let ang = rnd(h, 7u) * 6.2831853; let off = vec2f(cos(ang), sin(ang)) * radius(c.m) * 0.6;
+        if (rnd(h, 11u) < sticky) {
+          for (var f = 0; f < 4; f++) { if (c.bonds[f] < 0) { c.bonds[f] = i32(s); d.bonds.x = i32(i); break; } }
+        }
+        for (var gk = 0u; gk < NG; gk++) {
+          let rs = vec4f(rnd(h, 100u + gk), rnd(h, 200u + gk), rnd(h, 300u + gk), rnd(h, 400u + gk));
+          let rv = vec4f(rnd(h, 500u + gk), rnd(h, 600u + gk), rnd(h, 700u + gk), rnd(h, 800u + gk));
+          genes[s * NG + gk] = genes[o + gk] + select(vec4f(0.0), (rv - 0.5) * 0.2, rs < vec4f(0.02));
+        }
+        cells[s] = d; posW[s] = vec4f(walls(q - off), radius(d.m), hue);
+        q = walls(q + off); atomicAdd(&info[4], 1u);
+      } else { atomicSub(&info[2], 1u); atomicAdd(&info[7], 1u); }
+    } else { atomicSub(&info[2], 1u); atomicAdd(&info[7], 1u); }
+  }
+  cells[i] = c; posW[i] = vec4f(q, radius(c.m), hue);
+}
+@compute @workgroup_size(1) fn finalize() {
+  let births = atomicExchange(&info[1], 0u);
+  let slots = min(atomicLoad(&info[0]) + births, prm.slotCap);
+  atomicStore(&info[0], slots); atomicAdd(&info[3], 1u);
+  args[0] = (slots + 255u) / 256u; args[1] = 1u; args[2] = 1u;
+  args[8] = 6u; args[9] = slots; args[10] = 0u; args[11] = 0u;
+}
+
+// ---- уплотнение: живые клетки по порядку корзин, связи по новым номерам ----
+@compute @workgroup_size(256) fn clearIndex(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x < atomicLoad(&info[0])) { newIndex[g.x] = 0xffffffffu; }
+}
+@compute @workgroup_size(256) fn indexCells(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x < atomicLoad(&info[6])) { newIndex[items[g.x]] = g.x; }
+}
+@compute @workgroup_size(256) fn gather(@builtin(global_invocation_id) g: vec3u) {
+  let d = g.x; if (d >= atomicLoad(&info[6])) { return; }
+  let j = items[d];
+  var c = cells[j];
+  for (var s = 0; s < 4; s++) {
+    let b = c.bonds[s];
+    if (b >= 0) { let ni = newIndex[u32(b)]; c.bonds[s] = select(-1, i32(ni), ni != 0xffffffffu); }
+  }
+  cellsDst[d] = c; posDst[d] = posR[j];
+  for (var k = 0u; k < NG; k++) { genesDst[d * NG + k] = genes[j * NG + k]; }
+}
+@compute @workgroup_size(1) fn finalizeCompact() {
+  let n = atomicLoad(&info[6]);
+  atomicStore(&info[0], n);
+  args[0] = (n + 255u) / 256u; args[1] = 1u; args[2] = 1u; args[9] = n;
+}
+`;
+
+const RENDER = /* wgsl */`
+@group(0) @binding(0) var<storage, read> pos: array<vec4f>;
+struct VO { @builtin(position) p: vec4f, @location(0) uv: vec2f, @location(1) col: vec3f };
+@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) i: u32) -> VO {
+  var corners = array<vec2f, 6>(vec2f(-1, -1), vec2f(1, -1), vec2f(-1, 1), vec2f(-1, 1), vec2f(1, -1), vec2f(1, 1));
+  let c = pos[i]; let uv = corners[vi]; var o: VO; o.uv = uv;
+  if (c.z <= 0.0) { o.p = vec4f(2.0, 2.0, 2.0, 1.0); o.col = vec3f(0.0); return o; }
+  let w = c.xy + uv * max(c.z, 1.2);
+  o.p = vec4f(w.x / ${W / 2}.0 - 1.0, 1.0 - w.y / ${H / 2}.0, 0.0, 1.0);
+  o.col = 0.55 + 0.45 * cos(6.2831853 * (c.w + vec3f(0.0, 0.33, 0.67)));
+  return o;
+}
+@fragment fn fs(v: VO) -> @location(0) vec4f { if (dot(v.uv, v.uv) > 1.0) { discard; } return vec4f(v.col, 1.0); }
+`;
+
+// ---------- свет считает CPU и отдаёт каждый ход, как поля world-1 ----------
+const lightTmp = new Float32Array(LN);
+function lightFor(tick) {
+  const t = tick * 0.002;
+  const spots = [
+    [40 + 25 * Math.sin(t), 30 + 15 * Math.cos(t * 1.3), 20],
+    [110 + 20 * Math.cos(t * 0.7), 80 + 20 * Math.sin(t * 0.9), 26],
+    [130 + 15 * Math.sin(t * 1.1), 25 + 10 * Math.sin(t * 0.5), 14],
+    [60 + 30 * Math.cos(t * 0.6), 95 + 12 * Math.sin(t * 1.7), 16],
+  ];
+  for (let y = 0; y < LH; y++) for (let x = 0; x < LW; x++) {
+    let v = 0.6;
+    for (const [sx, sy, r] of spots) { const d2 = (x - sx) ** 2 + (y - sy) ** 2; if (d2 < 9 * r * r) v += Math.exp(-d2 / (r * r)); }
+    lightTmp[y * LW + x] = Math.min(v, 1);
+  }
+  return lightTmp;
+}
+
+let s0 = 987654321;
+const rnd = () => ((s0 = (Math.imul(s0, 1664525) + 1013904223) >>> 0) / 4294967296);
+
+function setup(device, N) {
+  const popCap = N, slotCap = Math.ceil(N * 1.35) + 4096, N0 = Math.floor(N * 0.95);
+  const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+  const mk = (size, usage = S) => device.createBuffer({ size: Math.max(16, Math.ceil(size / 16) * 16), usage });
+  // начальные клетки — взрослые, в случайных местах (уплотнение разложит их по корзинам)
+  const pos = new Float32Array(slotCap * 4), cellsAB = new ArrayBuffer(slotCap * CELL_BYTES), genes = new Float32Array(slotCap * NG * 4);
+  const cf = new Float32Array(cellsAB), ci = new Int32Array(cellsAB), cu = new Uint32Array(cellsAB);
+  let cellMineral = 0;
+  for (let i = 0; i < N0; i++) {
+    const m = 0.8 + rnd() * 0.8, mn = Math.round(m * 10), hue = rnd();
+    pos.set([1 + rnd() * (W - 2), 1 + rnd() * (H - 2), 0.5 * Math.sqrt(m), hue], i * 4);
+    const o = i * 12;
+    cf[o + 2] = 0.8; cf[o + 3] = m; cf[o + 4] = rnd() * 300; cu[o + 5] = mn; cellMineral += mn;
+    ci.set([-1, -1, -1, -1], o + 8);
+    const g = i * NG * 4;
+    genes.set([0, 0.2, 0.5, 0.5, 0.5, 0.3, hue, 0], g);
+    for (let k = 16; k < 40; k++) genes[g + k] = (rnd() - 0.5) * 0.2;
+  }
+  for (let i = N0; i < slotCap; i++) ci.set([-1, -1, -1, -1], i * 12 + 8);
+  const Q0 = Math.ceil(N * 100 / LN), field = new Uint32Array(LN).fill(Q0);
+  const total0 = Q0 * LN + cellMineral;
+
+  const b = {
+    prm: mk(32, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST),
+    P: [mk(slotCap * 16), mk(slotCap * 16)],
+    C: [mk(slotCap * CELL_BYTES), mk(slotCap * CELL_BYTES)],
+    G: [mk(slotCap * NG * 16), mk(slotCap * NG * 16)],
+    meta: mk(64), counts: mk(B1 * 4), start: mk(B1 * 4), cursor: mk(B1 * 4),
+    blockSum: mk(NB * 4), blockOff: mk(NB * 4), items: mk(slotCap * 4), newIndex: mk(slotCap * 4),
+    light: mk(LB), ring: mk(LB * RING), field: mk(LB),
+    args: mk(64, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC),
+  };
+  const wq = device.queue;
+  wq.writeBuffer(b.prm, 0, new Uint32Array([popCap, slotCap, GW, GH, B, NB, 0, 0]));
+  wq.writeBuffer(b.P[0], 0, pos); wq.writeBuffer(b.C[0], 0, cellsAB); wq.writeBuffer(b.G[0], 0, genes);
+  wq.writeBuffer(b.meta, 0, new Uint32Array([N0, 0, N0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+  wq.writeBuffer(b.field, 0, field);
+  wq.writeBuffer(b.args, 0, new Uint32Array([Math.ceil(N0 / 256), 1, 1, 0, 1, 1, 0, 0, 6, N0, 0, 0, 0, 0, 0, 0]));
+  wq.writeBuffer(b.light, 0, lightFor(0));
+  return { N, N0, popCap, slotCap, b, total0, s: 0, ph: 0, tick: 0, sinceCompact: 0 };
+}
+
+async function main() {
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  const device = await adapter.requestDevice({ requiredLimits: {
+    maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
+    maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize,
+  } });
+  device.addEventListener('uncapturederror', (e) => log('ОШИБКА GPU: ' + e.error.message));
+  const module = device.createShaderModule({ code: WGSL });
+  const info = await module.getCompilationInfo();
+  for (const m of info.messages) log(`WGSL ${m.type} ${m.lineNum}:${m.linePos} ${m.message}`);
+  const pipes = {};
+  for (const e of ['clearCounts', 'count', 'scanBlocks', 'scanSums', 'scanAdd', 'scatter', 'update', 'finalize', 'clearIndex', 'indexCells', 'gather', 'finalizeCompact'])
+    pipes[e] = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: e } });
+  const canvas = document.getElementById('view'), gctx = canvas.getContext('webgpu'), format = navigator.gpu.getPreferredCanvasFormat();
+  gctx.configure({ device, format, alphaMode: 'opaque' });
+  const rmod = device.createShaderModule({ code: RENDER });
+  const rpipe = device.createRenderPipeline({ layout: 'auto', vertex: { module: rmod, entryPoint: 'vs' }, fragment: { module: rmod, entryPoint: 'fs', targets: [{ format }] }, primitive: { topology: 'triangle-list' } });
+
+  // привязки по номерам: каждый проход берёт только свои
+  const USE = {
+    clearCounts: [0, 6], count: [0, 1, 5, 6], scanBlocks: [0, 6, 7, 9], scanSums: [0, 9, 10], scanAdd: [0, 5, 7, 8, 10, 14], scatter: [0, 1, 5, 8, 11],
+    update: [0, 1, 2, 3, 4, 5, 7, 11, 12, 13], finalize: [0, 5, 14],
+    clearIndex: [5, 15], indexCells: [5, 11, 15], gather: [1, 3, 4, 5, 11, 15, 16, 17, 18], finalizeCompact: [5, 14],
+  };
+  let cache = new Map();
+  function group(ctx, name, s, ph) {
+    const key = `${name}/${s}/${ph}`;
+    if (cache.has(key)) return cache.get(key);
+    const b = ctx.b;
+    const map = { 0: b.prm, 1: b.P[ph], 2: b.P[ph ^ 1], 3: b.C[s], 4: b.G[s], 5: b.meta, 6: b.counts, 7: b.start, 8: b.cursor, 9: b.blockSum, 10: b.blockOff,
+      11: b.items, 12: b.light, 13: b.field, 14: b.args, 15: b.newIndex, 16: b.C[s ^ 1], 17: b.G[s ^ 1], 18: b.P[ph ^ 1] };
+    const g = device.createBindGroup({ layout: pipes[name].getBindGroupLayout(0), entries: USE[name].map((k) => ({ binding: k, resource: { buffer: map[k] } })) });
+    cache.set(key, g); return g;
+  }
+  function run(pass, ctx, name, s, ph, wg) {
+    pass.setPipeline(pipes[name]); pass.setBindGroup(0, group(ctx, name, s, ph));
+    if (typeof wg === 'number') pass.dispatchWorkgroups(wg); else pass.dispatchWorkgroupsIndirect(ctx.b.args, wg.at);
+  }
+  function encodeGrid(pass, ctx, s, ph) {
+    run(pass, ctx, 'clearCounts', s, ph, Math.ceil(B1 / 256));
+    run(pass, ctx, 'count', s, ph, { at: 0 });
+    run(pass, ctx, 'scanBlocks', s, ph, NB);
+    run(pass, ctx, 'scanSums', s, ph, 1);
+    run(pass, ctx, 'scanAdd', s, ph, Math.ceil(B1 / 256));
+    run(pass, ctx, 'scatter', s, ph, { at: 0 });
+  }
+  let cpuLightMs = 0, cpuLightN = 0;
+  // ходы одним отправлением; K — уплотнение раз в K ходов (0 — никогда); gridOnly — только сетка, без хода клетки
+  function encodeTicks(enc, ctx, n, K, gridOnly = false) {
+    for (let t = 0; t < n; t++) {
+      const t0 = performance.now();
+      device.queue.writeBuffer(ctx.b.ring, t * LB, lightFor(ctx.tick));
+      cpuLightMs += performance.now() - t0; cpuLightN++;
+      enc.copyBufferToBuffer(ctx.b.ring, t * LB, ctx.b.light, 0, LB);
+      const pass = enc.beginComputePass();
+      encodeGrid(pass, ctx, ctx.s, ctx.ph);
+      if (!gridOnly) run(pass, ctx, 'update', ctx.s, ctx.ph, { at: 0 });
+      run(pass, ctx, 'finalize', ctx.s, ctx.ph, 1);
+      pass.end();
+      if (!gridOnly) ctx.ph ^= 1;
+      ctx.tick++; ctx.sinceCompact++;
+      if (!gridOnly && K > 0 && ctx.sinceCompact >= K) {
+        const p2 = enc.beginComputePass();
+        encodeGrid(p2, ctx, ctx.s, ctx.ph);
+        run(p2, ctx, 'clearIndex', ctx.s, ctx.ph, { at: 0 });
+        run(p2, ctx, 'indexCells', ctx.s, ctx.ph, { at: 12 });
+        run(p2, ctx, 'gather', ctx.s, ctx.ph, { at: 12 });
+        run(p2, ctx, 'finalizeCompact', ctx.s, ctx.ph, 1);
+        p2.end();
+        ctx.s ^= 1; ctx.ph ^= 1; ctx.sinceCompact = 0;
+      }
+    }
+  }
+  function encodeDraw(enc, ctx) {
+    const rg = device.createBindGroup({ layout: rpipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ctx.b.P[ctx.ph] } }] });
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: gctx.getCurrentTexture().createView(), loadOp: 'clear', clearValue: { r: 0.02, g: 0.03, b: 0.05, a: 1 }, storeOp: 'store' }] });
+    pass.setPipeline(rpipe); pass.setBindGroup(0, rg); pass.drawIndirect(ctx.b.args, 32); pass.end();
+  }
+  async function readBuf(src, size) {
+    const r = device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const enc = device.createCommandEncoder(); enc.copyBufferToBuffer(src, 0, r, 0, size); device.queue.submit([enc.finish()]);
+    await r.mapAsync(GPUMapMode.READ); const copy = r.getMappedRange().slice(0); r.unmap(); r.destroy(); return copy;
+  }
+  const readMeta = async (ctx) => new Uint32Array(await readBuf(ctx.b.meta, 64));
+
+  // без отрисовки: сколько ходов в секунду, два пакета в полёте
+  async function simRate(ctx, seconds, K, gridOnly = false) {
+    const t0 = performance.now(), tick0 = ctx.tick; let prev = null;
+    for (;;) {
+      const enc = device.createCommandEncoder(); encodeTicks(enc, ctx, RING, K, gridOnly); device.queue.submit([enc.finish()]);
+      const cur = device.queue.onSubmittedWorkDone();
+      if (prev) await prev; prev = cur;
+      if (performance.now() - t0 > seconds * 1000) break;
+    }
+    await prev;
+    return (ctx.tick - tick0) / ((performance.now() - t0) / 1000);
+  }
+  // с отрисовкой при ×100: 200 ходов в секунду, не больше двух кадров в полёте
+  function renderRun(ctx, seconds, K) {
+    return new Promise((resolve) => {
+      let acc = 0, last = performance.now(), done = 0, inflight = 0, skipped = 0, readPending = false;
+      const t0 = last, frameDt = [], cpuMs = [], readMs = [];
+      function frame(now) {
+        frameDt.push(now - last); acc += Math.min(now - last, 100) / 1000 * 200; last = now;
+        acc = Math.min(acc, RING * 2);
+        if (inflight < 2) {
+          const c0 = performance.now();
+          const n = Math.min(Math.floor(acc), RING); acc -= n;
+          const enc = device.createCommandEncoder();
+          encodeTicks(enc, ctx, n, K); encodeDraw(enc, ctx);
+          device.queue.submit([enc.finish()]); inflight++;
+          device.queue.onSubmittedWorkDone().then(() => { inflight--; done += n; });
+          cpuMs.push(performance.now() - c0);
+        } else skipped++;
+        // обмен с миром: читать поле минерала раз в ~100 ходов
+        if (!readPending && frameDt.length % 30 === 0) {
+          readPending = true; const r0 = performance.now();
+          readBuf(ctx.b.field, LB).then(() => { readMs.push(performance.now() - r0); readPending = false; });
+        }
+        if (now - t0 < seconds * 1000) requestAnimationFrame(frame);
+        else device.queue.onSubmittedWorkDone().then(() => resolve({ rate: done / ((performance.now() - t0) / 1000), frameDt: frameDt.slice(2), cpuMs, readMs, skipped }));
+      }
+      requestAnimationFrame(frame);
+    });
+  }
+  async function check(ctx) {
+    const meta = await readMeta(ctx);
+    const slots = meta[0];
+    const cb = await readBuf(ctx.b.C[ctx.s], Math.max(16, Math.ceil(slots * CELL_BYTES / 16) * 16));
+    const f = new Float32Array(cb), u = new Uint32Array(cb), i32 = new Int32Array(cb);
+    let mineral = 0, alive = 0, bonded = 0, bonds = 0;
+    for (let i = 0; i < slots; i++) {
+      if (f[i * 12 + 3] <= 0) continue;
+      alive++; mineral += u[i * 12 + 5];
+      let nb = 0; for (let s = 0; s < 4; s++) if (i32[i * 12 + 8 + s] >= 0) nb++;
+      if (nb) bonded++; bonds += nb;
+    }
+    const fu = new Uint32Array(await readBuf(ctx.b.field, LB));
+    let fieldSum = 0, empty = 0; for (const v of fu) { fieldSum += v; if (v === 0) empty++; }
+    mineral += fieldSum;
+    return { meta, alive, bonded, bonds, mineral, fieldSum, empty };
+  }
+  const pct = (a, p) => { const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(s.length * p))] ?? NaN; };
+  const f1 = (x) => x.toFixed(1), f2 = (x) => x.toFixed(2);
+
+  if (q.has('debug')) {
+    const ctx = setup(device, 20000);
+    for (let t = 0; t < 40; t++) {
+      const enc = device.createCommandEncoder(); encodeTicks(enc, ctx, 25, 16); device.queue.submit([enc.finish()]);
+      const c = await check(ctx);
+      log(`ход ${ctx.tick}: мест ${c.meta[0]} живых ${c.meta[2]} (по клеткам ${c.alive}) в сетке ${c.meta[6]} рожд ${c.meta[4]} смертей ${c.meta[5]} отказов ${c.meta[7]}; минерал ${c.mineral - ctx.total0}, в поле ${c.fieldSum}, пустых ячеек ${c.empty}`);
+    }
+    window.lifeBench = { done: true }; return;
+  }
+  const results = []; window.lifeBench = results;
+  log(`M1, ${adapter.info?.architecture ?? ''}; сетка ${GW}×${GH}, свет и минерал ${LW}×${LH}, места с запасом 35%`);
+  for (const N of NS) {
+    cache = new Map();
+    const ctx = setup(device, N);
+    const res = { N };
+    log(`\n=== предел численности ${N.toLocaleString('ru')} (старт ${ctx.N0.toLocaleString('ru')}) ===`);
+    await simRate(ctx, 1.5, 16); // разгон: рождения, смерти, первое уплотнение
+    let m = await readMeta(ctx);
+    log(`после разгона: ход ${m[3]}, живых ${m[2]}, мест ${m[0]}, рождений ${m[4]}, смертей ${m[5]}`);
+    res.k = {};
+    for (const K of KS) {
+      cpuLightMs = 0; cpuLightN = 0;
+      const rate = await simRate(ctx, 2, K);
+      m = await readMeta(ctx);
+      res.k[K] = rate;
+      log(`без отрисовки, уплотнение ${K ? 'раз в ' + K : 'никогда'}: ${Math.round(rate)} ходов/с = ${f2(1000 / rate)} мс/ход, ${(1e6 / rate / m[2]).toFixed(4)} мкс на клетку; живых ${m[2]}, мест ${m[0]}`);
+      if (K === 0) await simRate(ctx, 0.3, 1); // вернуть порядок
+    }
+    log(`свет на CPU: ${f2(cpuLightMs / cpuLightN)} мс на ход (считается и пишется в кольцо)`);
+    const gr = await simRate(ctx, 1.5, 0, true);
+    res.grid = gr;
+    log(`только сетка (подсчёт, префиксная сумма, раскладка): ${f2(1000 / gr)} мс/ход`);
+    await simRate(ctx, 0.3, 1);
+    const rr = await renderRun(ctx, 4, 16);
+    res.render = rr.rate;
+    log(`с отрисовкой при ×100 (цель 200 ходов/с): ${Math.round(rr.rate)} ходов/с; кадр p50 ${f1(pct(rr.frameDt, 0.5))} мс, p95 ${f1(pct(rr.frameDt, 0.95))} мс; CPU на кадр p50 ${f2(pct(rr.cpuMs, 0.5))} мс; пропущено кадров ${rr.skipped}; чтение поля минерала p50 ${f1(pct(rr.readMs, 0.5))} мс`);
+    const c = await check(ctx);
+    log(`проверка: живых ${c.alive} (счётчик ${c.meta[2]}), рождений ${c.meta[4]}, смертей ${c.meta[5]}, отказов в рождении ${c.meta[7]}; в связях ${(100 * c.bonded / c.alive).toFixed(1)}% клеток, связей ${c.bonds}`);
+    log(`минерал: ${c.mineral} из ${ctx.total0} — ${c.mineral === ctx.total0 ? 'точно' : 'РАСХОЖДЕНИЕ ' + (c.mineral - ctx.total0)}`);
+    res.check = { alive: c.alive, births: c.meta[4], deaths: c.meta[5], mineralOk: c.mineral === ctx.total0 };
+    results.push(res);
+    for (const v of Object.values(ctx.b)) (Array.isArray(v) ? v : [v]).forEach((x) => x.destroy());
+  }
+  log('\nГотово.');
+  results.done = true;
+}
+main().catch((e) => { log('ОШИБКА: ' + e.message); window.lifeBench = { done: true, error: e.message }; });
+</script>
+</body>
+</html>
