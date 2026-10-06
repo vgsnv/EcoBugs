@@ -59,21 +59,45 @@ function materialFor(grid: Grid, level: Float32Array): { cond: Float64Array; dam
   return material;
 }
 
+/**
+ * Система толчка в окне вокруг источника: проводимости граней, сумма граней с
+ * трением, источник. Решение — `solvePushSystem` или ускоритель (видеокарта).
+ */
+export interface PushSystem {
+  /** Окно на сетке минерала (клетки, включительно), ширина и высота окна. */
+  i0: number; i1: number; j0: number; j1: number; w: number; h: number;
+  cell: number;
+  /** На клетку окна: проводимость (0 — преграда), грани на восток и на юг, сумма граней с трением, источник. */
+  cond: Float64Array; ce: Float64Array; cs: Float64Array; total: Float64Array; src: Float64Array;
+}
+
+/** Ускоритель решения толчка: поле или null — тогда решает CPU. */
+export interface PushAccelerator { solve(s: PushSystem): Calculation<PushField | null> }
+
 /** Единичное течение от источника в клетках `seeds` (−1 — сток: то же с обратным знаком делает вызывающий). */
 export function pushField(grid: Grid, level: Float32Array, key: string, seeds: readonly number[] | Int32Array): PushField {
   return finishCalculation(pushFieldTask(grid, level, key, seeds));
 }
 
-export function* pushFieldTask(grid: Grid, level: Float32Array, key: string, seeds: readonly number[] | Int32Array): Calculation<PushField> {
+export function* pushFieldTask(grid: Grid, level: Float32Array, key: string, seeds: readonly number[] | Int32Array, accel?: PushAccelerator): Calculation<PushField> {
   let byLevel = cache.get(level);
   if (!byLevel) { byLevel = new Map(); cache.set(level, byLevel); }
   const hit = byLevel.get(key);
   if (hit) return hit;
   phase('поле толчка (при смене местности)');
-  const field = yield* solve(grid, level, seeds);
+  const sys = yield* pushSystemTask(grid, level, seeds);
+  const field = (accel && (yield* accel.solve(sys))) || (yield* solvePushTask(sys, PUSH_ITERATIONS));
   phase('течения вулканов и воронок');
   byLevel.set(key, field);
   return field;
+}
+
+/** Для замеров: система толчка и её решение на CPU с заданным числом итераций. */
+export function pushSystem(grid: Grid, level: Float32Array, seeds: readonly number[] | Int32Array): PushSystem {
+  return finishCalculation(pushSystemTask(grid, level, seeds));
+}
+export function solvePushSystem(sys: PushSystem, iterations = PUSH_ITERATIONS): PushField {
+  return finishCalculation(solvePushTask(sys, iterations));
 }
 
 function relaxRange(cond: Float64Array, west: Float64Array, ce: Float64Array, north: Float64Array, cs: Float64Array, total: Float64Array, src: Float64Array, p: Float64Array, w: number, first: number, last: number): void {
@@ -90,7 +114,7 @@ function relaxRange(cond: Float64Array, west: Float64Array, ce: Float64Array, no
   }
 }
 
-function* solve(grid: Grid, level: Float32Array, seeds: readonly number[] | Int32Array): Calculation<PushField> {
+function* pushSystemTask(grid: Grid, level: Float32Array, seeds: readonly number[] | Int32Array): Calculation<PushSystem> {
   const { cols, rows, cell } = grid;
   // Окно: вокруг источника на PUSH_WINDOW дальностей в воде.
   let si0 = cols, si1 = 0, sj0 = rows, sj1 = 0;
@@ -129,15 +153,21 @@ function* solve(grid: Grid, level: Float32Array, seeds: readonly number[] | Int3
       if (j < h - 1) cs[q] = face(cond[q], cond[q + w]);
     }
   }
-  const west = new Float64Array(n), north = new Float64Array(n), total = new Float64Array(n);
+  const total = new Float64Array(n);
+  for (let q = 0; q < n; q++) total[q] = (q % w > 0 ? ce[q - 1] : 0) + ce[q] + (q >= w ? cs[q - w] : 0) + cs[q] + damp[q];
+  return { i0, i1, j0, j1, w, h, cell, cond, ce, cs, total, src };
+}
+
+function* solvePushTask(sys: PushSystem, iterations: number): Calculation<PushField> {
+  const { i0, i1, j0, j1, w, h, cell, cond, ce, cs, total, src } = sys, n = w * h;
+  const west = new Float64Array(n), north = new Float64Array(n);
   for (let q = 0; q < n; q++) {
     west[q] = q % w > 0 ? ce[q - 1] : 0;
     north[q] = q >= w ? cs[q - w] : 0;
-    total[q] = west[q] + ce[q] + north[q] + cs[q] + damp[q];
   }
   // Гаусс — Зейдель с верхней релаксацией; трение делает задачу устойчивой без баланса.
   const p = new Float64Array(n);
-  for (let it = 0; it < PUSH_ITERATIONS; it++) {
+  for (let it = 0; it < iterations; it++) {
     for (let first = 0; first < n; first += 2048) {
       yield;
       relaxRange(cond, west, ce, north, cs, total, src, p, w, first, Math.min(n, first + 2048));

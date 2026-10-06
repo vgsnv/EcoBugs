@@ -11,6 +11,7 @@
 import { groundTotal, mineralInDeposits, mineralInEruptions, mineralInMedium, type World } from '../core/index.ts';
 import { GpuMineral } from './mineral.ts';
 import { GpuDrift } from './drift.ts';
+import { GpuPush } from './push.ts';
 
 /** Запас 2^4 на рост сумм (подвижки меняют грунт) и на округление. */
 const HEADROOM = 16;
@@ -86,6 +87,9 @@ export class GpuWorld {
   get mineral(): GpuMineral { return this.mineralStages ??= new GpuMineral(this.device); }
   /** Поле течений от света. */
   get drift(): GpuDrift { return this.driftStage ??= new GpuDrift(this.device); }
+  private pushStage: GpuPush | null = null;
+  /** Единичные течения толчка и тяги. */
+  get push(): GpuPush { return this.pushStage ??= new GpuPush(this.device); }
 
   private constructor(device: GPUDevice) {
     this.device = device;

@@ -10,6 +10,7 @@ import {
   type DriftAccelerator, type DriftStage, type MineralAccelerator, type SurfaceStage, type TerrainState, type World,
 } from '../core/index.ts';
 import { finishCalculation, type Calculation } from '../core/task.ts';
+import { pushSystem, solvePushSystem, type PushField } from '../core/push.ts';
 import { GpuWorld, mineralTotal } from './engine.ts';
 
 const out = document.getElementById('out')!;
@@ -109,6 +110,34 @@ async function main(): Promise<void> {
     }
   }
 
+  log('Этап 6: единичное течение толчка — ядро (70 итераций), видеокарта (70, шахматный обход) и точное решение (3000 итераций)');
+  const velDiff = (a: PushField, b: PushField) => { let num = 0, den = 0; for (let q = 0; q < a.vx.length; q++) { num += (a.vx[q] - b.vx[q]) ** 2 + (a.vy[q] - b.vy[q]) ** 2; den += b.vx[q] ** 2 + b.vy[q] ** 2; } return den > 0 ? Math.sqrt(num / den) : 0; };
+  for (const seed of seeds) {
+    const world = createWorld(makeParams({ seed }));
+    while (world.step < (steps[1] ?? 20000)) stepWorld(world);
+    const m = world.mineral;
+    // Источники мира (вулканы, воронки) и три клетки воды — чтобы проверка была всегда.
+    const sources: { name: string; seeds: number[] }[] = [];
+    for (const v of m.volcanoes) sources.push({ name: `вулкан ${v.id}`, seeds: [Math.floor(v.y / m.cell) * m.cols + Math.floor(v.x / m.cell)] });
+    for (const f of m.funnels) sources.push({ name: `воронка ${f.id}`, seeds: Array.from(f.cells) });
+    for (const [fx, fy] of [[0.3, 0.4], [0.6, 0.6], [0.8, 0.3]]) {
+      let k = Math.floor(fy * m.rows) * m.cols + Math.floor(fx * m.cols);
+      while (m.blocked[k] && k < m.cols * m.rows - 1) k++;
+      sources.push({ name: `клетка ${k}`, seeds: [k] });
+    }
+    for (const src of sources.slice(0, 6)) {
+      const sys = pushSystem(m, world.terrain.applied, src.seeds);
+      const t0 = performance.now(); const cpu = solvePushSystem(sys); const cpuMs = performance.now() - t0;
+      const exact = solvePushSystem(sys, 3000);
+      const r = await gpu.push.solve(sys);
+      const eCpu = velDiff(cpu, exact), eGpu = velDiff(r.field, exact), dCg = velDiff(r.field, cpu);
+      const ok = eGpu <= Math.max(0.05, 1.5 * eCpu);
+      results.push({ stage: 6, seed, step: world.step, ok });
+      log(`  сид ${seed}, ${src.name} (окно ${sys.w}×${sys.h}): отличие от точного — ядро ${(100 * eCpu).toFixed(2)}%, видеокарта ${(100 * eGpu).toFixed(2)}%; видеокарта от ядра ${(100 * dCg).toFixed(2)}%; `
+        + `ядро ${cpuMs.toFixed(1)} мс, видеокарта с чтением ${r.ms.toFixed(1)} мс — ${ok ? 'да' : 'НЕТ'}`);
+    }
+  }
+
   // Ход мира с ускорителем: генератор ждёт видеокарту, драйвер ждёт её обещание.
   let pending: Promise<unknown> | null = null;
   const wait = function* <T>(job: Promise<T>): Generator<void, T, void> {
@@ -119,6 +148,7 @@ async function main(): Promise<void> {
   };
   const accel: MineralAccelerator = {
     *surface(st) { yield* wait(gpu.mineral.surface(st, gpu.mineralExponent, gpu.groundExponent)); },
+    push: { *solve(sys) { return (yield* wait(gpu.push.solve(sys))).field; } },
   };
   const driftAccel: DriftAccelerator = { *field(st) { return (yield* wait(gpu.drift.field(st))).field; } };
   const stepWith = async (w: World) => {

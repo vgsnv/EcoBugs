@@ -29,7 +29,7 @@ import { cellInsideDish, dishOf } from './dish.ts';
 import { freeRegions, isBlocked, type PartitionLayout } from './partitions.ts';
 import { Rng, deriveSeed, hash3 } from './prng.ts';
 import { multiplierForLevel } from './viscosity.ts';
-import { pushFieldTask, type PushField } from './push.ts';
+import { pushFieldTask, type PushAccelerator, type PushField } from './push.ts';
 import { phase } from './profile.ts';
 
 /**
@@ -513,6 +513,8 @@ export interface MineralAccelerator {
    * `erosionOut`, `settlingOut`, прибавляет к `lift` и `net`.
    */
   surface?(a: SurfaceStage): Calculation;
+  /** Решение единичного течения толчка или тяги (как `solvePushSystem`) — при смене местности и новых источниках. */
+  push?: PushAccelerator;
 }
 
 /** Вход этапа «поверхность»: среда, грунт, стекание. */
@@ -632,7 +634,7 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   // Воронки и течения от вулканов и воронок — по состоянию на начало промежутка.
   yield* updateFunnels(m, params, terrain, P);
   phase('течения вулканов и воронок');
-  m.flow = yield* pushFlow(m, params, terrain, step - P, step);
+  m.flow = yield* pushFlow(m, params, terrain, step - P, step, accel?.push);
 
   // Сумма течений (свет + вулканы и воронки) по клеткам — для переноса шажками.
   phase('сумма течений');
@@ -1184,7 +1186,7 @@ function* updateFunnels(m: MineralState, params: WorldParams, terrain: TerrainSt
   }
 }
 
-function* pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, from: number, to: number): Calculation<{ vx: Float32Array; vy: Float32Array } | null> {
+function* pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, from: number, to: number, accel?: PushAccelerator): Calculation<{ vx: Float32Array; vy: Float32Array } | null> {
   const erupting = m.volcanoes.filter((v) => v.stage === 'erupting');
   if (erupting.length === 0 && m.funnels.length === 0) return null;
   const { pushX: vx, pushY: vy } = workspace(m);
@@ -1202,12 +1204,12 @@ function* pushFlow(m: MineralState, params: WorldParams, terrain: TerrainState, 
     const q = ventPushAverage(params, vol, from, to);
     if (q <= 0) continue;
     const vent = Math.floor(vol.y / m.cell) * m.cols + Math.floor(vol.x / m.cell);
-    add(yield* pushFieldTask(m, terrain.applied, `v${vent}`, [vent]), q);
+    add(yield* pushFieldTask(m, terrain.applied, `v${vent}`, [vent], accel), q);
   }
   // Тяга воронки — сила × единичное течение её отверстия (место и форма постоянны — кеш по номеру).
   for (const f of m.funnels) {
     if (f.strength <= 0) continue;
-    add(yield* pushFieldTask(m, terrain.applied, `f${f.id}`, f.cells), -FUNNEL_DRAW * Math.PI * f.reach * f.reach * f.strength);
+    add(yield* pushFieldTask(m, terrain.applied, `f${f.id}`, f.cells, accel), -FUNNEL_DRAW * Math.PI * f.reach * f.reach * f.strength);
   }
   return { vx, vy };
 }

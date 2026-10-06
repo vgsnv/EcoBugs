@@ -37,7 +37,7 @@ let gpuUnavailable: string | null = null;
 let gpuStarting = false;
 let waiting: Promise<void> | null = null;
 function computeState(): ComputeState {
-  return { mode: computeMode, unavailable: gpuUnavailable, ...(computeMode === 'gpu' && lastStages.surface > 0 ? { stages: { surface: lastStages.surface, parts: [...lastStages.parts], drift: lastStages.drift, driftIterations: lastStages.driftIterations } } : {}) };
+  return { mode: computeMode, unavailable: gpuUnavailable, ...(computeMode === 'gpu' && lastStages.surface > 0 ? { stages: { surface: lastStages.surface, parts: [...lastStages.parts], drift: lastStages.drift, driftIterations: lastStages.driftIterations, push: lastStages.push } } : {}) };
 }
 
 function useCpu(reason: string): void {
@@ -77,9 +77,19 @@ const accelerator: MineralAccelerator = {
     if (run) throw Error('Видеокарта: суммы долей на поверхности не совпали');
     yield* surfaceTask(a);
   },
+  push: {
+    *solve(sys) {
+      const g = gpu;
+      if (!g?.usable) return null;
+      const run = yield* awaitGpu(g.push.solve(sys));
+      if (!run) { gpuFailed(null, g); return null; }
+      lastStages.push = run.ms;
+      return run.field;
+    },
+  },
 };
 /** Последний этап на видеокарте: время с ожиданием, мс, и его части. */
-const lastStages = { surface: 0, parts: [0, 0, 0], drift: 0, driftIterations: 0 };
+const lastStages = { surface: 0, parts: [0, 0, 0], drift: 0, driftIterations: 0, push: 0 };
 
 /** Поле течений на видеокарте; null — пусть считает ядро. */
 const driftAccelerator: DriftAccelerator = {
