@@ -11,11 +11,20 @@ import { formatArea, formatLength, formatMass, formatNumber, formatPercent, form
 import { PanelTabs, type PanelTab } from './tabs.ts';
 
 /**
- * Быстрые скорости — кнопки под ползунком и клавиши 1–6. Наибольшая ×100 —
- * режим «эволюция»; ×1 — жизнь одной клетки, ×10–×30 — популяции.
+ * Быстрые скорости — кнопки под ползунком и клавиши 1–5. Ползунок
+ * логарифмический: каждая кнопка — в 10 раз быстрее предыдущей.
  */
-export const SPEEDS = [1, 2, 5, 10, 30, 100] as const;
-export const MAX_SPEED = 100;
+export const SPEEDS = [1, 10, 100, 1000, 10000] as const;
+export const MAX_SPEED = 10000;
+/** Делений ползунка на порядок скорости: стрелка меняет скорость примерно на 2%. */
+const SLIDER_PER_DECADE = 100;
+const sliderToSpeed = (v: number) => roundSpeed(10 ** (v / SLIDER_PER_DECADE));
+const speedToSlider = (speed: number) => Math.round(Math.log10(speed) * SLIDER_PER_DECADE);
+/** Скорость с двумя значащими цифрами: ×1,2 … ×9,8, ×10 … ×99, ×100 … ×9900, ×10000. */
+export const roundSpeed = (speed: number) => {
+  const p = 10 ** (Math.floor(Math.log10(Math.max(1, speed))) - 1);
+  return Math.min(MAX_SPEED, Math.max(1, Math.round(speed / p) * p));
+};
 
 export interface PanelHandlers {
   onLayoutChange(): void;
@@ -59,7 +68,7 @@ const IDLE_MS = 2500;
 const PEEK_EDGE = 28;
 const PEEK_LEAVE = 120;
 
-/** Горячие клавиши скоростей: 1…7. */
+/** Горячие клавиши скоростей: 1…5. */
 export const SPEED_KEYS = SPEEDS.map((_, i) => String(i + 1));
 
 const OPEN_GROUPS_KEY = 'ecobugs.params.open';
@@ -176,7 +185,7 @@ export class Panel {
   private readonly runLabel = el('span', { className: 'desktop-control-label', textContent: 'Пауза' });
   private readonly speedPresets: { speed: number; button: HTMLButtonElement }[] = [];
   private readonly pauseButton = el('button', { className: 'run-toggle', ariaLabel: 'Пауза', title: 'Пауза (Пробел)' });
-  private readonly speedSlider = el('input', { type: 'range', min: '1', max: String(MAX_SPEED), step: '1', value: '1', ariaLabel: 'Скорость мира', className: 'speed-slider', title: '×1 — реальное время; ×10 — в 10 раз быстрее; клавиши 1–6, стрелки — по единице' });
+  private readonly speedSlider = el('input', { type: 'range', min: '0', max: String(speedToSlider(MAX_SPEED)), step: '1', value: '0', ariaLabel: 'Скорость мира', className: 'speed-slider', title: '×1 — реальное время; каждое деление-кнопка — в 10 раз быстрее; клавиши 1–5, стрелки — примерно на 2%' });
   private readonly speedValue = el('output', { className: 'speed-value', textContent: '×1' });
   private readonly paramsToggle = el('button', { textContent: 'Новый мир', ariaLabel: 'Новый мир', ariaExpanded: 'false', title: 'Открыть настройки нового мира', className: 'params-toggle' });
   private readonly focusToggle = el('button', { className: 'focus-toggle', ariaLabel: 'На весь экран', ariaPressed: 'false', title: 'На весь экран (F)' });
@@ -392,14 +401,13 @@ export class Panel {
       if (e.key === ' ' || e.key === 'Enter') e.stopPropagation();
     });
     const speedTicks = el('div', { className: 'speed-ticks' });
-    // Ползунок линейный — малые скорости (×2, ×5) берутся кнопками или клавишами.
     for (const [i, s] of SPEEDS.entries()) {
       const tick = el('button', { type: 'button', textContent: `×${s}`, title: `Скорость ×${s} (клавиша ${i + 1})`, ariaLabel: `Скорость ×${s}`, ariaPressed: 'false' });
       tick.addEventListener('click', () => this.handlers.onSpeed(s));
       speedTicks.append(tick);
       this.speedPresets.push({ speed: s, button: tick });
     }
-    this.speedSlider.addEventListener('input', () => this.handlers.onSpeed(Number(this.speedSlider.value)));
+    this.speedSlider.addEventListener('input', () => this.handlers.onSpeed(sliderToSpeed(Number(this.speedSlider.value))));
     const speedControl = el('div', { className: 'speed-control' },
       el('div', { className: 'speed-head' }, el('span', { textContent: 'Скорость' }), this.speedValue),
       this.speedSlider, speedTicks);
@@ -1077,11 +1085,11 @@ export class Panel {
       this.runLabel.textContent = this.pauseButton.ariaLabel;
       this.pauseButton.title = `${this.pauseButton.ariaLabel} (Пробел)`;
     }
-    if (Number(this.speedSlider.value) !== speed) this.speedSlider.value = String(speed);
+    if (sliderToSpeed(Number(this.speedSlider.value)) !== speed) this.speedSlider.value = String(speedToSlider(speed));
     const selected = `×${speed.toLocaleString('ru', { maximumFractionDigits: speed < 10 ? 2 : speed < 100 ? 1 : 0 })}`;
     if (this.speedValue.textContent !== selected) this.speedValue.textContent = selected;
     this.speedSlider.setAttribute('aria-valuetext', selected);
-    this.speedSlider.style.setProperty('--speed-progress', `${(speed - 1) / (MAX_SPEED - 1) * 100}%`);
+    this.speedSlider.style.setProperty('--speed-progress', `${Math.log10(speed) / Math.log10(MAX_SPEED) * 100}%`);
     for (const preset of this.speedPresets) {
       const pressed = String(Math.abs(speed - preset.speed) < preset.speed * 1e-9);
       if (preset.button.getAttribute('aria-pressed') !== pressed) preset.button.setAttribute('aria-pressed', pressed);
