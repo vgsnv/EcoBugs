@@ -10,7 +10,7 @@
  * раскладки — последнему), поэтому сумма долей сохраняется точно. Сложение из
  * многих потоков — `atomicAdd` младших слов и перенос в старшие.
  */
-import { MINERAL_LAYER, MINERAL_MOBILITY, RUNOFF, SAND_RATE, SAND_TOP, SAND_UNDER, SLUMP_RATE, TRANSPORT_SUBSTEPS, type SurfaceStage } from '../core/index.ts';
+import { MINERAL_LAYER, MINERAL_MOBILITY, RUNOFF, SAND_RATE, SAND_TOP, SAND_UNDER, SLUMP_RATE, TRANSPORT_SUBSTEPS, type SnapshotTargets, type SurfaceStage } from '../core/index.ts';
 import { fromShares, shareSum, toShares } from './engine.ts';
 
 const WGSL = /* wgsl */`
@@ -389,6 +389,52 @@ const TAIL_USE = {
 } as const;
 type TailName = keyof typeof TAIL_USE;
 
+
+// Накопление показа изменений грунта: подъём течением и итог переноса и осыпания — между чтениями снимка.
+const ACC = /* wgsl */`
+struct AU { n: u32, scaleG: f32 };
+@group(0) @binding(0) var<uniform> au: AU;
+@group(0) @binding(1) var<storage, read> liftIn: array<f32>;
+@group(0) @binding(2) var<storage, read> gNow: array<vec2u>;
+@group(0) @binding(3) var<storage, read> gOld: array<vec2u>;
+@group(0) @binding(4) var<storage, read_write> accLift: array<f32>;
+@group(0) @binding(5) var<storage, read_write> accNet: array<f32>;
+fn sub64(a: vec2u, b: vec2u) -> vec2u { return vec2u(a.x - b.x, a.y - b.y - select(0u, 1u, a.x < b.x)); }
+fn toFs(a: vec2u) -> f32 {
+  let neg = (a.y & 0x80000000u) != 0u;
+  let m = select(a, sub64(vec2u(0u), a), neg);
+  let v = f32(m.y) * 4294967296.0 + f32(m.x);
+  return select(v, -v, neg);
+}
+@compute @workgroup_size(64) fn accumulate(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x >= au.n) { return; }
+  accLift[g.x] += liftIn[g.x];
+  accNet[g.x] += toFs(sub64(gNow[g.x], gOld[g.x])) / au.scaleG;
+}`;
+
+/** Сколько обновлений видеокарта может принять вперёд, прежде чем Worker подождёт; сколько буферов чтения; как часто читать снимок, мс. */
+const MAX_AHEAD = 3;
+const READ_SLOTS = 3;
+const READ_INTERVAL_MS = 10;
+const MASK64 = (1n << 64n) - 1n;
+const wrap64 = (x: bigint) => x & MASK64;
+
+/** Состояние на видеокарте с последней загрузки: показатели долей, исходные суммы, счётчики для сверки. */
+interface Session {
+  id: number; owner: object; n: number; mExp: number; gExp: number;
+  /** Сумма долей минерала (среда + залежи) и грунта при загрузке. */
+  mBase: bigint; gBase: bigint;
+  /** Доли минерала, добавленные бросками и жерлом с загрузки (считает CPU). Накопленные суммы — BigInt: они уходят за 2⁵³, а на видеокарте считаются по модулю 2⁶⁴. */
+  added: bigint;
+  /** Накопленные на видеокарте суммы (доли), уже учтённые миром. */
+  sunk: bigint; drowned: bigint; debt: bigint;
+  /** Номер последнего принятого снимка. */
+  lastSeq: number;
+}
+interface ReadSlot { buf: GPUBuffer; state: 'free' | 'pending' | 'ready'; seq: number; session: number; added: bigint; dead: boolean }
+/** Итог приёма снимков: суммы в единицах мира (для `applySnapshot`) и совпали ли суммы долей. */
+export interface SnapshotSums { sunk: number; drowned: number; debt: number; exact: boolean; snapshots: number; mismatch?: string; /** Невязка сумм долей: минерал и грунт. */ diff: number; groundDiff: number }
+
 /** Слагаемые суммы течений на видеокарте: узлы течений и окна полей толчка. */
 export interface FlowBuffers { a: GPUBuffer; b: GPUBuffer; u: number; pushes: { buf: GPUBuffer; i0: number; j0: number; w: number; h: number; strength: number }[] }
 
@@ -417,7 +463,7 @@ export class GpuMineral {
   private readonly device: GPUDevice;
   private readonly pipes: Record<Name, GPUComputePipeline>;
   private cells = 0;
-  private b: Record<'uniform' | 'F' | 'A' | 'flow' | 'mob' | 'mask' | 'B' | 'dep' | 'ground' | 'erosion' | 'settling' | 'G' | 'lift' | 'read', GPUBuffer> | null = null;
+  private b: Record<'uniform' | 'F' | 'A' | 'flow' | 'mob' | 'mask' | 'B' | 'dep' | 'ground' | 'erosion' | 'settling' | 'G' | 'lift' | 'read' | 'G0' | 'accLift' | 'accNet' | 'accU', GPUBuffer> | null = null;
   private groups: Record<Name, GPUBindGroup> | null = null;
   private fShares = new Uint32Array(0);
   private dShares = new Uint32Array(0);
@@ -430,14 +476,21 @@ export class GpuMineral {
   /** Списки клеток ареолов и следов подвижек — по объекту массива ядра (ядро их тоже кеширует). */
   private readonly listBuffers = new WeakMap<ArrayBufferView, GPUBuffer>();
   private tailBufs: { exch: GPUBuffer; sinking: GPUBuffer; tect: GPUBuffer } | null = null;
+  private readonly accumulatePipe: GPUComputePipeline;
   private readonly flowBase: GPUComputePipeline;
   private readonly pushAdd: GPUComputePipeline;
   private flowsU: GPUBuffer | null = null;
   private pushU: GPUBuffer[] = [];
   private pushOut: GPUBuffer | null = null;
 
+  /** Первая ошибка проверки команд — после неё видеокарте не доверяем. */
+  failure: string | null = null;
+  /** Вызывается, когда снимок прочитан и ждёт `fold`. */
+  onReady: (() => void) | null = null;
+
   constructor(device: GPUDevice) {
     this.device = device;
+    this.accumulatePipe = device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code: ACC }), entryPoint: 'accumulate' } });
     const module = device.createShaderModule({ code: WGSL });
     this.pipes = Object.fromEntries((Object.keys(USED) as Name[]).map((e) => [e, device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: e } })])) as Record<Name, GPUComputePipeline>;
     const tm = device.createShaderModule({ code: TAIL });
@@ -461,15 +514,21 @@ export class GpuMineral {
    * Хвост после стекания — как `tailTask` ядра. Возвращает доли, добавленные бросками и жерлом
    * (минерал), — для сверки суммы; одноразовые буферы — в `temp`, их освобождает вызывающий.
    */
-  private encodeTail(enc: GPUCommandEncoder, s: SurfaceStage, n: number, mExp: number, gExp: number, temp: GPUBuffer[]): number {
-    const tail = s.tail!, d = this.device, b = this.b!;
+  private ensureTail(n: number): NonNullable<GpuMineral['tailBufs']> {
     if (!this.tailBufs || this.tailBufs.sinking.size < n * 4) {
       if (this.tailBufs) for (const x of Object.values(this.tailBufs)) x.destroy();
       const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
-      this.tailBufs = { exch: d.createBuffer({ size: 48, usage: S }), sinking: d.createBuffer({ size: n * 4, usage: S }), tect: d.createBuffer({ size: n * 4, usage: S }) };
+      this.tailBufs = { exch: this.device.createBuffer({ size: 48, usage: S }), sinking: this.device.createBuffer({ size: n * 4, usage: S }), tect: this.device.createBuffer({ size: n * 4, usage: S }) };
     }
-    const tb = this.tailBufs;
-    enc.clearBuffer(tb.exch); enc.clearBuffer(tb.sinking); enc.clearBuffer(tb.tect);
+    return this.tailBufs;
+  }
+
+  private encodeTail(enc: GPUCommandEncoder, s: SurfaceStage, n: number, mExp: number, gExp: number, temp: GPUBuffer[], resident: boolean): number {
+    const tail = s.tail!, d = this.device, b = this.b!;
+    const tb = this.ensureTail(n);
+    // Показ ухода в недра — за последнее обновление; суммы и тектоника с видеокарты накапливаются между чтениями снимка.
+    enc.clearBuffer(tb.sinking);
+    if (!resident) { enc.clearBuffer(tb.exch); enc.clearBuffer(tb.tect); }
     const scaleM = 2 ** mExp, scaleG = 2 ** gExp;
     const mkTemp = (data: ArrayBufferView & { buffer: ArrayBufferLike }, usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST) => {
       const x = d.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage });
@@ -554,6 +613,9 @@ export class GpuMineral {
   private ensure(n: number): void {
     if (n === this.cells && this.b) return;
     if (this.b) for (const x of Object.values(this.b)) x.destroy();
+    for (const slot of this.ring) { slot.dead = true; slot.buf.destroy(); }
+    this.mobSource = null;
+    this.ring = []; this.ready = []; this.session = null;
     const d = this.device, S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const make = (size: number, usage = S) => d.createBuffer({ size: Math.ceil(size / 16) * 16, usage });
     this.b = {
@@ -561,16 +623,19 @@ export class GpuMineral {
       F: make(n * 8), A: make(n * 8), flow: make(n * 8), mob: make(n * 4), mask: make(n * 4), B: make(n * 8),
       dep: make(n * 8), ground: make(n * 8), erosion: make(n * 4), settling: make(n * 4), G: make(n * 8), lift: make(n * 4),
       read: make(n * 60 + 48, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
+      G0: make(n * 8), accLift: make(n * 4), accNet: make(n * 4), accU: make(16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST),
     };
     const b = this.b;
     const order = [b.uniform, b.F, b.A, b.flow, b.mob, b.mask, b.B, b.dep, b.ground, b.erosion, b.settling, b.G, b.lift];
     this.groups = Object.fromEntries((Object.keys(USED) as Name[]).map((e) => [e, d.createBindGroup({
       layout: this.pipes[e].getBindGroupLayout(0), entries: USED[e].map((binding) => ({ binding, resource: { buffer: order[binding] } })),
     })])) as Record<Name, GPUBindGroup>;
+    this.accGroup = d.createBindGroup({ layout: this.accumulatePipe.getBindGroupLayout(0), entries: [b.accU, b.lift, b.G, b.G0, b.accLift, b.accNet].map((buf, binding) => ({ binding, resource: { buffer: buf } })) });
     this.fShares = new Uint32Array(n * 2); this.dShares = new Uint32Array(n * 2); this.gShares = new Uint32Array(n * 2);
     this.flowData = new Float32Array(n * 2); this.mobData = new Float32Array(n); this.maskData = new Uint32Array(n);
     this.cells = n;
   }
+  private accGroup: GPUBindGroup | null = null;
 
   private pass(enc: GPUCommandEncoder, name: Name): void {
     const p = enc.beginComputePass();
@@ -578,10 +643,9 @@ export class GpuMineral {
     p.end();
   }
 
-  /** Среда, перенос и осыпание грунта, стекание — как `surfaceTask` ядра. */
-  async surface(s: SurfaceStage, mExp: number, gExp: number, flows?: FlowBuffers): Promise<StageRun> {
-    const t0 = performance.now();
-    const { cols, rows, cell, blocked } = s.m, n = cols * rows, n8 = n * 8;
+  /** Параметры этапа, маска и подвижность, течения без видеокарты; состояние — только если оно не живёт на видеокарте. */
+  private writeInputs(s: SurfaceStage, mExp: number, gExp: number, flows: boolean, resident: boolean): number {
+    const { cols, rows, cell, blocked } = s.m, n = cols * rows;
     this.ensure(n);
     const b = this.b!, q = this.device.queue;
     const ub = new ArrayBuffer(96), u = new Uint32Array(ub), f = new Float32Array(ub);
@@ -592,22 +656,29 @@ export class GpuMineral {
       s.sinkSettle, RUNOFF * s.P, s.sandOver, SAND_RATE * s.perLvl,
       SAND_TOP, SAND_UNDER, SLUMP_RATE, s.slope], 4);
     q.writeBuffer(b.uniform, 0, ub);
-    toShares(s.src, mExp, this.fShares); toShares(s.terrain.deposits, mExp, this.dShares); toShares(s.terrain.ground, gExp, this.gShares);
     this.cols = cols;
-    for (let k = 0; k < n; k++) {
-      this.mobData[k] = s.mobility[k];
-      this.maskData[k] = (blocked[k] ? 1 : 0) | (s.holes[k] ? 2 : 0);
+    if (this.mobSource !== s.mobility) {
+      for (let k = 0; k < n; k++) this.mobData[k] = s.mobility[k];
+      q.writeBuffer(b.mob, 0, this.mobData);
+      this.mobSource = s.mobility;
     }
+    for (let k = 0; k < n; k++) this.maskData[k] = (blocked[k] ? 1 : 0) | (s.holes[k] ? 2 : 0);
+    q.writeBuffer(b.mask, 0, this.maskData);
     if (!flows) {
       for (let k = 0; k < n; k++) { this.flowData[2 * k] = s.tvx[k]; this.flowData[2 * k + 1] = s.tvy[k]; }
       q.writeBuffer(b.flow, 0, this.flowData);
     }
-    q.writeBuffer(b.F, 0, this.fShares); q.writeBuffer(b.dep, 0, this.dShares); q.writeBuffer(b.ground, 0, this.gShares);
-    q.writeBuffer(b.mob, 0, this.mobData); q.writeBuffer(b.mask, 0, this.maskData);
-    const mineralBefore = shareSum(this.fShares) + shareSum(this.dShares), groundBefore = shareSum(this.gShares);
-    const t1 = performance.now();
-    this.device.pushErrorScope('validation');
-    const enc = this.device.createCommandEncoder();
+    if (!resident) {
+      toShares(s.src, mExp, this.fShares); toShares(s.terrain.deposits, mExp, this.dShares); toShares(s.terrain.ground, gExp, this.gShares);
+      q.writeBuffer(b.F, 0, this.fShares); q.writeBuffer(b.dep, 0, this.dShares); q.writeBuffer(b.ground, 0, this.gShares);
+    }
+    return n;
+  }
+  private mobSource: Float64Array | null = null;
+
+  /** Весь расчёт обновления — как `surfaceTask` ядра; в `resident` поле остаётся в `F` для следующего обновления. Возвращает доли, добавленные бросками и жерлом. */
+  private encodeUpdate(enc: GPUCommandEncoder, s: SurfaceStage, n: number, mExp: number, gExp: number, flows: FlowBuffers | undefined, resident: boolean, temp: GPUBuffer[]): number {
+    const b = this.b!, n8 = n * 8;
     if (flows) this.encodeFlows(enc, flows, n);
     // Среда: перенос F → A, растекание A → B, оседание и размыв в B и залежах.
     enc.clearBuffer(b.A);
@@ -618,21 +689,41 @@ export class GpuMineral {
     // Грунт: перенос течением по снимку ground → G, затем осыпание по новому снимку.
     enc.clearBuffer(b.lift);
     enc.copyBufferToBuffer(b.ground, 0, b.G, 0, n8);
+    if (resident) enc.copyBufferToBuffer(b.ground, 0, b.G0, 0, n8);
     this.pass(enc, 'sand');
     enc.copyBufferToBuffer(b.G, 0, b.ground, 0, n8);
     this.pass(enc, 'slump');
     enc.copyBufferToBuffer(b.G, 0, b.ground, 0, n8);
+    if (resident) {
+      const p = enc.beginComputePass();
+      p.setPipeline(this.accumulatePipe); p.setBindGroup(0, this.accGroup!); p.dispatchWorkgroups(Math.ceil(n / 64));
+      p.end();
+    }
     // Стекание: поле после среды B → F (вход) и A (выход).
     enc.copyBufferToBuffer(b.B, 0, b.F, 0, n8);
     enc.copyBufferToBuffer(b.B, 0, b.A, 0, n8);
     this.pass(enc, 'runoff');
-    const temp: GPUBuffer[] = [];
     // Грунт после осыпания — в G уже лежит (стекание его не меняет); хвост меняет G и залежи.
-    const added = s.tail ? this.encodeTail(enc, s, n, mExp, gExp, temp) : 0;
+    const added = s.tail ? this.encodeTail(enc, s, n, mExp, gExp, temp, resident) : 0;
+    if (resident) enc.copyBufferToBuffer(b.A, 0, b.F, 0, n8);
+    return added;
+  }
+
+  /** Среда, перенос и осыпание грунта, стекание — как `surfaceTask` ядра; состояние — из CPU-мира и обратно, с ожиданием. */
+  async surface(s: SurfaceStage, mExp: number, gExp: number, flows?: FlowBuffers): Promise<StageRun> {
+    const t0 = performance.now();
+    const n = this.writeInputs(s, mExp, gExp, !!flows, false), n8 = n * 8;
+    const b = this.b!, q = this.device.queue;
+    const mineralBefore = shareSum(this.fShares) + shareSum(this.dShares), groundBefore = shareSum(this.gShares);
+    const t1 = performance.now();
+    this.device.pushErrorScope('validation');
+    const enc = this.device.createCommandEncoder();
+    const temp: GPUBuffer[] = [];
+    const added = this.encodeUpdate(enc, s, n, mExp, gExp, flows, false, temp);
     let at = 0;
     const parts: [GPUBuffer, number][] = [[b.A, n8], [b.dep, n8], [b.ground, n8], [b.erosion, n * 4], [b.settling, n * 4], [b.lift, n * 4]];
     if (flows) parts.push([b.flow, n8], [this.pushOut!, n8]);
-    const tailAt = at + parts.reduce((x, [, size]) => x + size, 0);
+    const tailAt = parts.reduce((x, [, size]) => x + size, 0);
     if (s.tail) parts.push([this.tailBufs!.exch, 48], [this.tailBufs!.sinking, n * 4], [this.tailBufs!.tect, n * 4]);
     for (const [buf, size] of parts) { enc.copyBufferToBuffer(buf, 0, b.read, at, size); at += size; }
     q.submit([enc.finish()]);
@@ -668,5 +759,166 @@ export class GpuMineral {
     const t3 = performance.now();
     return { ms: t3 - t0, prepMs: t1 - t0, gpuMs: t2 - t1, doneMs: t3 - t2,
       exact: shareSum(field) + shareSum(deposits) + sunk + drowned === mineralBefore + added && shareSum(ground) === groundBefore + gAdded - gTaken };
+  }
+
+  // ---- Состояние на видеокарте: обновления отправляются без ожидания, снимок читается с отставанием ----
+  private session: Session | null = null;
+  private sessionCounter = 0;
+  private ring: ReadSlot[] = [];
+  private ready: ReadSlot[] = [];
+  private fences: Promise<void>[] = [];
+  private readSeq = 0;
+  private lastRead = 0;
+
+  /** Состояние этого мира уже на видеокарте. */
+  loaded(owner: object): boolean { return this.session?.owner === owner; }
+
+  /** Загрузить состояние CPU-мира на видеокарту: с этого момента оно живёт там, а массивы мира — снимок. */
+  load(s: SurfaceStage, mExp: number, gExp: number): void {
+    const n = s.m.cols * s.m.rows;
+    this.ensure(n);
+    const b = this.b!, q = this.device.queue, tb = this.ensureTail(n);
+    toShares(s.m.field, mExp, this.fShares); toShares(s.terrain.deposits, mExp, this.dShares); toShares(s.terrain.ground, gExp, this.gShares);
+    q.writeBuffer(b.F, 0, this.fShares); q.writeBuffer(b.dep, 0, this.dShares); q.writeBuffer(b.ground, 0, this.gShares);
+    const zero = this.device.createCommandEncoder();
+    for (const x of [b.accLift, b.accNet, tb.exch, tb.tect, tb.sinking]) zero.clearBuffer(x);
+    q.submit([zero.finish()]);
+    const au = new ArrayBuffer(16); new Uint32Array(au)[0] = n; new Float32Array(au)[1] = 2 ** gExp;
+    q.writeBuffer(b.accU, 0, au);
+    for (const slot of this.ring) if (slot.state === 'ready') { slot.buf.unmap(); slot.state = 'free'; }
+    this.ready = [];
+    this.session = { id: ++this.sessionCounter, owner: s.m, n, mExp, gExp, mBase: BigInt(shareSum(this.fShares) + shareSum(this.dShares)), gBase: BigInt(shareSum(this.gShares)),
+      added: 0n, sunk: 0n, drowned: 0n, debt: 0n, lastSeq: 0 };
+    this.mobSource = null;
+  }
+
+  /** Забыть состояние на видеокарте (после снимка в мир). */
+  release(): void { this.session = null; }
+
+  /** Если обновлений в полёте слишком много — обещание, которого надо дождаться. */
+  ahead(): Promise<void> | null { return this.fences.length >= MAX_AHEAD ? this.fences[0] : null; }
+
+  /** Слоты чтения: 'free' — можно копировать снимок. */
+  private freeSlot(n: number): ReadSlot | null {
+    for (const slot of this.ring) if (slot.state === 'free') return slot;
+    if (this.ring.length < READ_SLOTS) {
+      const slot: ReadSlot = { buf: this.device.createBuffer({ label: 'снимок', size: Math.ceil((n * 64 + 64) / 16) * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), state: 'free', seq: 0, session: 0, added: 0n, dead: false };
+      this.ring.push(slot);
+      return slot;
+    }
+    return null;
+  }
+
+  /** Копия состояния и накопленного в слот чтения; накопители очищаются. */
+  private encodeRead(enc: GPUCommandEncoder, slot: ReadSlot, n: number, withFlows: boolean): void {
+    const b = this.b!, tb = this.tailBufs!, n8 = n * 8, n4 = n * 4;
+    const parts: [GPUBuffer, number][] = [[b.A, n8], [b.dep, n8], [b.ground, n8], [b.erosion, n4], [b.settling, n4], [b.accLift, n4], [b.accNet, n4],
+      [tb.exch, 48], [tb.sinking, n4], [tb.tect, n4]];
+    if (withFlows) parts.push([b.flow, n8], [this.pushOut!, n8]);
+    let at = 0;
+    for (const [buf, size] of parts) { enc.copyBufferToBuffer(buf, 0, slot.buf, at, size); at += size; }
+    enc.clearBuffer(b.accLift); enc.clearBuffer(b.accNet); enc.clearBuffer(tb.tect);
+  }
+
+  private mapSlot(slot: ReadSlot): Promise<void> {
+    slot.state = 'pending';
+    return slot.buf.mapAsync(GPUMapMode.READ).then(() => { slot.state = 'ready'; this.ready.push(slot); this.onReady?.(); }, (e) => { slot.state = 'free'; if (!slot.dead) this.failure ??= `чтение снимка: ${String(e)}`; });
+  }
+
+  /** Отправить обновление без ожидания. Снимок прикладывается, если пора и есть свободный слот. */
+  submit(s: SurfaceStage, flows: FlowBuffers): { read: boolean } {
+    const se = this.session!;
+    const n = this.writeInputs(s, se.mExp, se.gExp, true, true);
+    const temp: GPUBuffer[] = [];
+    this.device.pushErrorScope('validation');
+    const enc = this.device.createCommandEncoder();
+    se.added += BigInt(this.encodeUpdate(enc, s, n, se.mExp, se.gExp, flows, true, temp));
+    const now = performance.now();
+    const slot = now - this.lastRead >= READ_INTERVAL_MS ? this.freeSlot(n) : null;
+    if (slot) {
+      this.encodeRead(enc, slot, n, true);
+      slot.seq = ++this.readSeq; slot.session = se.id; slot.added = se.added;
+      this.lastRead = now;
+    }
+    this.device.queue.submit([enc.finish()]);
+    this.device.popErrorScope().then((failure) => { if (failure) this.failure ??= `видеокарта отклонила обновление: ${failure.message.split('\n')[0]}`; });
+    if (slot) void this.mapSlot(slot);
+    const fence = this.device.queue.onSubmittedWorkDone().then(() => {
+      for (const x of temp) x.destroy();
+      const at = this.fences.indexOf(fence);
+      if (at >= 0) this.fences.splice(at, 1);
+    });
+    this.fences.push(fence);
+    return { read: !!slot };
+  }
+
+  /** Есть прочитанные снимки. */
+  get hasSnapshots(): boolean { return this.ready.length > 0; }
+
+  /**
+   * Принять готовые снимки: накопленное (подъём, итог переноса грунта, тектоника) прибавляется из каждого,
+   * состояние и показ последнего обновления — из последнего. Суммы ушедшего в недра, утопленного и долга — приращение с прошлого приёма.
+   */
+  fold(t: SnapshotTargets): SnapshotSums | null {
+    const se = this.session;
+    const slots = this.ready.splice(0).sort((x, y) => x.seq - y.seq);
+    const fresh = slots.filter((x) => se && x.session === se.id);
+    for (const slot of slots) if (!fresh.includes(slot)) { slot.buf.unmap(); slot.state = 'free'; }
+    if (!se || fresh.length === 0) return null;
+    const { n, mExp, gExp } = se, n8 = n * 8, n4 = n * 4;
+    const offsets = { field: 0, dep: n8, ground: 2 * n8, erosion: 3 * n8, settling: 3 * n8 + n4, accLift: 3 * n8 + 2 * n4, accNet: 3 * n8 + 3 * n4,
+      exch: 3 * n8 + 4 * n4, sinking: 3 * n8 + 4 * n4 + 48, tect: 3 * n8 + 5 * n4 + 48, flow: 3 * n8 + 6 * n4 + 48, push: 4 * n8 + 6 * n4 + 48 };
+    let last: ArrayBuffer | null = null, lastSlot: ReadSlot | null = null;
+    // Снимок мог прийти позже более нового: накопленное он прибавляет, но состояние назад не возвращает.
+    const newest = fresh.filter((x) => x.seq > se.lastSeq);
+    for (const slot of fresh) {
+      const data = slot.buf.getMappedRange();
+      const lift = new Float32Array(data, offsets.accLift, n), net = new Float32Array(data, offsets.accNet, n), tect = new Float32Array(data, offsets.tect, n);
+      for (let k = 0; k < n; k++) { t.lift[k] += lift[k]; t.net[k] += net[k]; t.tectonic[k] += tect[k]; }
+      if (newest.includes(slot)) { last = data; lastSlot = slot; }
+    }
+    if (!lastSlot) { for (const slot of fresh) { slot.buf.unmap(); slot.state = 'free'; } return null; }
+    se.lastSeq = lastSlot.seq;
+    const data = last!;
+    const field = new Uint32Array(data, offsets.field, n * 2), deposits = new Uint32Array(data, offsets.dep, n * 2), ground = new Uint32Array(data, offsets.ground, n * 2);
+    const ex = new Uint32Array(data, offsets.exch, 12), pair = (i: number) => BigInt(ex[2 * i]) + (BigInt(ex[2 * i + 1]) << 32n);
+    const sunk = pair(0), drowned = pair(1), debt = pair(2), gAdded = pair(3), gTaken = pair(4);
+    const mineralDiff = wrap64(BigInt(shareSum(field) + shareSum(deposits)) + sunk + drowned - se.mBase - lastSlot.added);
+    const groundDiff = wrap64(BigInt(shareSum(ground)) - se.gBase - gAdded + gTaken);
+    const signed = (x: bigint) => Number(x > MASK64 >> 1n ? x - (1n << 64n) : x);
+    const exact = mineralDiff === 0n && groundDiff === 0n;
+    if (exact) {
+      fromShares(field, mExp, t.field); fromShares(deposits, mExp, t.deposits); fromShares(ground, gExp, t.ground);
+      t.erosion.set(new Float32Array(data, offsets.erosion, n)); t.settling.set(new Float32Array(data, offsets.settling, n));
+      t.sinking.set(new Float32Array(data, offsets.sinking, n));
+      const fl = new Float32Array(data, offsets.flow, n * 2), pu = new Float32Array(data, offsets.push, n * 2);
+      for (let k = 0; k < n; k++) { t.tvx[k] = fl[2 * k]; t.tvy[k] = fl[2 * k + 1]; t.pushX[k] = pu[2 * k]; t.pushY[k] = pu[2 * k + 1]; }
+    }
+    const delta = (now: bigint, before: bigint) => Number(wrap64(now - before));
+    const sums = { sunk: delta(sunk, se.sunk) * 2 ** -mExp, drowned: delta(drowned, se.drowned) * 2 ** -mExp, debt: delta(debt, se.debt) * 2 ** -gExp, exact, snapshots: fresh.length, diff: signed(mineralDiff), groundDiff: signed(groundDiff),
+      ...(exact ? {} : { mismatch: `минерал ${signed(mineralDiff)} долей, грунт ${signed(groundDiff)} долей (показатели ${mExp}/${gExp})` }) };
+    se.sunk = sunk; se.drowned = drowned; se.debt = debt;
+    for (const slot of fresh) { slot.buf.unmap(); slot.state = 'free'; }
+    return sums;
+  }
+
+  /** Дочитать состояние до конца (после последнего обновления) и принять: мир снова полный и точный. Возвращает суммы для `applySnapshot`. */
+  async flush(t: SnapshotTargets): Promise<SnapshotSums | null> {
+    const se = this.session;
+    if (!se) return null;
+    const total: SnapshotSums = { sunk: 0, drowned: 0, debt: 0, exact: true, snapshots: 0, diff: 0, groundDiff: 0 };
+    const add = (r: SnapshotSums | null) => { if (!r) return; total.sunk += r.sunk; total.drowned += r.drowned; total.debt += r.debt; total.exact &&= r.exact; total.snapshots += r.snapshots; total.diff = r.diff; total.groundDiff = r.groundDiff; };
+    // Ждём чтения в полёте, принимаем, затем читаем само последнее состояние.
+    while (this.ring.some((x) => x.state === 'pending')) await new Promise((r) => setTimeout(r, 1));
+    add(this.fold(t));
+    const slot = this.freeSlot(se.n);
+    if (!slot) throw Error('Видеокарта: нет свободного буфера чтения');
+    const enc = this.device.createCommandEncoder();
+    this.encodeRead(enc, slot, se.n, true);
+    slot.seq = ++this.readSeq; slot.session = se.id; slot.added = se.added;
+    this.device.queue.submit([enc.finish()]);
+    await this.mapSlot(slot);
+    add(this.fold(t));
+    return total;
   }
 }

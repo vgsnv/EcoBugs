@@ -85,6 +85,8 @@ export class GpuWorld {
 
   /** Поверхность за обновление минерала: среда, грунт, стекание. */
   get mineral(): GpuMineral { return this.mineralStages ??= new GpuMineral(this.device); }
+  /** Ошибка видеокарты или этапа поверхности, если была. */
+  get problem(): string | null { return this.error ?? this.mineralStages?.failure ?? null; }
   /** Поле течений от света. */
   get drift(): GpuDrift { return this.driftStage ??= new GpuDrift(this.device); }
   private pushStage: GpuPush | null = null;
@@ -122,7 +124,7 @@ export class GpuWorld {
     } }));
   }
 
-  get usable(): boolean { return !this.lost && this.error === null; }
+  get usable(): boolean { return !this.lost && this.problem === null; }
 
   /** Буферы под сетку мира; показатели долей — по суммам мира. */
   attach(world: World): void {

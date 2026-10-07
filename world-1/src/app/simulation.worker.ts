@@ -1,5 +1,5 @@
 /** Мир считает шаги независимо от кадров; показ получает не больше 20 снимков/с. */
-import { createWorld, mineralExchanges, mineralProcesses, surfaceTask, takeGroundChanges, type DriftAccelerator, DRIFT_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, WorldFileError, type MineralAccelerator, type World } from '../core/index.ts';
+import { applySnapshot, createWorld, mineralExchanges, mineralProcesses, snapshotTargets, surfaceTask, takeGroundChanges, type DriftAccelerator, DRIFT_PERIOD, parseWorldFile, serializeWorld, setWorldLaws, stepWorldTask, WorldFileError, type MineralAccelerator, type World } from '../core/index.ts';
 import type { ComputeMode, ComputeState, SimulationCommand, SimulationReply, SimulationSnapshot } from './simulation.ts';
 import { GpuWorld } from '../gpu-world/engine.ts';
 import { STEPS_PER_SECOND } from '../core/units.ts';
@@ -45,13 +45,18 @@ function useCpu(reason: string): void {
 }
 
 function requestCompute(mode: ComputeMode): void {
-  if (mode === 'cpu') { computeMode = 'cpu'; return; }
+  if (mode === 'cpu') {
+    // Состояние живёт на видеокарте: сначала дочитать его в мир, и только потом считать на процессоре.
+    if (computeMode === 'gpu' && gpu && world && gpu.mineral.loaded(world.mineral)) holdWorker(flushGpu(true), () => { computeMode = 'cpu'; publish(false, true); });
+    else computeMode = 'cpu';
+    return;
+  }
   if (gpu?.usable) { computeMode = 'gpu'; return; }
   if (gpuStarting) return;
   gpuStarting = true;
   GpuWorld.create().then((result) => {
     if (typeof result === 'string') useCpu(result);
-    else { gpu = result; gpuUnavailable = null; computeMode = 'gpu'; }
+    else { gpu = result; gpu.mineral.onReady = onSnapshotReady; gpuUnavailable = null; computeMode = 'gpu'; }
   }, (error) => useCpu(`видеокарта не запустилась: ${String(error)}`)).finally(() => {
     gpuStarting = false;
     publish(false, true);
@@ -66,18 +71,73 @@ function* awaitGpu<T>(job: Promise<T>): Generator<void, T | null, void> {
   return result;
 }
 
+// Состояние (поле, залежи, грунт) живёт на видеокарте; массивы мира — снимок с отставанием.
+// Мир стоит (`hold`), пока снимок дочитывается целиком: перед сохранением, переключением на процессор и по шагу.
+let hold: Promise<void> | null = null;
+function holdWorker(job: Promise<void>, then: () => void): void {
+  hold = job.then(then).finally(() => { hold = null; schedule(); });
+}
+
+/** Принять готовые снимки с видеокарты в массивы мира (между обновлениями). */
+function foldGpu(): void {
+  const g = gpu, w = world;
+  if (!g || !w || !g.mineral.hasSnapshots || !g.mineral.loaded(w.mineral)) return;
+  const t0 = performance.now();
+  const sums = g.mineral.fold(snapshotTargets(w.mineral, w.terrain));
+  if (!sums) return;
+  if (!sums.exact) { gpuFailed({ exact: false }, g, sums.mismatch); return; }
+  applySnapshot(w.mineral, w.terrain, sums);
+  lastStages.parts[2] = performance.now() - t0;
+}
+
+/** Дочитать состояние с видеокарты в мир целиком; `release` — после этого мир считает процессор. */
+async function flushGpu(release: boolean): Promise<void> {
+  const g = gpu, w = world;
+  if (!g || !w || !g.mineral.loaded(w.mineral)) return;
+  try {
+    const sums = await g.mineral.flush(snapshotTargets(w.mineral, w.terrain));
+    if (sums && !sums.exact) gpuFailed({ exact: false }, g, sums.mismatch);
+    else if (sums && world === w) applySnapshot(w.mineral, w.terrain, sums);
+    if (release) g.mineral.release();
+  } catch (error) { useCpu(`ошибка видеокарты: ${String(error)}`); }
+}
+
+/** Снимок прочитан, а мир стоит: принять и показать (на ходу его подхватит следующее обновление и публикация). */
+function onSnapshotReady(): void {
+  if (calculation || hold || !(paused || !active)) return;
+  foldGpu();
+  publish(false, true);
+}
+
 /** Этапы обновления минерала на видеокарте; что не перенесено — считает ядро. */
 const accelerator: MineralAccelerator = {
   sumsFlows: true,
   doesTail: true,
+  resident: true,
   *surface(a) {
-    const g = gpu;
-    const run = g?.usable ? yield* awaitGpu(g.mineral.surface(a, g.mineralExponent, g.groundExponent, a.flows && g.flowBuffers(a.flows))) : null;
-    if (run?.exact) { lastStages.surface = run.ms; lastStages.parts = [run.prepMs, run.gpuMs, run.doneMs]; return; }
-    gpuFailed(run, g);
-    // Не сошлось — состояние уже записано из видеокарты: обновление не повторить честно, мир останавливается с ошибкой.
-    if (run) throw Error('Видеокарта: суммы долей на поверхности не совпали');
+    const g = gpu, t0 = performance.now();
+    if (g?.usable && world && a.flows) {
+      try {
+        const gm = g.mineral;
+        if (!gm.loaded(a.m)) { g.attach(world); gm.load(a, g.mineralExponent, g.groundExponent); }
+        // Обновления уходят без ожидания; ждём, только если видеокарта отстаёт больше чем на несколько штук.
+        const ahead = gm.ahead();
+        let waited = 0;
+        if (ahead) { const w0 = performance.now(); yield* awaitGpu(ahead); waited = performance.now() - w0; }
+        if (gpu === g && g.usable) {
+          gm.submit(a, g.flowBuffers(a.flows));
+          lastStages.surface = performance.now() - t0; lastStages.parts[0] = lastStages.surface - waited; lastStages.parts[1] = waited;
+          return;
+        }
+      } catch (error) { useCpu(`ошибка видеокарты: ${String(error)}`); }
+    }
+    gpuFailed(null, g);
+    // Видеокарта пропала: обновление считает процессор по последнему принятому снимку.
+    const t = snapshotTargets(a.m, a.terrain);
+    a.dst.fill(0); t.erosion.fill(0); t.settling.fill(0); t.sinking.fill(0);
     yield* surfaceTask(a);
+    a.m.field = a.out;
+    applySnapshot(a.m, a.terrain, { sunk: 0, drowned: 0, debt: 0 });
   },
   push: {
     *solve(sys) {
@@ -105,15 +165,16 @@ const driftAccelerator: DriftAccelerator = {
   },
 };
 
-function gpuFailed(run: { exact: boolean } | null, g: GpuWorld | null): void {
+function gpuFailed(run: { exact: boolean } | null, g: GpuWorld | null, detail = ''): void {
   if (run && !run.exact) {
-    useCpu('суммы долей после этапа не совпали');
-    host.postMessage({ type: 'error', epoch, problems: ['Видеокарта: суммы долей после этапа не совпали — расчёт возвращён на процессор'] });
+    useCpu(`суммы долей после этапа не совпали${detail ? ` (${detail})` : ''}`);
+    host.postMessage({ type: 'error', epoch, problems: [`Видеокарта: суммы долей после этапа не совпали${detail ? ` (${detail})` : ''} — расчёт возвращён на процессор`] });
   } else if (g && !g.usable) useCpu(g.error ? `ошибка видеокарты: ${g.error}` : 'устройство видеокарты потеряно');
 }
 
 /** Снимок включает готовые узлы поля: publish никогда не запускает решатель. */
 function* calculateStep(next: World): Generator<void, void, void> {
+  foldGpu();
   if (computeMode === 'gpu' && gpu && !gpu.attached(next)) gpu.attach(next);
   next.drift.accelerator = computeMode === 'gpu' && gpu ? driftAccelerator : null;
   yield* stepWorldTask(next, computeMode === 'gpu' && gpu ? accelerator : undefined);
@@ -128,6 +189,7 @@ function* calculateStep(next: World): Generator<void, void, void> {
 /** Копии передаются с отдачей буферов; массивы самого мира никогда не отсоединяются. */
 function publish(initial = false, force = false): void {
   if (!world || calculation || (inFlight && !force)) return;
+  foldGpu();
   const key = `${world.viscosity.version}:${Math.floor(world.step / DRIFT_PERIOD)}`;
   const drift = key !== driftKey || initial ? world.drift.nodes(world.step) : undefined;
   const geometryChanged = initial || sentViscosityVersion !== world.viscosity.version;
@@ -183,7 +245,7 @@ function tick(): void {
 }
 
 function advance(): void {
-  if (!world || ((paused || !active) && !calculation)) return;
+  if (hold || !world || ((paused || !active) && !calculation)) return;
   const start = performance.now();
   const dt = Math.min(0.25, (start - lastTime) / 1000);
   lastTime = start;
@@ -209,7 +271,12 @@ function advance(): void {
   behind = !paused && active && carry >= maxDebt / 2;
   if (dt > 0 && !paused) rate += (n / dt - rate) * Math.min(1, dt * 2);
   if (!calculation) {
-    if (publishOnCompletion) { publishOnCompletion = false; publish(false, true); }
+    if (publishOnCompletion) {
+      publishOnCompletion = false;
+      // Шаг по одному: показать мир целиком, а не снимок с отставанием.
+      if (gpu && gpu.mineral.loaded(world.mineral)) holdWorker(flushGpu(false), () => publish(false, true));
+      else publish(false, true);
+    }
     while (!calculation && commands.length) handleCommand(commands.shift()!);
     if (performance.now() - lastSnapshot >= SNAPSHOT_MS) publish();
   }
@@ -268,7 +335,12 @@ function handleCommand(command: SimulationCommand): void {
         }
         break;
       case 'save':
-        if (world) host.postMessage({ type: 'saved', epoch, id: command.id, text: serializeWorld(world, new Date()), step: world.step, seed: world.params.seed });
+        if (world) {
+          const w = world, post = () => host.postMessage({ type: 'saved', epoch, id: command.id, text: serializeWorld(w, new Date()), step: w.step, seed: w.params.seed });
+          // Сохранение — по точному состоянию, а не по снимку с отставанием.
+          if (gpu && gpu.mineral.loaded(w.mineral)) holdWorker(flushGpu(false), post);
+          else post();
+        }
         break;
       case 'processes':
         showProcesses = command.enabled;

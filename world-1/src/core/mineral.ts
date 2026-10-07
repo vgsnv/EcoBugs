@@ -519,6 +519,12 @@ export interface MineralAccelerator {
   doesTail?: boolean;
   /** Решение единичного течения толчка или тяги (как `solvePushSystem`) — при смене местности и новых источниках. */
   push?: PushAccelerator;
+  /**
+   * Поле, залежи и грунт живут на видеокарте (нужны `sumsFlows` и `doesTail`): `surface` только отправляет
+   * обновление и не ждёт. Массивы мира — снимок с отставанием: их обновляет `applySnapshot`, а ядро их не пересчитывает
+   * и не обнуляет, решения (воронки, подвижки, извержения) принимает по снимку.
+   */
+  resident?: boolean;
 }
 
 /** Вход этапа «поверхность»: среда, грунт, стекание. */
@@ -694,8 +700,8 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   const dst = work.dst;
   const processes = work.processes;
   processes.step = step;
-  processes.erosion.fill(0); processes.settling.fill(0); processes.sinking.fill(0);
-  dst.fill(0);
+  const resident = !!(accel?.surface && accel.resident && accel.doesTail && accel.sumsFlows);
+  if (!resident) { processes.erosion.fill(0); processes.settling.fill(0); processes.sinking.fill(0); dst.fill(0); }
   const mobility = mobilityFor(terrain.applied);
   // Сетки минерала и течений совпадают — снос клетки берётся прямо из узлов поля.
   phase('течения от света');
@@ -717,6 +723,7 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   // Сумма течений на ускорителе — вместе с поверхностью; иначе — здесь.
   const kNode = Math.floor(tMid / DRIFT_PERIOD);
   const flowsOnAccel = !!(accel?.surface && accel.sumsFlows && sameGrid);
+  if (resident && !flowsOnAccel) throw Error('Состояние на видеокарте требует суммы течений на ускорителе (сетки течений и минерала должны совпадать)');
   if (flowsOnAccel) {
     m.flow = sumPushShape(m, work.pushX, work.pushY);
   } else {
@@ -776,7 +783,7 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
     ...(tail ? { tail } : {}) };
   if (accel?.surface) { phase('перенос'); yield* accel.surface(stage); }
   else yield* surfaceTask(stage);
-  if (flowsOnAccel) {
+  if (flowsOnAccel && !resident) {
     // Суммы течений пришли с ускорителя: рабочие массивы для бросков и показа.
     for (let k = 0; k < n; k++) {
       const x = tvx[k], y = tvy[k];
@@ -784,7 +791,7 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
     }
     processes.vx.set(tvx); processes.vy.set(tvy);
   }
-  m.field = work.runoff;
+  if (!resident) m.field = work.runoff;
   work.groundChanges.steps += P;
 
   phase('воронки, подвижки, извержения');
@@ -813,6 +820,37 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   }
   m.version++;
   phase(null);
+}
+
+/** Куда ускоритель с состоянием на видеокарте кладёт снимок: массивы мира и рабочая память показа. */
+export interface SnapshotTargets {
+  field: Float64Array; deposits: Float64Array; ground: Float64Array;
+  /** Показ последнего обновления — заменяются. */
+  erosion: Float32Array; settling: Float32Array; sinking: Float32Array;
+  /** Накопленные изменения грунта — прибавляются. */
+  lift: Float32Array; net: Float32Array; tectonic: Float32Array;
+  /** Суммы течений и толчка — заменяются. */
+  tvx: Float32Array; tvy: Float32Array; pushX: Float32Array; pushY: Float32Array;
+}
+export function snapshotTargets(m: MineralState, terrain: TerrainState): SnapshotTargets {
+  const w = workspace(m), c = w.groundChanges;
+  return { field: m.field, deposits: terrain.deposits, ground: terrain.ground,
+    erosion: w.processes.erosion, settling: w.processes.settling, sinking: w.processes.sinking,
+    lift: c.lift, net: c.net, tectonic: c.tectonic,
+    tvx: w.tvx, tvy: w.tvy, pushX: w.pushX, pushY: w.pushY };
+}
+/** Снимок принят: суммы течений — в рабочие массивы бросков и показа; ушедшее в недра, утопленное и новый долг — в мир. */
+export function applySnapshot(m: MineralState, terrain: TerrainState, sums: { sunk: number; drowned: number; debt: number }): void {
+  const w = workspace(m), { tvx, tvy, speed, flowX, flowY } = w;
+  for (let k = 0, n = tvx.length; k < n; k++) {
+    const x = tvx[k], y = tvy[k];
+    speed[k] = Math.sqrt(x * x + y * y); flowX[k] = x; flowY[k] = y;
+  }
+  w.processes.vx.set(tvx); w.processes.vy.set(tvy);
+  m.depths += sums.sunk + sums.drowned;
+  w.exchanges.funnelSunk += sums.sunk;
+  terrain.debt += sums.debt;
+  m.version++;
 }
 
 /** Выход вещества активных извержений за промежуток (step − P, step]: броски и жерло — в `sink`, учёт вулканов — здесь. */

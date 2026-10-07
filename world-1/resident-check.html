@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Проверка режима без ожидания</title>
+<style>body { font: 13px/1.4 ui-monospace, Menlo, monospace; background: #111; color: #ddd; margin: 16px; } pre { white-space: pre-wrap; }</style>
+</head>
+<body>
+<h3>Состояние на видеокарте: обновления без ожидания против CPU</h3>
+<p>План — <code>docs/plan/world-gpu-engine.md</code>, этап 7в. Параметры адреса: <code>seeds=1,2,3</code>, <code>from=0</code> (с какого шага), <code>updates=2000</code>, <code>mode=resident|sync|both</code>.</p>
+<pre id="out"></pre>
+<script type="module" src="/src/gpu-world/resident-check.ts"></script>
+</body>
+</html>
