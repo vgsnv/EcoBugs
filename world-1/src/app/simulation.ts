@@ -10,10 +10,9 @@ export type SimulationCommand =
   /** Новые законы живого мира; параметры генератора в них не учитываются. */
   | { type: 'laws'; epoch: number; params: WorldParams }
   | { type: 'ack'; epoch: number }
-  | { type: 'processes'; epoch: number; enabled: boolean }
-  /** Где считается неживой мир (план docs/plan/world-gpu-engine.md). */
-  | { type: 'compute'; epoch: number; mode: ComputeMode };
+  | { type: 'processes'; epoch: number; enabled: boolean };
 
+/** Где считается неживой мир (план docs/plan/world-gpu-engine.md): видеокарта; процессор — только пока она запускается или если её нет. */
 export type ComputeMode = 'cpu' | 'gpu';
 
 /** Состояние расчёта для показа: режим, доступность видеокарты, сверка последнего обмена. */

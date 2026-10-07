@@ -94,7 +94,6 @@ const panel = new Panel({ app: $('.app'), toolbar: $('#toolbar'), params: $('#pa
   onFocusMode: (on) => renderer.setDarkTable(on),
   onRulers: (enabled) => renderer.setRulers(enabled),
   onStreamView: (view) => { renderer.streamView = view; },
-  onCompute: (mode) => send({ type: 'compute', epoch, mode }),
   onProcesses: (enabled) => {
     renderer.showProcesses = enabled;
     send({ type: 'processes', epoch, enabled });

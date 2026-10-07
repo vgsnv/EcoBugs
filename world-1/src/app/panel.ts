@@ -9,7 +9,7 @@ import { createLightMap, isLaw, createViscosityMap, dishCoverage, dishOf, LAYOUT
 import { DEEP_WATER, DEPOSIT_COLOR, MINERAL_COLOR, SHADE_COLOR, SHALLOWS_SAMPLE, STONE_SAMPLE, SUN_COLOR, type Rgb } from './render/palette.ts';
 import { formatArea, formatLength, formatMass, formatNumber, formatPercent, formatWorldAge } from './units.ts';
 import { PanelTabs, type PanelTab } from './tabs.ts';
-import type { ComputeMode, ComputeState } from './simulation.ts';
+import type { ComputeState } from './simulation.ts';
 
 /**
  * Быстрые скорости — кнопки под ползунком и клавиши 1–5. Ползунок
@@ -50,8 +50,6 @@ export interface PanelHandlers {
   onProcesses(enabled: boolean): void;
   onRulers(enabled: boolean): void;
   onStreamView(view: 'water' | 'mineral'): void;
-  /** Где считать неживой мир: процессор или видеокарта. */
-  onCompute(mode: ComputeMode): void;
 }
 
 export interface PanelRoots {
@@ -191,7 +189,6 @@ export class Panel {
   private readonly speedSlider = el('input', { type: 'range', min: '0', max: String(speedToSlider(MAX_SPEED)), step: '1', value: '0', ariaLabel: 'Скорость мира', className: 'speed-slider', title: '×1 — реальное время; каждое деление-кнопка — в 10 раз быстрее; клавиши 1–5, стрелки — примерно на 2%' });
   private readonly speedValue = el('output', { className: 'speed-value', textContent: '×1' });
   private readonly paramsToggle = el('button', { textContent: 'Новый мир', ariaLabel: 'Новый мир', ariaExpanded: 'false', title: 'Открыть настройки нового мира', className: 'params-toggle' });
-  private readonly computeButton = el('button', { type: 'button', className: 'compute-toggle', textContent: 'Видеокарта', ariaPressed: 'false', title: 'Считать мир на видеокарте' });
   private computeText = '';
   private readonly focusToggle = el('button', { className: 'focus-toggle', ariaLabel: 'На весь экран', ariaPressed: 'false', title: 'На весь экран (F)' });
   /** В полном экране: выход и миникарта вверху справа, метка времени вверху слева. */
@@ -274,18 +271,15 @@ export class Panel {
     this.tabs.open('probe');
   }
 
-  /** Режим расчёта: кнопка нажата — видеокарта; в подсказке — почему недоступна или как прошёл обмен. */
+  /** Режим расчёта — строка в подсказке времени: где считается мир и как идёт видеокарта. */
   setCompute(state: ComputeState): void {
-    const on = state.mode === 'gpu';
-    if (this.computeButton.getAttribute('aria-pressed') !== String(on)) this.computeButton.setAttribute('aria-pressed', String(on));
     const r = state.stages;
-    this.computeText = on
+    this.computeText = state.mode === 'gpu'
       ? `Расчёт: видеокарта — течения, перенос, растекание, оседание и размыв, грунт, стекание, воронки, подвижки, вещество извержений; поле, залежи и грунт живут на видеокарте, процессор решает, где и сколько, по снимку с отставанием и не ждёт ответа`
         + (r ? `\nНа видеокарте за обновление: ${r.surface.toFixed(1)} мс на процессоре (подготовка и отправка ${r.parts[0].toFixed(1)}, ожидание видеокарты ${r.parts[1].toFixed(1)}; приём снимка ${r.parts[2].toFixed(1)}); суммы долей точны`
-          + (r.drift > 0 ? `\nПоле течений на видеокарте: ${r.drift.toFixed(1)} мс с ожиданием, ${r.driftIterations} шагов решателя` : '')
+          + (r.drift > 0 ? `\nПоле течений на видеокарте: ${r.drift.toFixed(1)} мс, ${r.driftIterations} шагов решателя` : '')
           + (r.push > 0 ? `\nПоследнее поле толчка на видеокарте: ${r.push.toFixed(1)} мс с ожиданием` : '') : '')
-      : `Расчёт: процессор${state.unavailable ? `\nВидеокарта недоступна: ${state.unavailable}` : ''}`;
-    this.computeButton.title = on ? `${this.computeText}\nНажмите, чтобы считать на процессоре` : `${this.computeText}\nНажмите, чтобы считать на видеокарте`;
+      : `Расчёт: процессор (запасной путь)${state.unavailable ? `\nВидеокарта недоступна: ${state.unavailable}` : '\nВидеокарта запускается'}`;
   }
 
   /** Миникарта включена — кнопка нажата. */
@@ -529,8 +523,7 @@ export class Panel {
     const playback = document.querySelector<HTMLElement>('.world-playback')!;
     const playbackRun = el('div', { className: 'time-controls' }, runGroup);
     document.querySelector('.world-footer')!.prepend(document.querySelector<HTMLElement>('.mineral-stats')!);
-    this.computeButton.addEventListener('click', () => this.handlers.onCompute(this.computeButton.getAttribute('aria-pressed') === 'true' ? 'cpu' : 'gpu'));
-    playback.append(playbackRun, speedControl, this.computeButton, this.focusToggle);
+    playback.append(playbackRun, speedControl, this.focusToggle);
     for (const disclosure of [document.querySelector<HTMLDetailsElement>('.mineral-details')!]) {
       disclosure.querySelector('summary')!.addEventListener('click', () => requestAnimationFrame(() => this.handlers.onLayoutChange()));
       disclosure.addEventListener('toggle', () => this.handlers.onLayoutChange());

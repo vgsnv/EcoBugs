@@ -44,15 +44,9 @@ function useCpu(reason: string): void {
   computeMode = 'cpu'; gpu = null; gpuUnavailable = reason;
 }
 
-function requestCompute(mode: ComputeMode): void {
-  if (mode === 'cpu') {
-    // Состояние живёт на видеокарте: сначала дочитать его в мир, и только потом считать на процессоре.
-    if (computeMode === 'gpu' && gpu && world && gpu.mineral.loaded(world.mineral)) holdWorker(flushGpu(true), () => { computeMode = 'cpu'; publish(false, true); });
-    else computeMode = 'cpu';
-    return;
-  }
-  if (gpu?.usable) { computeMode = 'gpu'; return; }
-  if (gpuStarting) return;
+/** Видеокарта — основной расчёт: запускается вместе с Worker; пока устройство не готово, мир идёт на процессоре и потом переходит на неё. */
+function startGpu(): void {
+  if (gpuStarting || gpu) return;
   gpuStarting = true;
   GpuWorld.create().then((result) => {
     if (typeof result === 'string') useCpu(result);
@@ -62,6 +56,7 @@ function requestCompute(mode: ComputeMode): void {
     publish(false, true);
   });
 }
+startGpu();
 
 /** Дождаться видеокарты, не крутясь вхолостую: Worker засыпает, пока ответ не готов. */
 function* awaitGpu<T>(job: Promise<T>): Generator<void, T | null, void> {
@@ -90,15 +85,14 @@ function foldGpu(): void {
   lastStages.parts[2] = performance.now() - t0;
 }
 
-/** Дочитать состояние с видеокарты в мир целиком; `release` — после этого мир считает процессор. */
-async function flushGpu(release: boolean): Promise<void> {
+/** Дочитать состояние с видеокарты в мир целиком (для сохранения и шага по одному). */
+async function flushGpu(): Promise<void> {
   const g = gpu, w = world;
   if (!g || !w || !g.mineral.loaded(w.mineral)) return;
   try {
     const sums = await g.mineral.flush(snapshotTargets(w.mineral, w.terrain));
     if (sums && !sums.exact) gpuFailed({ exact: false }, g, sums.mismatch);
     else if (sums && world === w) applySnapshot(w.mineral, w.terrain, sums);
-    if (release) g.mineral.release();
   } catch (error) { useCpu(`ошибка видеокарты: ${String(error)}`); }
 }
 
@@ -280,7 +274,7 @@ function advance(): void {
     if (publishOnCompletion) {
       publishOnCompletion = false;
       // Шаг по одному: показать мир целиком, а не снимок с отставанием.
-      if (gpu && gpu.mineral.loaded(world.mineral)) holdWorker(flushGpu(false), () => publish(false, true));
+      if (gpu && gpu.mineral.loaded(world.mineral)) holdWorker(flushGpu(), () => publish(false, true));
       else publish(false, true);
     }
     while (!calculation && commands.length) handleCommand(commands.shift()!);
@@ -344,16 +338,12 @@ function handleCommand(command: SimulationCommand): void {
         if (world) {
           const w = world, post = () => host.postMessage({ type: 'saved', epoch, id: command.id, text: serializeWorld(w, new Date()), step: w.step, seed: w.params.seed });
           // Сохранение — по точному состоянию, а не по снимку с отставанием.
-          if (gpu && gpu.mineral.loaded(w.mineral)) holdWorker(flushGpu(false), post);
+          if (gpu && gpu.mineral.loaded(w.mineral)) holdWorker(flushGpu(), post);
           else post();
         }
         break;
       case 'processes':
         showProcesses = command.enabled;
-        publish(false, true);
-        break;
-      case 'compute':
-        requestCompute(command.mode);
         publish(false, true);
         break;
       case 'ack':
