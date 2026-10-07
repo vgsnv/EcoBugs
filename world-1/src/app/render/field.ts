@@ -96,10 +96,12 @@ void main() { gl_Position = vec4(a_pos * 2. - 1., 0., 1.); }`;
 
 /** Общие функции фрагментных шейдеров: пиксель экрана сверху вниз, точка мира, чашка. */
 const COMMON = `
-uniform vec2 u_size;
+uniform vec2 u_size;  // размер кадра в «логических» пикселях устройства (холст 2D)
+uniform float u_res;  // доля логического разрешения, в которой рисует этот холст
 uniform vec3 u_cam;   // масштаб, центр вида x, y
 uniform vec3 u_dish;  // ширина, высота, круг (1) или прямоугольник (0)
-vec2 screenPx() { return vec2(gl_FragCoord.x, u_size.y - gl_FragCoord.y); }
+vec2 screenPx() { return vec2(gl_FragCoord.x / u_res, u_size.y - gl_FragCoord.y / u_res); }
+vec2 screenUv() { return gl_FragCoord.xy / (u_size * u_res); }
 vec2 worldAt(vec2 px) { return u_cam.yz + (px - u_size * .5) / u_cam.x; }
 /** Насколько точка внутри чашки, со сглаженным краем в пиксель. */
 float insideDish(vec2 w) {
@@ -251,7 +253,7 @@ void main() {
 
   // Свет: яркость — по свету, который доходит (солнце × пятно или фон × прозрачность),
   // по постоянной шкале; тёплый оттенок и высветление пятен, блик сверх полного света.
-  vec3 spm = texture(u_spotMask, gl_FragCoord.xy / u_size).rgb;
+  vec3 spm = texture(u_spotMask, screenUv()).rgb;
   vec2 sp = spm.rg;
   // Где пятна налегают, свет складывается, как в модели: вклад сверх одного пятна — из B.
   float spotLight = sp.y + spm.b * ${OVERLAP_MAX.toFixed(1)};
@@ -273,7 +275,7 @@ void main() {
   float spots = sp.x * (1. - held);
   if (u_rippleMode == 0) {
     // Взвесь и её следы (suspension.ts, trails.ts): светлые, у минерала — сиреневые; в пятнах света ярче.
-    vec2 tr = texture(u_trails, gl_FragCoord.xy / u_size).rg;
+    vec2 tr = texture(u_trails, screenUv()).rg;
     c = screenOver(c, u_trailColor * tr.x * (.55 + .45 * sp.y) * water * .9);
     // Песок — своим цветом поверх воды (осветление выбелило бы его до цвета остальной взвеси).
     c = mix(c, vec3(.86, .7, .42) * (.8 + .25 * sp.y), min(1., tr.y * 1.2) * water * .75);
@@ -363,7 +365,7 @@ void main() {
     vec2 q = abs(v_local);
     float d = min(q.x + q.y / .3, q.x / .3 + q.y) - 1.;
     a = clamp(.5 - d * v_radiusPx, 0., 1.);
-    a *= texture(u_spotMask, gl_FragCoord.xy / u_size).r * (1. - texture(u_mineral, w / u_grid).g);
+    a *= texture(u_spotMask, screenUv()).r * (1. - texture(u_mineral, w / u_grid).g);
   }
   if (u_clip == 1) a *= insideDish(w);
   a *= v_alpha;
@@ -484,6 +486,9 @@ export class FieldRenderer implements GlowSink {
     return true;
   }
 
+  /** Доля разрешения холста 2D, в которой рисуются поля: меньше — дешевле для видеокарты, мягче картинка. */
+  resolution = 1;
+
   get ready(): boolean {
     return !!this.gl && !this.lost && !this.gl.isContextLost();
   }
@@ -493,7 +498,7 @@ export class FieldRenderer implements GlowSink {
     const gl = this.gl!;
     this.frame = frame;
     this.commands = [];
-    const { width, height } = frame.canvas;
+    const width = Math.max(1, Math.round(frame.canvas.width * this.resolution)), height = Math.max(1, Math.round(frame.canvas.height * this.resolution));
     if (this.canvas.width !== width || this.canvas.height !== height) { this.canvas.width = width; this.canvas.height = height; }
     gl.viewport(0, 0, width, height);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -517,7 +522,7 @@ export class FieldRenderer implements GlowSink {
     gl.useProgram(this.imageProgram.program);
     const view = frame.camera.view();
     gl.uniform3f(this.imageProgram.uniform('u_view'), view[0], view[4], view[5]);
-    gl.uniform2f(this.imageProgram.uniform('u_size'), this.canvas.width, this.canvas.height);
+    gl.uniform2f(this.imageProgram.uniform('u_size'), frame.canvas.width, frame.canvas.height);
     gl.uniform4f(this.imageProgram.uniform('u_src'), src[0], src[1], src[2], src[3]);
     gl.uniform4f(this.imageProgram.uniform('u_dst'), dst[0], dst[1], dst[2], dst[3]);
     gl.uniform1f(this.imageProgram.uniform('u_alpha'), alpha);
@@ -531,7 +536,8 @@ export class FieldRenderer implements GlowSink {
   private common(p: Program, dish: Dish): void {
     const gl = this.gl!;
     const { camera } = this.frame!;
-    gl.uniform2f(p.uniform('u_size'), this.canvas.width, this.canvas.height);
+    gl.uniform2f(p.uniform('u_size'), this.frame!.canvas.width, this.frame!.canvas.height);
+    gl.uniform1f(p.uniform('u_res'), this.canvas.width / this.frame!.canvas.width);
     gl.uniform3f(p.uniform('u_cam'), camera.zoom, camera.cx, camera.cy);
     gl.uniform3f(p.uniform('u_dish'), dish.width, dish.height, dish.shape === 'circle' ? 1 : 0);
   }
@@ -540,7 +546,7 @@ export class FieldRenderer implements GlowSink {
   private drawLightMask(light: LightField): void {
     const gl = this.gl!;
     const frame = this.frame!;
-    const width = Math.ceil(this.canvas.width / LIGHT_MASK_SCALE), height = Math.ceil(this.canvas.height / LIGHT_MASK_SCALE);
+    const width = Math.ceil(frame.canvas.width / LIGHT_MASK_SCALE), height = Math.ceil(frame.canvas.height / LIGHT_MASK_SCALE);
     let mask = this.spotMask;
     if (!mask || mask.width !== width || mask.height !== height) {
       if (mask) { gl.deleteFramebuffer(mask.framebuffer); gl.deleteTexture(mask.texture); }
@@ -565,7 +571,7 @@ export class FieldRenderer implements GlowSink {
     gl.uniform4fv(p.uniform('u_spotAmps'), light.amps);
     gl.uniform4fv(p.uniform('u_spotPhases'), light.phases);
     gl.uniform2f(p.uniform('u_maskSize'), width, height);
-    gl.uniform1f(p.uniform('u_maskScale'), this.canvas.width / width);
+    gl.uniform1f(p.uniform('u_maskScale'), frame.canvas.width / width);
     gl.bindVertexArray(this.quadVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.enable(gl.BLEND);
@@ -594,8 +600,8 @@ export class FieldRenderer implements GlowSink {
   /** Холсты следов (прошлый и новый кадр) в пикселях CSS; создаются под размер. */
   private trailTargets(): { framebuffer: WebGLFramebuffer; texture: WebGLTexture }[] {
     const gl = this.gl!;
-    const width = Math.max(1, Math.round(this.canvas.width / this.frame!.camera.dpr));
-    const height = Math.max(1, Math.round(this.canvas.height / this.frame!.camera.dpr));
+    const width = Math.max(1, Math.round(this.frame!.canvas.width / this.frame!.camera.dpr));
+    const height = Math.max(1, Math.round(this.frame!.canvas.height / this.frame!.camera.dpr));
     if (this.trailSize[0] !== width || this.trailSize[1] !== height) {
       for (const t of this.trailBuffers) { gl.deleteFramebuffer(t.framebuffer); gl.deleteTexture(t.texture); }
       this.trailBuffers = [0, 1].map(() => {
@@ -630,15 +636,15 @@ export class FieldRenderer implements GlowSink {
     // Сколько остаётся от прошлого кадра: на паузе всё, без следов — ничего.
     const keep = real === 0 ? (this.trailTime === null ? 0 : 1) : seconds > 0.01 ? Math.exp(-real / seconds) : 0;
     const [prev, next] = [buffers[this.trailFront], buffers[1 - this.trailFront]];
-    const scale = this.trailSize[0] / this.canvas.width;
+    const scale = this.trailSize[0] / frame.canvas.width;
     gl.bindFramebuffer(gl.FRAMEBUFFER, next.framebuffer);
     gl.viewport(0, 0, this.trailSize[0], this.trailSize[1]);
     gl.disable(gl.BLEND);
     const f = this.trailFade;
     gl.useProgram(f.program);
-    const cam = this.trailCamera ?? { zoom: camera.zoom, cx: camera.cx, cy: camera.cy, width: this.canvas.width, height: this.canvas.height };
+    const cam = this.trailCamera ?? { zoom: camera.zoom, cx: camera.cx, cy: camera.cy, width: frame.canvas.width, height: frame.canvas.height };
     gl.uniform2f(f.uniform('u_size'), this.trailSize[0], this.trailSize[1]);
-    gl.uniform2f(f.uniform('u_device'), this.canvas.width, this.canvas.height);
+    gl.uniform2f(f.uniform('u_device'), frame.canvas.width, frame.canvas.height);
     gl.uniform1f(f.uniform('u_scale'), scale);
     gl.uniform3f(f.uniform('u_cam'), camera.zoom, camera.cx, camera.cy);
     gl.uniform3f(f.uniform('u_prevCam'), cam.zoom, cam.cx, cam.cy);
@@ -655,7 +661,7 @@ export class FieldRenderer implements GlowSink {
       gl.useProgram(d.program);
       const view = camera.view();
       gl.uniform3f(d.uniform('u_view'), view[0], view[4], view[5]);
-      gl.uniform2f(d.uniform('u_size'), this.canvas.width, this.canvas.height);
+      gl.uniform2f(d.uniform('u_size'), frame.canvas.width, frame.canvas.height);
       gl.uniform1f(d.uniform('u_zoom'), camera.zoom * scale);
       gl.enable(gl.BLEND);
       gl.blendEquation(gl.MAX);
@@ -669,7 +675,7 @@ export class FieldRenderer implements GlowSink {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     this.trailFront = 1 - this.trailFront;
     this.trailTime = frame.animTime;
-    this.trailCamera = { zoom: camera.zoom, cx: camera.cx, cy: camera.cy, width: this.canvas.width, height: this.canvas.height };
+    this.trailCamera = { zoom: camera.zoom, cx: camera.cx, cy: camera.cy, width: frame.canvas.width, height: frame.canvas.height };
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     return buffers[this.trailFront].texture;

@@ -2,6 +2,7 @@
  * Песочница неживой природы: мир, управление временем, параметры нового мира.
  * Скорость показа — дело приложения; мир знает только номер шага.
  */
+import { Camera } from './render/camera.ts';
 import {
   Drift, flowAt, meanSpotSpeed, sunRhythmAt, transparencyAt, worldLightAt, mineralDensityAt, mineralInEruptions, mineralInDeposits, mineralInMedium, smoothLevelAt, absorptionAt, createWorld, gradationAt, isBlocked, makeParams, mutationStrength,
   isLaw, LIGHT_REFERENCE, resistanceAt, setMediumLaws, temperatureAt, type World, type WorldParams,
@@ -126,6 +127,10 @@ async function loadWorld(file: File): Promise<void> {
 (window as unknown as { simStats: () => { rate: number; step: number } }).simStats = () => ({ rate: actualRate, step: world.step });
 
 (window as unknown as { simRenderer: unknown }).simRenderer = renderer;
+const maxDpr = Number(new URLSearchParams(location.search).get('dpr'));
+if (maxDpr > 0) { Camera.maxDpr = maxDpr; renderer.resizeKeepingView(); }
+const fieldResolution = Number(new URLSearchParams(location.search).get('res'));
+if (fieldResolution > 0) renderer.setFieldResolution(fieldResolution);
 
 simulation.onmessage = ({ data }: MessageEvent<SimulationReply>) => {
   if (data.epoch !== epoch) return;

@@ -28,8 +28,11 @@ export class Camera {
     this.zoomChanged = zoomChanged;
   }
 
+  /** Потолок плотности пикселей отрисовки (1 — рисовать в CSS-пикселях и на экранах Retina: вдвое меньше точек, мягче). */
+  static maxDpr = Infinity;
+
   get dpr(): number {
-    return window.devicePixelRatio || 1;
+    return Math.min(Camera.maxDpr, window.devicePixelRatio || 1);
   }
 
   setWorld(world: World): void {

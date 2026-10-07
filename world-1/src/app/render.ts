@@ -160,6 +160,12 @@ export class WorldRenderer {
   // ── Кадр ──────────────────────────────────────────────────────────────
 
   /** Кадр; `animTime` — секунды анимации бликов (стоит на паузе). */
+  /** Разрешение полей (GL) в долях от холста 2D: 1 — полное; меньше — дешевле для видеокарты. */
+  setFieldResolution(resolution: number): void {
+    this.field.resolution = Math.min(1, Math.max(0.25, resolution));
+    this.frameKey = '';
+  }
+
   /** Замер кадра (для диагностики): время участков, мс на кадр; `syncEach` — ждать видеокарту после каждого участка. */
   profile: { parts: Record<string, number>; frames: number; syncEach: boolean } | null = null;
   private profileAt = 0;
