@@ -341,7 +341,17 @@ function groundLine(g: { sand: number; tectonic: number }): string {
   return `Грунт за сутки: течения ${day(g.sand)} ур. · тектоника ${day(g.tectonic)} ур.`;
 }
 
+/**
+ * Адаптивные кадры: пока мир «не успевает» за скоростью (метка «предел»), карта рисуется вдвое реже —
+ * отрисовка делит видеокарту с расчётом и на ×10000 отнимала до 40% темпа. `?fps=60` отключает.
+ */
+const ADAPTIVE_FPS = new URLSearchParams(location.search).get('fps') !== '60';
+const LIMITED_FRAME_MS = 1000 / 30;
+let lastDrawn = 0;
+
 function frame(now: number): void {
+  if (ADAPTIVE_FPS && behind && !paused && ready && now - lastDrawn < LIMITED_FRAME_MS - 2) { requestAnimationFrame(frame); return; }
+  lastDrawn = now;
   const dt = Math.min(0.25, (now - lastTime) / 1000);
   lastTime = now;
   if (!paused) animTime += dt;
