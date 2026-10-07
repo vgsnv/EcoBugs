@@ -37,7 +37,7 @@ let gpuUnavailable: string | null = null;
 let gpuStarting = false;
 let waiting: Promise<void> | null = null;
 function computeState(): ComputeState {
-  return { mode: computeMode, unavailable: gpuUnavailable, ...(computeMode === 'gpu' && lastStages.surface > 0 ? { stages: { surface: lastStages.surface, parts: [...lastStages.parts], drift: lastStages.drift, driftIterations: lastStages.driftIterations, push: lastStages.push } } : {}) };
+  return { mode: computeMode, unavailable: gpuUnavailable, ...(computeMode === 'gpu' && lastStages.surface > 0 ? { stages: { surface: lastStages.surface, parts: [...lastStages.parts], drift: lastStages.drift, driftIterations: lastStages.driftIterations, push: lastStages.push, publish: lastStages.publish } } : {}) };
 }
 
 function useCpu(reason: string): void {
@@ -145,7 +145,7 @@ const accelerator: MineralAccelerator = {
   },
 };
 /** Последний этап на видеокарте: время с ожиданием, мс, и его части. */
-const lastStages = { surface: 0, parts: [0, 0, 0], drift: 0, driftIterations: 0, push: 0 };
+const lastStages = { surface: 0, parts: [0, 0, 0], drift: 0, driftIterations: 0, push: 0, publish: 0 };
 
 /** Поле течений на видеокарте; null — пусть считает ядро. */
 const driftAccelerator: DriftAccelerator = {
@@ -189,6 +189,7 @@ function* calculateStep(next: World): Generator<void, void, void> {
 /** Копии передаются с отдачей буферов; массивы самого мира никогда не отсоединяются. */
 function publish(initial = false, force = false): void {
   if (!world || calculation || (inFlight && !force)) return;
+  const published0 = performance.now();
   foldGpu();
   const key = `${world.viscosity.version}:${Math.floor(world.step / DRIFT_PERIOD)}`;
   const drift = key !== driftKey || initial ? world.drift.nodes(world.step) : undefined;
@@ -222,6 +223,7 @@ function publish(initial = false, force = false): void {
   sentMineralVersion = world.mineral.version; sentViscosityVersion = world.viscosity.version;
   inFlight = true;
   lastSnapshot = performance.now();
+  lastStages.publish += (lastSnapshot - published0 - lastStages.publish) * 0.2;
 }
 
 function schedule(delay = 0): void {

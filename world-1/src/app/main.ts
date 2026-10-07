@@ -122,6 +122,9 @@ async function loadWorld(file: File): Promise<void> {
   }
 }
 
+/** Для замеров из консоли: темп и шаг мира по последнему снимку, не зависят от отрисовки. */
+(window as unknown as { simStats: () => { rate: number; step: number } }).simStats = () => ({ rate: actualRate, step: world.step });
+
 simulation.onmessage = ({ data }: MessageEvent<SimulationReply>) => {
   if (data.epoch !== epoch) return;
   switch (data.type) {
