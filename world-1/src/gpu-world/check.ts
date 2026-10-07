@@ -22,18 +22,21 @@ const results: { stage: number; seed: number; step: number; ok: boolean }[] = []
 
 const copyTerrain = (t: TerrainState): TerrainState => ({ ...t, ground: Float64Array.from(t.ground), deposits: Float64Array.from(t.deposits) });
 /** Вход и выход этапа «поверхность» на CPU — снятые «шпионом» на месте ускорителя во время настоящего шага ядра. */
-interface Captured { input: SurfaceStage; tvx: Float32Array; tvy: Float32Array; out: Float64Array; deposits: Float64Array; ground: Float64Array; lift: Float32Array }
+interface Captured { tail: { sunk: number; drowned: number; debt: number } | null; input: SurfaceStage; tvx: Float32Array; tvy: Float32Array; out: Float64Array; deposits: Float64Array; ground: Float64Array; lift: Float32Array }
 function* spy(world: World, into: Partial<Captured>): Calculation {
   const accel: MineralAccelerator = {
     sumsFlows: true,
+    doesTail: true,
     *surface(st) {
       const n = st.src.length;
       const input: SurfaceStage = { ...st, src: Float64Array.from(st.src), dst: new Float64Array(n), out: new Float64Array(n), terrain: copyTerrain(st.terrain),
         erosionOut: new Float32Array(n), settlingOut: new Float32Array(n), lift: new Float32Array(n), net: new Float32Array(n),
-        tvx: new Float32Array(n), tvy: new Float32Array(n), ...(st.flows ? { flows: { ...st.flows, pushX: new Float32Array(n), pushY: new Float32Array(n) } } : {}) };
+        tvx: new Float32Array(n), tvy: new Float32Array(n), ...(st.flows ? { flows: { ...st.flows, pushX: new Float32Array(n), pushY: new Float32Array(n) } } : {}),
+        ...(st.tail ? { tail: { ...st.tail, sinking: new Float32Array(n), tectonic: new Float32Array(n), result: { sunk: 0, drowned: 0, debt: 0 } } } : {}) };
+      const debt0 = st.terrain.debt;
       const lift0 = Float32Array.from(st.lift);
       yield* surfaceTask(st);
-      Object.assign(into, { input, tvx: Float32Array.from(st.tvx), tvy: Float32Array.from(st.tvy), out: Float64Array.from(st.out), deposits: Float64Array.from(st.terrain.deposits), ground: Float64Array.from(st.terrain.ground),
+      Object.assign(into, { tail: st.tail ? { ...st.tail.result, debt: st.terrain.debt - debt0 + st.tail.result.debt } : null, input, tvx: Float32Array.from(st.tvx), tvy: Float32Array.from(st.tvy), out: Float64Array.from(st.out), deposits: Float64Array.from(st.terrain.deposits), ground: Float64Array.from(st.terrain.ground),
         lift: Float32Array.from(st.lift, (v, k) => v - lift0[k]) });
     },
   };
@@ -80,9 +83,13 @@ async function main(): Promise<void> {
       const dField = relDiff(cap.out, inp.out), dDep = relDiff(cap.deposits, inp.terrain.deposits), dGround = relDiff(cap.ground, inp.terrain.ground);
       const dLift = relDiff(cap.lift, inp.lift);
       // Подъём грунта — показ с порогом срыва: клетки у самого порога от разницы f32 в течениях срываются или нет — до ~0,5%.
-      const ok = r.exact && dField < 1e-4 && dDep < 1e-4 && dGround < 1e-6 && dLift < 1e-2 && dFlow < 1e-5;
+      const tg = inp.tail?.result, tc = cap.tail;
+      const rel = (a: number, b: number) => Math.abs(a - b) / Math.max(1e-9, Math.abs(b));
+      const tailText = tg && tc ? `хвост: воронок ${inp.tail!.funnels.length}, подвижек ${inp.tail!.moves.length}, бросков ${inp.tail!.spills.length}; в недра ${tg.sunk.toFixed(4)}/${tc.sunk.toFixed(4)}, утоплено ${tg.drowned.toFixed(4)}/${tc.drowned.toFixed(4)}, долг ${tg.debt.toFixed(4)}/${tc.debt.toFixed(4)} (видеокарта/ядро); ` : '';
+      const tailOk = !tg || !tc || (rel(tg.sunk, tc.sunk) < 1e-3 && rel(tg.drowned, tc.drowned) < 1e-3 && Math.abs(tg.debt - tc.debt) < 1e-3 * Math.max(1, tc.debt));
+      const ok = tailOk && r.exact && dField < 1e-4 && dDep < 1e-4 && dGround < 1e-6 && dLift < 1e-2 && dFlow < 1e-5;
       results.push({ stage: 4, seed, step: target, ok });
-      log(`  сид ${seed}, шаг ${target}: ${inp.flows ? `сумма течений на видеокарте (толчков ${inp.flows.pushes.length}) — отличие ${(100 * dFlow).toFixed(6)}%; ` : ''}отличие от ядра — поле ${(100 * dField).toFixed(5)}%, залежи ${(100 * dDep).toFixed(5)}%, грунт ${(100 * dGround).toFixed(7)}%, подъём грунта течением ${(100 * dLift).toFixed(3)}%; `
+      log(`  сид ${seed}, шаг ${target}: ${tailText}${inp.flows ? `сумма течений на видеокарте (толчков ${inp.flows.pushes.length}) — отличие ${(100 * dFlow).toFixed(6)}%; ` : ''}отличие от ядра — поле ${(100 * dField).toFixed(5)}%, залежи ${(100 * dDep).toFixed(5)}%, грунт ${(100 * dGround).toFixed(7)}%, подъём грунта течением ${(100 * dLift).toFixed(3)}%; `
         + `суммы долей ${r.exact ? 'равны' : 'НЕ равны'}; видеокарта с загрузкой и чтением ${r.ms.toFixed(1)} мс — ${ok ? 'да' : 'НЕТ'}`);
     }
   }
@@ -154,6 +161,7 @@ async function main(): Promise<void> {
   };
   const accel: MineralAccelerator = {
     sumsFlows: true,
+    doesTail: true,
     *surface(st) { yield* wait(gpu.mineral.surface(st, gpu.mineralExponent, gpu.groundExponent, st.flows && gpu.flowBuffers(st.flows))); },
     push: { *solve(sys) { return (yield* wait(gpu.push.solve(sys))).field; } },
   };

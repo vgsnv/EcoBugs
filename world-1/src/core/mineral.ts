@@ -23,7 +23,7 @@ import {
 } from './constants.ts';
 import type { Drift, DriftField } from './drift.ts';
 import type { LightMap } from './light.ts';
-import { moveGround, type TerrainState } from './terrain.ts';
+import { applyMoves, moveGround, planMoves, type MoveOp, type TerrainState } from './terrain.ts';
 import type { WorldParams } from './params.ts';
 import { cellInsideDish, dishOf } from './dish.ts';
 import { freeRegions, isBlocked, type PartitionLayout } from './partitions.ts';
@@ -515,6 +515,8 @@ export interface MineralAccelerator {
   surface?(a: SurfaceStage): Calculation;
   /** Ускоритель умеет сам складывать течения (`SurfaceStage.flows`). */
   sumsFlows?: boolean;
+  /** Ускоритель сам применяет воронки, подвижки и вещество извержений после поверхности (`SurfaceStage.tail`). */
+  doesTail?: boolean;
   /** Решение единичного течения толчка или тяги (как `solvePushSystem`) — при смене местности и новых источниках. */
   push?: PushAccelerator;
 }
@@ -532,7 +534,26 @@ export interface SurfaceStage extends MediumStage {
    * сам из узлов течений от света и полей толчка, пишет в `tvx`, `tvy` и сумму толчка в `pushX`, `pushY`.
    */
   flows?: FlowStage;
+  /** Если задано — после стекания применить хвост обновления (см. `TailStage`). */
+  tail?: TailStage;
 }
+
+/**
+ * Хвост обновления после поверхности — план, собранный до неё: воронки, подвижки,
+ * вещество извержений. Порядок — как в ядре. В `result` исполнитель пишет суммы:
+ * ушедшее в недра отверстиями, утопленные залежи, новый долг подложки (ещё не прибавленный).
+ */
+export interface TailStage {
+  funnels: FunnelOp[];
+  moves: MoveOp[];
+  spills: { x: number; y: number; amount: number; home: number }[];
+  mouths: { cells: Int32Array; amount: number }[];
+  /** Показ: уход в недра по клеткам, изменения грунта тектоникой — копятся. */
+  sinking: Float32Array; tectonic: Float32Array;
+  result: { sunk: number; drowned: number; debt: number };
+}
+/** Воронка за обновление: ареол поднимает залежи выше `limit` долей `lift`, отверстие уводит в недра поле выше `limit` долей `take`. */
+export interface FunnelOp { basin: Int32Array; holes: Int32Array; lift: number; take: number; limit: number }
 
 /** Слагаемые суммы течений: узлы течений от света (номера узлов и доля пути) и поля толчка с силой. */
 export interface FlowStage {
@@ -621,6 +642,32 @@ export function sumFlows(s: SurfaceStage): void {
   }
 }
 
+/** Воронка за обновление как операция (те же доли, что в `sinkFunnel`); null — воронка не тянет. */
+function funnelOp(m: MineralState, params: WorldParams, f: Funnel, P: number): FunnelOp | null {
+  if (f.strength <= 0) return null;
+  const { limit } = funnelThresholds(params, m.cell * m.cell);
+  return { basin: basinCells(m, f), holes: f.cells, lift: (1 - (1 - FUNNEL_LIFT) ** P) * f.strength, take: (1 - (1 - FUNNEL_SINK) ** P) * f.strength, limit };
+}
+
+/** Хвост обновления на CPU — запасной путь ускорителя: применяет план к полю `s.out`, залежам и грунту. */
+export function tailTask(s: SurfaceStage): void {
+  const t = s.tail;
+  if (!t) return;
+  const { m, terrain } = s, field = s.out, dep = terrain.deposits, gr = terrain.ground;
+  let sunk = 0;
+  for (const f of t.funnels) {
+    for (const k of f.basin) { const g = Math.max(0, dep[k] - f.limit) * f.lift; dep[k] -= g; field[k] += g; }
+    for (const k of f.holes) { const g = Math.max(0, field[k] - f.limit) * f.take; sunk += g; field[k] -= g; t.sinking[k] += g; }
+  }
+  const before = workspace(m).ground;
+  before.set(gr);
+  const drowned = applyMoves(terrain, t.moves);
+  for (let k = 0; k < gr.length; k++) t.tectonic[k] += gr[k] - before[k];
+  for (const p of t.spills) spill(field, m.blocked, m.cols, m.rows, m.cell, p.x, p.y, p.amount, p.home);
+  for (const p of t.mouths) for (let q = 0; q < p.cells.length; q++) field[p.cells[q]] += p.amount / p.cells.length;
+  t.result = { sunk, drowned, debt: 0 };
+}
+
 /** Поверхность на CPU: среда, грунт, стекание в `out` (запасной путь ускорителя — тот же). */
 export function* surfaceTask(s: SurfaceStage): Calculation {
   sumFlows(s);
@@ -629,6 +676,7 @@ export function* surfaceTask(s: SurfaceStage): Calculation {
   phase('стекание');
   // Стекание: растворённый минерал стекает к соседям ниже — с суши к воде.
   yield* runoffTask({ m: s.m, field: s.dst, ground: s.terrain.ground, deposits: s.terrain.deposits, holes: s.holes, perLvl: s.perLvl, P: s.P, out: s.out });
+  tailTask(s);
 }
 
 /** Стекание на CPU (запасной путь ускорителя — тот же). */
@@ -707,12 +755,25 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   const area = cell * cell;
   const perLvl = GROUND_PER_LEVEL * area;
   const gr = terrain.ground;
+  // Хвост на ускорителе — план до поверхности. Броски летят по течениям прошлого обновления (нынешние ещё не сложены).
+  let tail: TailStage | undefined;
+  if (accel?.surface && accel.doesTail) {
+    const spills: TailStage['spills'] = [], mouths: TailStage['mouths'] = [];
+    const funnels = m.funnels.map((f) => funnelOp(m, params, f, P)).filter((f): f is FunnelOp => f !== null);
+    const moves = planMoves(terrain, params, step - P, step, cols, rows, cell, blocked);
+    yield* eruptionsTask(m, params, terrain, partitions, work, step, {
+      spill: (x, y, amount, home) => { spills.push({ x, y, amount, home }); },
+      mouth: (cells, amount) => { mouths.push({ cells, amount }); },
+    });
+    tail = { funnels, moves, spills, mouths, sinking: processes.sinking, tectonic: work.groundChanges.tectonic, result: { sunk: 0, drowned: 0, debt: 0 } };
+  }
   const stage: SurfaceStage = { m, terrain, src, dst, holes, mobility, tvx, tvy, P, spread: MINERAL_SPREAD, sMax, settle, dissolve, perLvl,
     erosionOver: EROSION_RATIO * groundThreshold(params), erosion: EROSION * P * area, sinkSettle: MINERAL_SINK_SETTLE * P,
     erosionOut: processes.erosion, settlingOut: processes.settling,
     sandOver: groundThreshold(params), slope: params.slopeLimit * m.cell / 10,
     lift: work.groundChanges.lift, net: work.groundChanges.net, out: work.runoff,
-    ...(flowsOnAccel ? { flows: { a: fa, b: fb, u: fu, ka: kNode, kb: kNode + 1, pushes, pushX: work.pushX, pushY: work.pushY } } : {}) };
+    ...(flowsOnAccel ? { flows: { a: fa, b: fb, u: fu, ka: kNode, kb: kNode + 1, pushes, pushX: work.pushX, pushY: work.pushY } } : {}),
+    ...(tail ? { tail } : {}) };
   if (accel?.surface) { phase('перенос'); yield* accel.surface(stage); }
   else yield* surfaceTask(stage);
   if (flowsOnAccel) {
@@ -727,21 +788,36 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   work.groundChanges.steps += P;
 
   phase('воронки, подвижки, извержения');
-  // Воронки: что дошло до отверстия, уходит в недра; залежи в отверстии поднимаются (см. sinkFunnel).
-  for (const f of m.funnels) {
-    const sunk = sinkFunnel(m, params, terrain, f, P);
-    m.depths += sunk;
-    work.exchanges.funnelSunk += sunk;
+  if (tail) {
+    // Хвост применён вместе с поверхностью: в недра — ушедшее отверстиями и утопленное, долг — от опусканий.
+    m.depths += tail.result.sunk + tail.result.drowned;
+    work.exchanges.funnelSunk += tail.result.sunk;
+    terrain.debt += tail.result.debt;
+  } else {
+    // Воронки: что дошло до отверстия, уходит в недра; залежи в отверстии поднимаются (см. sinkFunnel).
+    for (const f of m.funnels) {
+      const sunk = sinkFunnel(m, params, terrain, f, P);
+      m.depths += sunk;
+      work.exchanges.funnelSunk += sunk;
+    }
+
+    // Подвижки и толчки: грунт из подложки и в неё; опускание топит залежи в недра.
+    // Для показа — что изменила тектоника (буфер грунта здесь свободен).
+    work.ground.set(gr);
+    m.depths += moveGround(terrain, params, step - P, step, cols, rows, cell, blocked);
+    const tect = work.groundChanges.tectonic;
+    for (let k = 0; k < n; k++) tect[k] += gr[k] - work.ground[k];
+
+    // 3. Выход вещества активных извержений за весь промежуток.
+    yield* eruptionsTask(m, params, terrain, partitions, work, step, fieldSink(m));
   }
+  m.version++;
+  phase(null);
+}
 
-  // Подвижки и толчки: грунт из подложки и в неё; опускание топит залежи в недра.
-  // Для показа — что изменила тектоника (буфер грунта здесь свободен).
-  work.ground.set(gr);
-  m.depths += moveGround(terrain, params, step - P, step, cols, rows, cell, blocked);
-  const tect = work.groundChanges.tectonic;
-  for (let k = 0; k < n; k++) tect[k] += gr[k] - work.ground[k];
-
-  // 3. Выход вещества активных извержений за весь промежуток.
+/** Выход вещества активных извержений за промежуток (step − P, step]: броски и жерло — в `sink`, учёт вулканов — здесь. */
+function* eruptionsTask(m: MineralState, params: WorldParams, terrain: TerrainState, partitions: PartitionLayout, work: MineralWork, step: number, sink: EruptionSink): Calculation {
+  const P = MINERAL_PERIOD;
   for (const vol of m.volcanoes) {
     if (vol.stage !== 'erupting') continue;
     const d = vol.until - vol.begin;
@@ -758,11 +834,11 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
       const part = vol.total * ERUPTION_BURST * b.share * (ease((u1 - b.at) / BURST_WIDTH) - ease((a0 - b.at) / BURST_WIDTH));
       if (part <= 0) continue;
       const g = Math.min(left, part);
-      yield* throwMass(m, terrain, partitions, work, vol, g, vol.radius * Math.sqrt(b.share / bursts[0].share));
+      yield* throwMass(m, terrain, partitions, work, vol, g, vol.radius * Math.sqrt(b.share / bursts[0].share), sink);
       left -= g;
     }
     const mouth = mouthCells(m, terrain, vol);
-    for (let q = 0; q < mouth.length; q++) m.field[mouth[q]] += (out - thrown + left) / mouth.length;
+    sink.mouth(mouth, out - thrown + left);
     work.exchanges.emitted += out;
     vol.left -= out;
     vol.rate = out / P;
@@ -779,8 +855,6 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
       }
     }
   }
-  m.version++;
-  phase(null);
 }
 
 /** Запуск и завершение подготовки — по давлению в начале обновления среды. */
@@ -1073,7 +1147,19 @@ function mouthCells(m: MineralState, terrain: TerrainState, vol: Volcano): Int32
   return cells;
 }
 
-function* throwMass(m: MineralState, terrain: TerrainState, partitions: PartitionLayout, work: MineralWork, vol: Volcano, amount: number, range: number): Calculation {
+/** Куда кладётся вещество извержений: брошенное — с раскладкой по соседям (как `spill`), вышедшее в жерло — поровну по клеткам. */
+export interface EruptionSink {
+  spill(x: number, y: number, amount: number, home: number): void;
+  mouth(cells: Int32Array, amount: number): void;
+}
+function fieldSink(m: MineralState): EruptionSink {
+  return {
+    spill: (x, y, amount, home) => spill(m.field, m.blocked, m.cols, m.rows, m.cell, x, y, amount, home),
+    mouth: (cells, amount) => { for (let q = 0; q < cells.length; q++) m.field[cells[q]] += amount / cells.length; },
+  };
+}
+
+function* throwMass(m: MineralState, terrain: TerrainState, partitions: PartitionLayout, work: MineralWork, vol: Volcano, amount: number, range: number, sink: EruptionSink): Calculation {
   if (amount <= 0) return;
   const { cols, rows, cell } = m;
   const at = (x: number, y: number) => Math.min(rows - 1, Math.max(0, Math.floor(y / cell))) * cols + Math.min(cols - 1, Math.max(0, Math.floor(x / cell)));
@@ -1092,7 +1178,7 @@ function* throwMass(m: MineralState, terrain: TerrainState, partitions: Partitio
     const angle = ((r + 0.5) / THROW_RAYS) * Math.PI * 2;
     for (let q = 0; q < THROW_SAMPLES; q++) {
       const [x, y] = traceThrow(world, vol.x, vol.y, angle, (range * (q + 0.5)) / THROW_SAMPLES);
-      spill(m.field, m.blocked, cols, rows, cell, x, y, (amount * weights[q]) / wsum / THROW_RAYS, home);
+      sink.spill(x, y, (amount * weights[q]) / wsum / THROW_RAYS, home);
     }
   }
 }

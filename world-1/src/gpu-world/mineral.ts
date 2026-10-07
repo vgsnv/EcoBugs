@@ -284,6 +284,111 @@ struct PU { i0: u32, j0: u32, w: u32, h: u32, cols: u32, s: f32, p0: u32, p1: u3
   if ((mask[k] & 1u) == 0u) { flowOut[k] += v; }
 }`;
 
+// Хвост обновления после стекания — как `tailTask` ядра: воронки, подвижки, вещество извержений.
+const TAIL = /* wgsl */`
+struct T { len: u32, cols: u32, rows: u32, kind: u32, scaleM: f32, scaleG: f32, cell: f32, a: f32, b: f32, limit: f32, p0: f32, p1: f32 };
+@group(0) @binding(0) var<uniform> t: T;
+@group(0) @binding(1) var<storage, read_write> A: array<atomic<u32>>;   // поле
+@group(0) @binding(2) var<storage, read_write> dep: array<vec2u>;
+@group(0) @binding(3) var<storage, read_write> G: array<atomic<u32>>;   // грунт
+@group(0) @binding(4) var<storage, read> cells: array<u32>;
+@group(0) @binding(5) var<storage, read> weights: array<f32>;
+// суммы (пары u32): 0 ушло в недра отверстиями, 1 утоплено залежей, 2 новый долг подложки, 3 грунт поднят, 4 грунт снят (доли грунта)
+@group(0) @binding(6) var<storage, read_write> exch: array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read_write> sinkingOut: array<f32>;
+@group(0) @binding(8) var<storage, read_write> tectOut: array<f32>;
+@group(0) @binding(9) var<storage, read> spillPos: array<vec4f>;      // x, y, дом (номер клетки)
+@group(0) @binding(10) var<storage, read> amounts: array<vec2u>;      // доли
+@group(0) @binding(11) var<storage, read> mask: array<u32>;
+
+fn add64(a: vec2u, b: vec2u) -> vec2u { let lo = a.x + b.x; return vec2u(lo, a.y + b.y + select(0u, 1u, lo < a.x)); }
+fn sub64(a: vec2u, b: vec2u) -> vec2u { return vec2u(a.x - b.x, a.y - b.y - select(0u, 1u, a.x < b.x)); }
+fn neg64(a: vec2u) -> vec2u { return sub64(vec2u(0u), a); }
+fn isNeg(a: vec2u) -> bool { return (a.y & 0x80000000u) != 0u; }
+fn isZero(a: vec2u) -> bool { return a.x == 0u && a.y == 0u; }
+fn lt64(a: vec2u, b: vec2u) -> bool { return a.y < b.y || (a.y == b.y && a.x < b.x); }
+fn min64(a: vec2u, b: vec2u) -> vec2u { return select(a, b, lt64(b, a)); }
+fn toF(a: vec2u) -> f32 { return f32(a.y) * 4294967296.0 + f32(a.x); }
+fn fromF(x: f32) -> vec2u {
+  let r = floor(x + 0.5);
+  if (r <= 0.0) { return vec2u(0u); }
+  let hi = floor(r / 4294967296.0);
+  return vec2u(u32(max(0.0, r - hi * 4294967296.0)), u32(hi));
+}
+fn addA(k: u32, v: vec2u) { if (isZero(v)) { return; } let old = atomicAdd(&A[2u * k], v.x); atomicAdd(&A[2u * k + 1u], v.y + select(0u, 1u, old + v.x < old)); }
+fn addG(k: u32, v: vec2u) { if (isZero(v)) { return; } let old = atomicAdd(&G[2u * k], v.x); atomicAdd(&G[2u * k + 1u], v.y + select(0u, 1u, old + v.x < old)); }
+fn addX(i: u32, v: vec2u) { if (isZero(v)) { return; } let old = atomicAdd(&exch[2u * i], v.x); atomicAdd(&exch[2u * i + 1u], v.y + select(0u, 1u, old + v.x < old)); }
+fn loadA(k: u32) -> vec2u { return vec2u(atomicLoad(&A[2u * k]), atomicLoad(&A[2u * k + 1u])); }
+fn loadG(k: u32) -> vec2u { return vec2u(atomicLoad(&G[2u * k]), atomicLoad(&G[2u * k + 1u])); }
+// Выше порога limit (в долях): над-порогом × доля, не больше над-порога.
+fn above(v: vec2u, limit: vec2u, share: f32) -> vec2u {
+  if (isNeg(v) || !lt64(limit, v)) { return vec2u(0u); }
+  let over = sub64(v, limit);
+  return min64(over, fromF(toF(over) * share));
+}
+
+// Ареол воронки: залежи выше порога поднимаются в среду (доля a).
+@compute @workgroup_size(64) fn funnelBasin(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x >= t.len) { return; }
+  let k = cells[g.x]; let d = dep[k];
+  let up = above(d, fromF(t.limit * t.scaleM), t.a);
+  dep[k] = sub64(d, up); addA(k, up);
+}
+// Отверстие воронки: поле выше порога уходит в недра (доля b).
+@compute @workgroup_size(64) fn funnelHoles(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x >= t.len) { return; }
+  let k = cells[g.x];
+  let down = above(loadA(k), fromF(t.limit * t.scaleM), t.b);
+  addA(k, neg64(down)); addX(0u, down);
+  sinkingOut[k] += toF(down) / t.scaleM;
+}
+// Подвижка: размах a грунта на единицу веса; подъём — прибавка, опускание — сколько есть, остальное в долг, залежи тонут пропорционально.
+@compute @workgroup_size(64) fn shiftGround(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x >= t.len) { return; }
+  let k = cells[g.x]; let w = weights[g.x];
+  if (t.a > 0.0) {
+    let up = fromF(t.a * w * t.scaleG);
+    addG(k, up); addX(3u, up); tectOut[k] += toF(up) / t.scaleG;
+    return;
+  }
+  let change = fromF(-t.a * w * t.scaleG);
+  let before = loadG(k);
+  var take = vec2u(0u);
+  if (!isNeg(before)) { take = min64(before, change); }
+  addG(k, neg64(take)); addX(2u, sub64(change, take)); addX(4u, take);
+  tectOut[k] -= toF(take) / t.scaleG;
+  let d = dep[k];
+  if (!isNeg(before) && !isZero(before) && !isNeg(d) && !isZero(d)) {
+    let drown = min64(d, fromF(toF(d) * (toF(take) / toF(before))));
+    dep[k] = sub64(d, drown); addX(1u, drown);
+  }
+}
+fn blockedAt(i: i32, j: i32) -> bool { return i < 0 || j < 0 || i >= i32(t.cols) || j >= i32(t.rows) || (mask[u32(j) * t.cols + u32(i)] & 1u) != 0u; }
+fn part(left: vec2u, total: f32, w: f32) -> vec2u { return min64(fromF(total * w), left); }
+fn put(i: i32, j: i32, v: vec2u, home: u32) { if (blockedAt(i, j)) { addA(home, v); } else { addA(u32(j) * t.cols + u32(i), v); } }
+// Бросок: доли раскладываются по четырём соседям (как spill), у стенки — домой, остаток — последнему.
+@compute @workgroup_size(64) fn spill(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x >= t.len) { return; }
+  let p = spillPos[g.x]; let moved = amounts[g.x]; let home = bitcast<u32>(p.z);
+  let fx = p.x / t.cell - 0.5; let fy = p.y / t.cell - 0.5;
+  let i0 = i32(floor(fx)); let j0 = i32(floor(fy)); let u = fx - f32(i0); let w = fy - f32(j0);
+  let mf = toF(moved);
+  var left = moved;
+  let s00 = part(left, mf, (1.0 - u) * (1.0 - w)); left = sub64(left, s00);
+  let s10 = part(left, mf, u * (1.0 - w)); left = sub64(left, s10);
+  let s01 = part(left, mf, (1.0 - u) * w); left = sub64(left, s01);
+  put(i0, j0, s00, home); put(i0 + 1, j0, s10, home); put(i0, j0 + 1, s01, home); put(i0 + 1, j0 + 1, left, home);
+}
+// Выход в жерло: доли по клеткам — уже разложены на CPU.
+@compute @workgroup_size(64) fn addCells(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x >= t.len) { return; }
+  addA(cells[g.x], amounts[g.x]);
+}`;
+const TAIL_USE = {
+  funnelBasin: [0, 1, 2, 4], funnelHoles: [0, 1, 4, 6, 7], shiftGround: [0, 2, 3, 4, 5, 6, 8], spill: [0, 1, 9, 10, 11], addCells: [0, 1, 4, 10],
+} as const;
+type TailName = keyof typeof TAIL_USE;
+
 /** Слагаемые суммы течений на видеокарте: узлы течений и окна полей толчка. */
 export interface FlowBuffers { a: GPUBuffer; b: GPUBuffer; u: number; pushes: { buf: GPUBuffer; i0: number; j0: number; w: number; h: number; strength: number }[] }
 
@@ -321,6 +426,10 @@ export class GpuMineral {
   private mobData = new Float32Array(0);
   private maskData = new Uint32Array(0);
 
+  private readonly tailPipes: Record<TailName, GPUComputePipeline>;
+  /** Списки клеток ареолов и следов подвижек — по объекту массива ядра (ядро их тоже кеширует). */
+  private readonly listBuffers = new WeakMap<ArrayBufferView, GPUBuffer>();
+  private tailBufs: { exch: GPUBuffer; sinking: GPUBuffer; tect: GPUBuffer } | null = null;
   private readonly flowBase: GPUComputePipeline;
   private readonly pushAdd: GPUComputePipeline;
   private flowsU: GPUBuffer | null = null;
@@ -331,9 +440,82 @@ export class GpuMineral {
     this.device = device;
     const module = device.createShaderModule({ code: WGSL });
     this.pipes = Object.fromEntries((Object.keys(USED) as Name[]).map((e) => [e, device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: e } })])) as Record<Name, GPUComputePipeline>;
+    const tm = device.createShaderModule({ code: TAIL });
+    this.tailPipes = Object.fromEntries((Object.keys(TAIL_USE) as TailName[]).map((e) => [e, device.createComputePipeline({ layout: 'auto', compute: { module: tm, entryPoint: e } })])) as Record<TailName, GPUComputePipeline>;
     const fm = device.createShaderModule({ code: FLOWS });
     this.flowBase = device.createComputePipeline({ layout: 'auto', compute: { module: fm, entryPoint: 'flowBase' } });
     this.pushAdd = device.createComputePipeline({ layout: 'auto', compute: { module: fm, entryPoint: 'pushAdd' } });
+  }
+
+  private listBuffer(list: Int32Array | Float32Array): GPUBuffer {
+    let b = this.listBuffers.get(list);
+    if (!b) {
+      b = this.device.createBuffer({ label: 'список клеток хвоста', size: Math.max(16, Math.ceil(list.byteLength / 16) * 16), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      this.device.queue.writeBuffer(b, 0, list.buffer as ArrayBuffer, list.byteOffset, list.byteLength);
+      this.listBuffers.set(list, b);
+    }
+    return b;
+  }
+
+  /**
+   * Хвост после стекания — как `tailTask` ядра. Возвращает доли, добавленные бросками и жерлом
+   * (минерал), — для сверки суммы; одноразовые буферы — в `temp`, их освобождает вызывающий.
+   */
+  private encodeTail(enc: GPUCommandEncoder, s: SurfaceStage, n: number, mExp: number, gExp: number, temp: GPUBuffer[]): number {
+    const tail = s.tail!, d = this.device, b = this.b!;
+    if (!this.tailBufs || this.tailBufs.sinking.size < n * 4) {
+      if (this.tailBufs) for (const x of Object.values(this.tailBufs)) x.destroy();
+      const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
+      this.tailBufs = { exch: d.createBuffer({ size: 48, usage: S }), sinking: d.createBuffer({ size: n * 4, usage: S }), tect: d.createBuffer({ size: n * 4, usage: S }) };
+    }
+    const tb = this.tailBufs;
+    enc.clearBuffer(tb.exch); enc.clearBuffer(tb.sinking); enc.clearBuffer(tb.tect);
+    const scaleM = 2 ** mExp, scaleG = 2 ** gExp;
+    const mkTemp = (data: ArrayBufferView & { buffer: ArrayBufferLike }, usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST) => {
+      const x = d.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage });
+      d.queue.writeBuffer(x, 0, data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
+      temp.push(x); return x;
+    };
+    const uniform = (len: number, kind: number, a: number, bb: number, limit: number) => {
+      const ub = new ArrayBuffer(48); new Uint32Array(ub).set([len, this.cols, n / this.cols, kind]);
+      new Float32Array(ub).set([scaleM, scaleG, s.m.cell, a, bb, limit], 4);
+      return mkTemp(new Uint8Array(ub), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    };
+    const empty = mkTemp(new Uint32Array(4));
+    const pass = enc.beginComputePass();
+    const run = (name: TailName, len: number, u: GPUBuffer, bind: Partial<Record<number, GPUBuffer>>) => {
+      if (len === 0) return;
+      const all: Record<number, GPUBuffer> = { 0: u, 1: b.A, 2: b.dep, 3: b.G, 6: tb.exch, 7: tb.sinking, 8: tb.tect, 11: b.mask, 4: empty, 5: empty, 9: empty, 10: empty, ...bind };
+      pass.setPipeline(this.tailPipes[name]);
+      pass.setBindGroup(0, d.createBindGroup({ layout: this.tailPipes[name].getBindGroupLayout(0), entries: TAIL_USE[name].map((k) => ({ binding: k, resource: { buffer: all[k] } })) }));
+      pass.dispatchWorkgroups(Math.ceil(len / 64));
+    };
+    for (const f of tail.funnels) {
+      run('funnelBasin', f.basin.length, uniform(f.basin.length, 0, f.lift, f.take, f.limit), { 4: this.listBuffer(f.basin) });
+      run('funnelHoles', f.holes.length, uniform(f.holes.length, 1, f.lift, f.take, f.limit), { 4: this.listBuffer(f.holes) });
+    }
+    for (const m of tail.moves) run('shiftGround', m.cells.length, uniform(m.cells.length, 2, m.step, 0, 0), { 4: this.listBuffer(m.cells), 5: this.listBuffer(m.weights) });
+    // Количества бросков и жерла — в доли на CPU: поле получает ровно столько, сколько ушло из недр по этим долям.
+    let added = 0;
+    const toPair = (amount: number, out: Uint32Array, at: number) => {
+      const sh = Math.max(0, Math.round(amount * scaleM)), hi = Math.floor(sh / 4294967296);
+      out[at] = sh - hi * 4294967296; out[at + 1] = hi; added += sh;
+    };
+    if (tail.spills.length) {
+      const pos = new Float32Array(tail.spills.length * 4), posU = new Uint32Array(pos.buffer), am = new Uint32Array(tail.spills.length * 2);
+      tail.spills.forEach((p, i) => { pos[4 * i] = p.x; pos[4 * i + 1] = p.y; posU[4 * i + 2] = p.home; toPair(p.amount, am, 2 * i); });
+      run('spill', tail.spills.length, uniform(tail.spills.length, 3, 0, 0, 0), { 9: mkTemp(pos), 10: mkTemp(am) });
+    }
+    const mouthCells: number[] = [], mouthAm: number[] = [];
+    for (const p of tail.mouths) for (let q = 0; q < p.cells.length; q++) { mouthCells.push(p.cells[q]); mouthAm.push(p.amount / p.cells.length); }
+    if (mouthCells.length) {
+      const am = new Uint32Array(mouthCells.length * 2);
+      mouthAm.forEach((a, i) => toPair(a, am, 2 * i));
+      run('addCells', mouthCells.length, uniform(mouthCells.length, 4, 0, 0, 0), { 4: mkTemp(Uint32Array.from(mouthCells)), 10: mkTemp(am) });
+    }
+    pass.end();
+    enc.copyBufferToBuffer(b.G, 0, b.ground, 0, n * 8);
+    return added;
   }
 
   /** Сумма течений в буфер `flow` (и толчок в `pushOut`) — первыми проходами отправки. */
@@ -378,7 +560,7 @@ export class GpuMineral {
       uniform: make(96, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST),
       F: make(n * 8), A: make(n * 8), flow: make(n * 8), mob: make(n * 4), mask: make(n * 4), B: make(n * 8),
       dep: make(n * 8), ground: make(n * 8), erosion: make(n * 4), settling: make(n * 4), G: make(n * 8), lift: make(n * 4),
-      read: make(n * 52, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
+      read: make(n * 60 + 48, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
     };
     const b = this.b;
     const order = [b.uniform, b.F, b.A, b.flow, b.mob, b.mask, b.B, b.dep, b.ground, b.erosion, b.settling, b.G, b.lift];
@@ -444,16 +626,22 @@ export class GpuMineral {
     enc.copyBufferToBuffer(b.B, 0, b.F, 0, n8);
     enc.copyBufferToBuffer(b.B, 0, b.A, 0, n8);
     this.pass(enc, 'runoff');
+    const temp: GPUBuffer[] = [];
+    // Грунт после осыпания — в G уже лежит (стекание его не меняет); хвост меняет G и залежи.
+    const added = s.tail ? this.encodeTail(enc, s, n, mExp, gExp, temp) : 0;
     let at = 0;
     const parts: [GPUBuffer, number][] = [[b.A, n8], [b.dep, n8], [b.ground, n8], [b.erosion, n * 4], [b.settling, n * 4], [b.lift, n * 4]];
     if (flows) parts.push([b.flow, n8], [this.pushOut!, n8]);
+    const tailAt = at + parts.reduce((x, [, size]) => x + size, 0);
+    if (s.tail) parts.push([this.tailBufs!.exch, 48], [this.tailBufs!.sinking, n * 4], [this.tailBufs!.tect, n * 4]);
     for (const [buf, size] of parts) { enc.copyBufferToBuffer(buf, 0, b.read, at, size); at += size; }
     q.submit([enc.finish()]);
     const failure = await this.device.popErrorScope();
-    if (failure) throw Error(`видеокарта отклонила поверхность: ${failure.message.split('\n')[0]}`);
+    if (failure) { for (const x of temp) x.destroy(); throw Error(`видеокарта отклонила поверхность: ${failure.message.split('\n')[0]}`); }
     await b.read.mapAsync(GPUMapMode.READ, 0, at);
     const data = b.read.getMappedRange(0, at).slice(0);
     b.read.unmap();
+    for (const x of temp) x.destroy();
     const t2 = performance.now();
     const field = new Uint32Array(data, 0, n * 2), deposits = new Uint32Array(data, n8, n * 2), ground = new Uint32Array(data, 2 * n8, n * 2);
     fromShares(field, mExp, s.out);
@@ -469,8 +657,16 @@ export class GpuMineral {
       const { pushX, pushY } = s.flows;
       for (let k = 0; k < n; k++) { s.tvx[k] = fl[2 * k]; s.tvy[k] = fl[2 * k + 1]; pushX[k] = pu[2 * k]; pushY[k] = pu[2 * k + 1]; }
     }
+    let sunk = 0, drowned = 0, gAdded = 0, gTaken = 0;
+    if (s.tail) {
+      const ex = new Uint32Array(data, tailAt, 12), pair = (i: number) => ex[2 * i] + ex[2 * i + 1] * 4294967296;
+      sunk = pair(0); drowned = pair(1); gAdded = pair(3); gTaken = pair(4);
+      s.tail.result = { sunk: sunk * 2 ** -mExp, drowned: drowned * 2 ** -mExp, debt: pair(2) * 2 ** -gExp };
+      const sink = new Float32Array(data, tailAt + 48, n), tect = new Float32Array(data, tailAt + 48 + n * 4, n);
+      for (let k = 0; k < n; k++) { s.tail.sinking[k] += sink[k]; s.tail.tectonic[k] += tect[k]; }
+    }
     const t3 = performance.now();
     return { ms: t3 - t0, prepMs: t1 - t0, gpuMs: t2 - t1, doneMs: t3 - t2,
-      exact: shareSum(field) + shareSum(deposits) === mineralBefore && shareSum(ground) === groundBefore };
+      exact: shareSum(field) + shareSum(deposits) + sunk + drowned === mineralBefore + added && shareSum(ground) === groundBefore + gAdded - gTaken };
   }
 }

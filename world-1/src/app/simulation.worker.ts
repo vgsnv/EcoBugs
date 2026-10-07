@@ -69,6 +69,7 @@ function* awaitGpu<T>(job: Promise<T>): Generator<void, T | null, void> {
 /** Этапы обновления минерала на видеокарте; что не перенесено — считает ядро. */
 const accelerator: MineralAccelerator = {
   sumsFlows: true,
+  doesTail: true,
   *surface(a) {
     const g = gpu;
     const run = g?.usable ? yield* awaitGpu(g.mineral.surface(a, g.mineralExponent, g.groundExponent, a.flows && g.flowBuffers(a.flows))) : null;

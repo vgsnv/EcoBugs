@@ -177,10 +177,8 @@ export function createTerrain(params: WorldParams, viscosity: ViscosityMap, cols
  * топит залежи опускающегося участка в недра — в той же доле.
  * Возвращает, сколько минерала ушло в недра (утонувшие залежи).
  */
-export function moveGround(
-  t: TerrainState, params: WorldParams, from: number, to: number,
-  cols: number, rows: number, cell: number, blocked: Uint8Array,
-): number {
+/** Начать подвижки, время которых пришло к шагу `to`: цель — от нынешнего уровня участка. */
+function scheduleMoves(t: TerrainState, params: WorldParams, to: number, cols: number, rows: number, cell: number, blocked: Uint8Array): void {
   const scale = GROUND_PER_LEVEL * cell * cell;
   while (t.nextMoveStep <= to) {
     const m = movement(params, t.nextMove, t.nextMoveStep);
@@ -198,6 +196,64 @@ export function moveGround(
     t.nextMove++;
     t.nextMoveStep = Math.min(Number.MAX_SAFE_INTEGER, t.nextMoveStep + gap(params, t.nextMove));
   }
+}
+
+/** Операция подвижки за промежуток: клетки следа, веса, размах (грунта на единицу веса; > 0 — подъём, долг уже выплачен). */
+export interface MoveOp { cells: Int32Array; weights: Float32Array; step: number }
+
+/**
+ * Подвижки за промежуток (from, to] — без касания клеток: начать новые, выплатить
+ * долг подъёмами, вернуть операции. Применяет их ускоритель (видеокарта); утопленные
+ * залежи и новый долг от опусканий он возвращает суммами. В отличие от `moveGround`,
+ * подъёмы платят долгом, накопленным до этого промежутка.
+ */
+export function planMoves(t: TerrainState, params: WorldParams, from: number, to: number, cols: number, rows: number, cell: number, blocked: Uint8Array): MoveOp[] {
+  scheduleMoves(t, params, to, cols, rows, cell, blocked);
+  const scale = GROUND_PER_LEVEL * cell * cell;
+  const ops: MoveOp[] = [];
+  for (const m of t.active) {
+    let step = (progress(m, to) - progress(m, from)) * m.amp * scale;
+    if (step === 0) continue;
+    const f = footprint(m, cols, rows, cell, blocked);
+    if (step > 0) {
+      const pay = Math.min(t.debt, step * f.total * TECTONIC_DEBT_SHARE);
+      t.debt -= pay;
+      step -= pay / f.total;
+    }
+    ops.push({ cells: f.cells, weights: f.weights, step });
+  }
+  t.active = t.active.filter((m) => m.start + m.duration > to);
+  return ops;
+}
+
+/** Применить операции подвижек на CPU (запасной путь ускорителя): возвращает утопленные залежи, долг — в `t.debt`. */
+export function applyMoves(t: TerrainState, ops: readonly MoveOp[]): number {
+  let drowned = 0;
+  for (const { cells, weights, step } of ops) {
+    if (step > 0) { for (let n = 0; n < cells.length; n++) t.ground[cells[n]] += step * weights[n]; continue; }
+    for (let n = 0; n < cells.length; n++) {
+      const k = cells[n];
+      const change = -step * weights[n];
+      const before = t.ground[k];
+      const take = Math.min(before, change);
+      t.ground[k] -= take;
+      t.debt += change - take;
+      if (before > 0 && t.deposits[k] > 0) {
+        const drown = t.deposits[k] * (take / before);
+        t.deposits[k] -= drown;
+        drowned += drown;
+      }
+    }
+  }
+  return drowned;
+}
+
+export function moveGround(
+  t: TerrainState, params: WorldParams, from: number, to: number,
+  cols: number, rows: number, cell: number, blocked: Uint8Array,
+): number {
+  const scale = GROUND_PER_LEVEL * cell * cell;
+  scheduleMoves(t, params, to, cols, rows, cell, blocked);
   let drowned = 0;
   for (const m of t.active) {
     let step = (progress(m, to) - progress(m, from)) * m.amp * scale;
