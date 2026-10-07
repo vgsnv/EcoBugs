@@ -20,6 +20,9 @@ const updates = Number(q.get('updates') ?? 2000);
 const mode = q.get('mode') ?? 'both';
 /** profile=1 — время по этапам и отдельно после смены местности (каждые 10 000 шагов). */
 const profile = q.get('profile') === '1';
+/** window=N — печатать по окнам в N шагов: время на обновление и размер хвоста (воронки, подвижки, броски). cpu=0 — без CPU-мира: только видеокарта с шага `from` (по умолчанию 0). */
+const windowSteps = Number(q.get('window') ?? 0);
+const withCpu = q.get('cpu') !== '0';
 const spent = new Map<string, number>();
 let phaseNow: string | null = null, phaseSince = 0;
 const results: { seed: number; mode: string; ok: boolean }[] = [];
@@ -49,12 +52,13 @@ async function main(): Promise<void> {
   for (const seed of seeds) {
     for (const kind of mode === 'both' ? ['resident', 'sync'] : [mode]) {
       const a = createWorld(makeParams({ seed })), b = createWorld(makeParams({ seed }));
-      while (a.step < from) { stepWorld(a); stepWorld(b); }
+      while (a.step < from) { if (withCpu) stepWorld(a); stepWorld(b); }
+      if (!withCpu) a.step = from;
       gpu.attach(b);
       const end = from + updates * MINERAL_PERIOD;
       const before = mineralTotal(a), ground0 = groundTotal(a.terrain);
       const t0 = performance.now();
-      while (a.step < end) stepWorld(a);
+      while (withCpu && a.step < end) stepWorld(a);
       const cpuMs = performance.now() - t0;
       let maxDiff = 0, diffSteps: string[] = [], inexact = 0, snapshots = 0, folds = 0, aheadWaits = 0, firstBad: string | undefined;
       const t1 = performance.now();
@@ -68,12 +72,20 @@ async function main(): Promise<void> {
           if (sums.diff !== 0 && diffSteps.length < 12) diffSteps.push(`${w.step}:${sums.diff}`);
           if (!sums.exact) { inexact++; firstBad ??= `шаг ${w.step}: ${sums.mismatch}`; } else applySnapshot(w.mineral, w.terrain, sums);
         };
+        const w = { n: 0, spills: 0, funnels: 0, funnelCells: 0, moveCells: 0, mouths: 0, pushes: 0, erupting: 0, ms: 0, waits: 0, from: from };
+        const flushWindow = () => {
+          if (!windowSteps || w.n === 0) return;
+          const f = (x: number) => (x / w.n).toFixed(1);
+          log(`    шаги ${w.from}–${b.step}: ${(w.ms / w.n).toFixed(2)} мс на обновление (${Math.round(w.n * MINERAL_PERIOD / (w.ms / 1000))} шагов/с), ожиданий отставания ${f(w.waits)}; на обновление: бросков ${f(w.spills)}, воронок ${f(w.funnels)} (клеток ${f(w.funnelCells)}), клеток подвижек ${f(w.moveCells)}, жерл ${f(w.mouths)}, толчков ${f(w.pushes)}, извергается ${f(w.erupting)}`);
+          Object.assign(w, { n: 0, spills: 0, funnels: 0, funnelCells: 0, moveCells: 0, mouths: 0, pushes: 0, erupting: 0, ms: 0, waits: 0, from: b.step });
+        };
         const accel: MineralAccelerator = {
           sumsFlows: true, doesTail: true, resident: true,
           *surface(st) {
             if (!gm.loaded(st.m)) gm.load(st, gpu.mineralExponent, gpu.groundExponent);
             const ahead = gm.ahead();
-            if (ahead) { aheadWaits++; yield* wait(ahead); }
+            if (ahead) { aheadWaits++; w.waits++; yield* wait(ahead); }
+            if (windowSteps) { w.n++; w.spills += st.tail!.spills.length; w.funnels += st.tail!.funnels.length; w.funnelCells += st.tail!.funnels.reduce((x, f) => x + f.basin.length + f.holes.length, 0); w.moveCells += st.tail!.moves.reduce((x, m) => x + m.cells.length, 0); w.mouths += st.tail!.mouths.length; w.pushes += st.flows!.pushes.length; w.erupting += st.m.volcanoes.filter((v) => v.stage === 'erupting').length; }
             gm.submit(st, gpu.flowBuffers(st.flows!));
           },
           push: { *solve(sys) { return (yield* wait(gpu.push.solve(sys))).field; } },
@@ -92,6 +104,8 @@ async function main(): Promise<void> {
           const task = stepWorldTask(b, accel);
           while (!task.next().done) if (pending) { await pending; pending = null; }
           if (b.step % MINERAL_PERIOD === 0) await yieldToCallbacks();
+          w.ms += performance.now() - s0;
+          if (windowSteps && b.step % windowSteps === 0) flushWindow();
           const ms = performance.now() - s0, near = (at % 10000) < 300 && at >= 10000;
           (near ? bucket.after : bucket.other).ms += ms; (near ? bucket.after : bucket.other).steps++;
           if (ms > 5) worst.push({ step: at, ms });

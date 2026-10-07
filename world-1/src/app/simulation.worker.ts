@@ -269,7 +269,7 @@ function advance(): void {
   const maxDebt = MAX_DEBT * BASE_RATE * speed;
   carry = paused || !active ? 0 : Math.min(Math.max(0, carry - n), maxDebt);
   behind = !paused && active && carry >= maxDebt / 2;
-  if (dt > 0 && !paused) rate += (n / dt - rate) * Math.min(1, dt * 2);
+  if (dt > 0 && !paused && active) rate += (n / dt - rate) * Math.min(1, dt * 2);
   if (!calculation) {
     if (publishOnCompletion) {
       publishOnCompletion = false;
