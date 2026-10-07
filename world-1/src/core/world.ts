@@ -15,6 +15,7 @@ import { Drift } from './drift.ts';
 import { MINERAL_CELL, MINERAL_PERIOD, TERRAIN_PERIOD } from './constants.ts';
 import { createTerrain, levelFromGround, rescheduleMoves, type TerrainState } from './terrain.ts';
 import { applyLevels, applyLevelsTask } from './viscosity.ts';
+import { inheritPushFields } from './push.ts';
 import { createMineral, transparencyAt, updateMineralTask, volcanoNumbers, funnelNumbers, type MineralAccelerator, type MineralState } from './mineral.ts';
 
 export interface World {
@@ -108,8 +109,9 @@ export function* stepWorldTask(world: World, accel?: MineralAccelerator): Calcul
     phase('смена местности');
     const level = levelFromGround(world.terrain, MINERAL_CELL);
     yield* applyLevelsTask(world.viscosity, level, world.mineral.cols, world.mineral.rows, world.mineral.cell);
+    inheritPushFields(world.terrain.applied, level);
     world.terrain.applied = level;
-    world.drift.reset();
+    world.drift.reset(true);
     phase(null);
   }
   world.step = step;

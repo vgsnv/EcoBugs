@@ -40,6 +40,22 @@ interface Grid {
 
 /** Кеш по местности (массив уровней заменяется целиком при пересборке) и по ключу источника. */
 const cache = new WeakMap<Float32Array, Map<string, PushField>>();
+/** Поля, унаследованные от прошлой местности и ещё не пересчитанные. */
+const stale = new WeakMap<Map<string, PushField>, Set<string>>();
+
+/**
+ * Местность сменилась: поля источников остаются от прошлой — форма толчка от местности зависит слабо, а решать
+ * все поля сразу останавливало мир. Пересчитываются они по одному за обновление (`PushBudget`).
+ */
+export function inheritPushFields(from: Float32Array, to: Float32Array): void {
+  const old = cache.get(from);
+  if (!old || cache.has(to)) return;
+  cache.set(to, new Map(old));
+  stale.set(cache.get(to)!, new Set([...old.keys(), ...(stale.get(old) ?? [])]));
+}
+
+/** Сколько устаревших полей можно пересчитать в этом обновлении. */
+export interface PushBudget { refresh: number }
 const materials = new WeakMap<Float32Array, { cond: Float64Array; damp: Float64Array }>();
 
 /** Одно вычисление свойств клеток на местность для всех вулканов и воронок. */
@@ -79,11 +95,17 @@ export function pushField(grid: Grid, level: Float32Array, key: string, seeds: r
   return finishCalculation(pushFieldTask(grid, level, key, seeds));
 }
 
-export function* pushFieldTask(grid: Grid, level: Float32Array, key: string, seeds: readonly number[] | Int32Array, accel?: PushAccelerator): Calculation<PushField> {
+export function* pushFieldTask(grid: Grid, level: Float32Array, key: string, seeds: readonly number[] | Int32Array, accel?: PushAccelerator, budget?: PushBudget): Calculation<PushField> {
   let byLevel = cache.get(level);
   if (!byLevel) { byLevel = new Map(); cache.set(level, byLevel); }
   const hit = byLevel.get(key);
-  if (hit) return hit;
+  const old = stale.get(byLevel);
+  if (hit && old?.has(key)) {
+    // Унаследованное поле: пересчитать, если в этом обновлении ещё есть запас, иначе пользоваться прежним.
+    if (!budget || budget.refresh <= 0) return hit;
+    budget.refresh--;
+    old.delete(key);
+  } else if (hit) return hit;
   phase('поле толчка (при смене местности)');
   const sys = yield* pushSystemTask(grid, level, seeds);
   const field = (accel && (yield* accel.solve(sys))) || (yield* solvePushTask(sys, PUSH_ITERATIONS));

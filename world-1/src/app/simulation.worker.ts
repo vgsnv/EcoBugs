@@ -155,6 +155,12 @@ const lastStages = { surface: 0, parts: [0, 0, 0], drift: 0, driftIterations: 0,
 
 /** Поле течений на видеокарте; null — пусть считает ядро. */
 const driftAccelerator: DriftAccelerator = {
+  begin(stage) {
+    const g = gpu;
+    if (!g?.usable) return null;
+    return g.drift.field(stage).then((run) => { lastStages.drift = run.ms; lastStages.driftIterations = run.iterations; return run.field; }, (error) => { useCpu(`ошибка видеокарты: ${String(error)}`); return null; });
+  },
+  *join(job) { return yield* awaitGpu(job); },
   *field(stage) {
     const g = gpu;
     if (!g?.usable) return null;

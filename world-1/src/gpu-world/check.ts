@@ -108,6 +108,7 @@ async function main(): Promise<void> {
       world.drift.accelerator = null;
       for (const [st, ref] of [[stages[0], cpu.a], [stages[1], cpu.b]] as const) {
         const r = await gpu.drift.field(st);
+        if (r.rebuilt) { const tr = await gpu.drift.timeRebuild(st); log(`    пересборка: всё ${tr.all.toFixed(1)} мс, матрица одна ${tr.matrix.toFixed(1)} мс`); }
         let num = 0, den = 0, maxV = 0;
         for (let k = 0; k < ref.vx.length; k++) {
           num += (r.field.vx[k] - ref.vx[k]) ** 2 + (r.field.vy[k] - ref.vy[k]) ** 2;
@@ -118,7 +119,7 @@ async function main(): Promise<void> {
         const ok = diff < 0.005;
         results.push({ stage: 5, seed, step: st.t, ok });
         log(`  сид ${seed}, узел ${st.t}: отличие скоростей ${(100 * diff).toFixed(3)}% (наибольшая скорость ${maxV.toFixed(3)} за шаг); `
-          + `шагов решателя ${r.iterations}, отправок ${r.submits}${r.rebuilt ? ', матрица грубой сетки построена' : ''}; CPU ${cpuMs.toFixed(1)} мс, видеокарта с чтением ${r.ms.toFixed(1)} мс — ${ok ? 'да' : 'НЕТ'}`);
+          + `шагов решателя ${r.iterations}, отправок ${r.submits}${r.rebuilt ? `, матрица грубой сетки построена (подготовка ${r.prepMs.toFixed(1)} мс)` : ''}; CPU ${cpuMs.toFixed(1)} мс, видеокарта с чтением ${r.ms.toFixed(1)} мс — ${ok ? 'да' : 'НЕТ'}`);
       }
     }
   }

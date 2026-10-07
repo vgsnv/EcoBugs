@@ -29,7 +29,7 @@ import { cellInsideDish, dishOf } from './dish.ts';
 import { freeRegions, isBlocked, type PartitionLayout } from './partitions.ts';
 import { Rng, deriveSeed, hash3 } from './prng.ts';
 import { multiplierForLevel } from './viscosity.ts';
-import { pushFieldTask, type PushAccelerator, type PushField } from './push.ts';
+import { pushFieldTask, type PushAccelerator, type PushBudget, type PushField } from './push.ts';
 import { phase } from './profile.ts';
 
 /**
@@ -206,6 +206,8 @@ interface MineralWork {
   ground: Float64Array;
   groundChanges: GroundChanges;
   processes: MineralProcesses;
+  /** Сколько снимков принято с видеокарты и на каком из них искали воронки. */
+  snapshotStamp: number; scannedStamp: number;
 }
 const workspaces = new WeakMap<MineralState, MineralWork>();
 const mobilities = new WeakMap<Float32Array, Float64Array>();
@@ -221,7 +223,7 @@ function workspace(m: MineralState): MineralWork {
       speed: new Float32Array(n), flowX: new Float32Array(n), flowY: new Float32Array(n),
       tvx: new Float32Array(n), tvy: new Float32Array(n), pushX: new Float32Array(n), pushY: new Float32Array(n),
       holes: new Uint8Array(n), seen: new Uint8Array(n), ground: new Float64Array(n),
-      groundChanges: { lift: new Float32Array(n), net: new Float32Array(n), tectonic: new Float32Array(n), steps: 0 },
+      groundChanges: { lift: new Float32Array(n), net: new Float32Array(n), tectonic: new Float32Array(n), steps: 0 }, snapshotStamp: 0, scannedStamp: -1,
       processes: { step: 0, vx: new Float32Array(n), vy: new Float32Array(n),
         erosion: new Float32Array(n), settling: new Float32Array(n), sinking: new Float32Array(n) },
     };
@@ -715,7 +717,10 @@ export function* updateMineralTask(m: MineralState, params: WorldParams, drift: 
   phase('вулканы и воронки');
   startEruptions(m, params, terrain, step);
   // Воронки и течения от вулканов и воронок — по состоянию на начало промежутка.
-  yield* updateFunnels(m, params, terrain, P);
+  const work0 = workspace(m);
+  const scan = !resident || work0.snapshotStamp !== work0.scannedStamp;
+  work0.scannedStamp = work0.snapshotStamp;
+  yield* updateFunnels(m, params, terrain, P, scan);
   phase('течения вулканов и воронок');
   const pushes = yield* pushSources(m, params, terrain, step - P, step, accel?.push);
   const n = cols * rows;
@@ -850,6 +855,7 @@ export function applySnapshot(m: MineralState, terrain: TerrainState, sums: { su
   m.depths += sums.sunk + sums.drowned;
   w.exchanges.funnelSunk += sums.sunk;
   terrain.debt += sums.debt;
+  w.snapshotStamp++;
   m.version++;
 }
 
@@ -1288,17 +1294,19 @@ function funnelThresholds(params: WorldParams, area: number): { core: number; li
   return { core, limit: core * (FUNNEL_SHAPE / FUNNEL_DEPOSIT) };
 }
 
-function* updateFunnels(m: MineralState, params: WorldParams, terrain: TerrainState, P: number): Calculation {
+function* updateFunnels(m: MineralState, params: WorldParams, terrain: TerrainState, P: number, scan: boolean): Calculation {
   const { cols, rows, cell, blocked } = m;
   const area = cell * cell;
   const { core, limit } = funnelThresholds(params, area);
   const dep = terrain.deposits;
   const ramp = (P / FUNNEL_RAMP);
+  // Решения — по залежам; пока снимок с видеокарты не обновился, залежи те же — выбор и поиск не повторяем (сила воронки растёт каждое обновление).
   for (const f of m.funnels) {
-    f.forming = basinCells(m, f).some((k) => dep[k] > core);
+    if (scan) f.forming = basinCells(m, f).some((k) => dep[k] > core);
     f.strength = Math.max(0, Math.min(1, f.strength + (f.forming ? ramp : -ramp)));
   }
   m.funnels = m.funnels.filter((f) => f.forming || f.strength > 0);
+  if (!scan) return;
   // Рождение новых.
   const seen = workspace(m).seen;
   seen.fill(0);
@@ -1358,16 +1366,18 @@ function* updateFunnels(m: MineralState, params: WorldParams, terrain: TerrainSt
 /** Источники толчка и тяги за промежуток: единичные поля (решаются при нужде) и их сила. */
 function* pushSources(m: MineralState, params: WorldParams, terrain: TerrainState, from: number, to: number, accel?: PushAccelerator): Calculation<PushSource[]> {
   const out: PushSource[] = [];
+  // После смены местности поля источников обновляются по одному за обновление.
+  const budget: PushBudget = { refresh: 1 };
   for (const vol of m.volcanoes.filter((v) => v.stage === 'erupting')) {
     const q = ventPushAverage(params, vol, from, to);
     if (q <= 0) continue;
     const vent = Math.floor(vol.y / m.cell) * m.cols + Math.floor(vol.x / m.cell);
-    out.push({ field: yield* pushFieldTask(m, terrain.applied, `v${vent}`, [vent], accel), strength: q });
+    out.push({ field: yield* pushFieldTask(m, terrain.applied, `v${vent}`, [vent], accel, budget), strength: q });
   }
   // Тяга воронки — сила × единичное течение её отверстия (место и форма постоянны — кеш по номеру).
   for (const f of m.funnels) {
     if (f.strength <= 0) continue;
-    out.push({ field: yield* pushFieldTask(m, terrain.applied, `f${f.id}`, f.cells, accel), strength: -FUNNEL_DRAW * Math.PI * f.reach * f.reach * f.strength });
+    out.push({ field: yield* pushFieldTask(m, terrain.applied, `f${f.id}`, f.cells, accel, budget), strength: -FUNNEL_DRAW * Math.PI * f.reach * f.reach * f.strength });
   }
   return out;
 }

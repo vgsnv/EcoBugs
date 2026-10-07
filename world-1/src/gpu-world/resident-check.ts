@@ -6,7 +6,7 @@
  * `mode=sync` — то же с ожиданием после каждого обновления (прежний путь) для сравнения.
  */
 import {
-  applySnapshot, createWorld, groundTotal, makeParams, mineralInDeposits, mineralInMedium, MINERAL_PERIOD, snapshotTargets, stepWorld, stepWorldTask,
+  applySnapshot, createWorld, setPhaseHook, groundTotal, makeParams, mineralInDeposits, mineralInMedium, MINERAL_PERIOD, snapshotTargets, stepWorld, stepWorldTask,
   type DriftAccelerator, type MineralAccelerator, type World,
 } from '../core/index.ts';
 import { GpuWorld, mineralTotal } from './engine.ts';
@@ -18,6 +18,10 @@ const seeds = (q.get('seeds') ?? '1,2,3').split(',').map(Number);
 const from = Number(q.get('from') ?? 0);
 const updates = Number(q.get('updates') ?? 2000);
 const mode = q.get('mode') ?? 'both';
+/** profile=1 — время по этапам и отдельно после смены местности (каждые 10 000 шагов). */
+const profile = q.get('profile') === '1';
+const spent = new Map<string, number>();
+let phaseNow: string | null = null, phaseSince = 0;
 const results: { seed: number; mode: string; ok: boolean }[] = [];
 const state = { results, done: false };
 (window as unknown as { residentCheck: typeof state }).residentCheck = state;
@@ -34,7 +38,11 @@ async function main(): Promise<void> {
     while (!done) yield;
     return value as T;
   };
-  const driftAccel: DriftAccelerator = { *field(st) { return (yield* wait(gpu.drift.field(st))).field; } };
+  const driftAccel: DriftAccelerator = {
+    begin: (st) => gpu.drift.field(st).then((r) => r.field),
+    *join(job) { return yield* wait(job); },
+    *field(st) { return (yield* wait(gpu.drift.field(st))).field; },
+  };
   const gm = gpu.mineral;
   log(`Без ожидания против CPU: с шага ${from} ещё ${updates} обновлений (${updates * MINERAL_PERIOD} шагов)`);
 
@@ -70,12 +78,30 @@ async function main(): Promise<void> {
           },
           push: { *solve(sys) { return (yield* wait(gpu.push.solve(sys))).field; } },
         };
+        if (profile) setPhaseHook((name) => {
+          const now = performance.now();
+          if (phaseNow) spent.set(phaseNow, (spent.get(phaseNow) ?? 0) + now - phaseSince);
+          phaseNow = name; phaseSince = now;
+        });
+        const bucket = { after: { ms: 0, steps: 0 }, other: { ms: 0, steps: 0 } };
+        const worst: { step: number; ms: number }[] = [];
         while (b.step < end) {
           fold(b);
           b.drift.accelerator = driftAccel;
+          const s0 = performance.now(), at = b.step;
           const task = stepWorldTask(b, accel);
           while (!task.next().done) if (pending) { await pending; pending = null; }
           if (b.step % MINERAL_PERIOD === 0) await yieldToCallbacks();
+          const ms = performance.now() - s0, near = (at % 10000) < 300 && at >= 10000;
+          (near ? bucket.after : bucket.other).ms += ms; (near ? bucket.after : bucket.other).steps++;
+          if (ms > 5) worst.push({ step: at, ms });
+        }
+        if (profile) {
+          setPhaseHook(null);
+          const total = [...spent.values()].reduce((x, y) => x + y, 0);
+          log(`  время по этапам (мс на обновление):\n` + [...spent].sort((x, y) => y[1] - x[1]).slice(0, 12).map(([k, v]) => `    ${(v / updates).toFixed(3).padStart(8)}  ${k}`).join('\n') + `\n    ${(total / updates).toFixed(3).padStart(8)}  всего`);
+          const per = (x: { ms: number; steps: number }) => x.steps ? (x.ms / x.steps).toFixed(3) : '-';
+          log(`  шаг в 300 шагах после смены местности: ${per(bucket.after)} мс (шагов ${bucket.after.steps}, всего ${bucket.after.ms.toFixed(0)} мс), остальной: ${per(bucket.other)} мс (всего ${bucket.other.ms.toFixed(0)} мс); долгие шаги (>5 мс): ${worst.length}, сумма ${worst.reduce((x, y) => x + y.ms, 0).toFixed(0)} мс, самые долгие: ${worst.sort((x, y) => y.ms - x.ms).slice(0, 6).map((x) => `${x.step}:${x.ms.toFixed(0)}`).join(' ')}`);
         }
         const flushed = await gm.flush(snapshotTargets(b.mineral, b.terrain));
         if (flushed) { if (!flushed.exact) { inexact++; firstBad ??= `завершение: ${flushed.mismatch}`; } else applySnapshot(b.mineral, b.terrain, flushed); }

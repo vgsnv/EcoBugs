@@ -266,8 +266,8 @@ function* solve(fine: Level, source: Float64Array): Calculation<Float64Array> {
  * невязке (скорость течений отличается от точного решения меньше чем на 0,5%)
  * и предел шагов на случай, если сходимость не наступит.
  */
-export const DRIFT_COARSEST = 26;
-export const DRIFT_COARSEST_SWEEPS = 40;
+export const DRIFT_COARSEST = 13;
+export const DRIFT_COARSEST_SWEEPS = 20;
 export const DRIFT_TOLERANCE = 0.01;
 export const DRIFT_MAX_ITERATIONS = 60;
 let lastIterations = 0;
@@ -418,7 +418,16 @@ export interface DriftStage {
 }
 
 /** Ускоритель поля течений: поле или null — тогда считает CPU. */
-export interface DriftAccelerator { field(s: DriftStage): Calculation<DriftField | null> }
+export interface DriftAccelerator {
+  field(s: DriftStage): Calculation<DriftField | null>;
+  /** Начать расчёт поля заранее, не дожидаясь; null — ускорителя нет. Результат — `join`. */
+  begin?(s: DriftStage): DriftJob | null;
+  /** Дождаться начатого расчёта: поле или null — тогда считает CPU. */
+  join?(job: DriftJob): Calculation<DriftField | null>;
+}
+export type DriftJob = Promise<DriftField | null>;
+/** С какой доли пути между узлами начинать считать следующий узел заранее. */
+const PREFETCH_FROM = 0.3;
 
 function driftStage(world: Sources, t: number, ground: Ground): DriftStage | null {
   const cols = Math.ceil(world.partitions.dish.width / DRIFT_CELL), rows = Math.ceil(world.partitions.dish.height / DRIFT_CELL);
@@ -441,6 +450,8 @@ function driftStage(world: Sources, t: number, ground: Ground): DriftStage | nul
 export class Drift {
   private readonly world: Sources;
   private readonly cache = new Map<number, DriftField>();
+  /** Начатые заранее расчёты узлов (по номеру узла). */
+  private readonly jobs = new Map<number, DriftJob>();
   private ground: Ground | null = null;
   /** Ускоритель — только для генераторов (`nodesTask`): синхронные `nodes`, `at` всегда считают на CPU. */
   accelerator: DriftAccelerator | null = null;
@@ -459,17 +470,25 @@ export class Drift {
     let f = this.cache.get(k);
     if (!f) {
       this.ground ??= yield* groundOf(this.world, Math.ceil(this.world.partitions.dish.width / DRIFT_CELL), Math.ceil(this.world.partitions.dish.height / DRIFT_CELL), DRIFT_CELL);
-      const stage = accelerate && this.accelerator ? driftStage(this.world, k * DRIFT_PERIOD, this.ground) : null;
-      f = (stage && (yield* this.accelerator!.field(stage))) || (yield* computeDriftFieldTask(this.world, k * DRIFT_PERIOD, this.ground));
+      const job = accelerate ? this.jobs.get(k) : undefined;
+      if (job) { this.jobs.delete(k); f = (yield* this.accelerator!.join!(job)) ?? undefined; }
+      if (!f) {
+        const stage = accelerate && this.accelerator ? driftStage(this.world, k * DRIFT_PERIOD, this.ground) : null;
+        f = (stage && (yield* this.accelerator!.field(stage))) || (yield* computeDriftFieldTask(this.world, k * DRIFT_PERIOD, this.ground));
+      }
       this.cache.set(k, f);
       while (this.cache.size > 3) this.cache.delete(this.cache.keys().next().value!);
     }
     return f;
   }
 
-  /** Местность изменилась: забыть поля и неизменное (сопротивление), пересчитать заново. */
-  reset(): void {
-    this.cache.clear();
+  /**
+   * Местность изменилась: забыть неизменное (сопротивление) — следующее поле считается по новой местности.
+   * `keepNodes` — уже посчитанные узлы остаются в работе до естественной замены (через два шага узлов):
+   * местность меняется медленно, а пересчёт обоих узлов с матрицей грубой сетки останавливал мир на десятки миллисекунд.
+   */
+  reset(keepNodes = false): void {
+    if (!keepNodes) { this.cache.clear(); this.jobs.clear(); }
     this.ground = null;
   }
 
@@ -498,7 +517,14 @@ export class Drift {
     const k = Math.floor(t / DRIFT_PERIOD);
     const a = yield* this.nodeTask(k, accelerate);
     const b = yield* this.nodeTask(k + 1, accelerate);
-    return { a, b, u: t / DRIFT_PERIOD - k };
+    const u = t / DRIFT_PERIOD - k;
+    // Следующий узел — заранее, пока мир идёт: к нужному часу он уже готов, мир не ждёт.
+    if (accelerate && u >= PREFETCH_FROM && this.ground && this.accelerator?.begin && !this.cache.has(k + 2) && !this.jobs.has(k + 2)) {
+      const stage = driftStage(this.world, (k + 2) * DRIFT_PERIOD, this.ground);
+      const job = stage && this.accelerator.begin(stage);
+      if (job) this.jobs.set(k + 2, job);
+    }
+    return { a, b, u };
   }
 
   /** Снос в точке (x, y) в шаге t: смещение за шаг, единиц мира. */

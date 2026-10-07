@@ -304,6 +304,8 @@ export interface DriftRun {
   ms: number;
   /** Матрица самой грубой сетки строилась (сменилась местность), мс работы видеокарты вместе с полем. */
   rebuilt: boolean;
+  /** Подготовка на CPU до отправки (уровни решателя, буферы), мс. */
+  prepMs: number;
 }
 
 export class GpuDrift {
@@ -478,13 +480,21 @@ export class GpuDrift {
     return { vel: new Float32Array(data, 0, n * 2), scal: new Float32Array(data, n * 8, 8) };
   }
 
-  /** Поле течений в шаге `s.t` — как `computeDriftFieldTask`. */
-  async field(s: DriftStage): Promise<DriftRun> {
+  private chain: Promise<unknown> = Promise.resolve();
+  /** Поле течений в шаге `s.t` — как `computeDriftFieldTask`. Расчёты идут по очереди: у решателя одни буферы. */
+  field(s: DriftStage): Promise<DriftRun> {
+    const run = this.chain.then(() => this.fieldNow(s));
+    this.chain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async fieldNow(s: DriftStage): Promise<DriftRun> {
     const t0 = performance.now();
     const n = s.cols * s.rows, q = this.device.queue;
     this.device.pushErrorScope('validation');
     let enc = this.device.createCommandEncoder();
     const rebuilt = this.ensureGround(s, enc);
+    const prepMs = performance.now() - t0;
     const lu = s.light;
     const ub = new ArrayBuffer(64), u = new Uint32Array(ub), f = new Float32Array(ub);
     u.set([s.cols, s.rows, n, lu.count]);
@@ -529,7 +539,27 @@ export class GpuDrift {
     const copy = this.device.createCommandEncoder();
     copy.copyBufferToBuffer(this.buf.vel, 0, node, 0, n * 8);
     this.device.queue.submit([copy.finish()]);
-    return { field, iterations, submits, ms: performance.now() - t0, rebuilt };
+    return { field, iterations, submits, ms: performance.now() - t0, rebuilt, prepMs };
+  }
+
+  /** Для замеров: пересобрать землю и матрицу отдельной отправкой; мс до готовности видеокарты — вместе и сама матрица. */
+  async timeRebuild(s: DriftStage): Promise<{ all: number; matrix: number }> {
+    this.fine = null;
+    const t0 = performance.now();
+    let enc = this.device.createCommandEncoder();
+    this.ensureGround(s, enc);
+    const t1 = performance.now();
+    this.device.queue.submit([enc.finish()]);
+    await this.device.queue.onSubmittedWorkDone();
+    const t2 = performance.now();
+    // Вторая такая же матрица: без создания буферов.
+    enc = this.device.createCommandEncoder();
+    const p = enc.beginComputePass();
+    this.run(p, 'buildCoarse', Math.ceil(this.levels[this.levels.length - 1].cols * this.levels[this.levels.length - 1].rows / 64), 0, 0);
+    p.end();
+    this.device.queue.submit([enc.finish()]);
+    await this.device.queue.onSubmittedWorkDone();
+    return { all: t2 - t0, matrix: performance.now() - t2 + 0 * (t1 - t0) };
   }
 
   /** Отсеков в текущей местности (для отладки). */
