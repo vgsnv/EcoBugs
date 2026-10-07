@@ -128,7 +128,7 @@ async function loadWorld(file: File): Promise<void> {
 
 (window as unknown as { simRenderer: unknown }).simRenderer = renderer;
 const maxDpr = Number(new URLSearchParams(location.search).get('dpr'));
-if (maxDpr > 0) { Camera.maxDpr = maxDpr; renderer.resizeKeepingView(); }
+if (maxDpr > 0 && maxDpr !== Camera.maxDpr) { Camera.maxDpr = maxDpr; renderer.resizeKeepingView(); }
 const fieldResolution = Number(new URLSearchParams(location.search).get('res'));
 if (fieldResolution > 0) renderer.setFieldResolution(fieldResolution);
 
