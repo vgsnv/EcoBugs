@@ -112,11 +112,14 @@ export class SuspensionLayer {
       const o = n * STRIDE;
       p[o + 2] += real;
       if (p[o + 2] >= p[o + 3]) { this.spawn(n); continue; }
-      const vx = sample(stream, p[o], p[o + 1], 0), vy = sample(stream, p[o], p[o + 1], 1);
-      const speed = Math.hypot(vx, vy);
+      sample3(stream, p[o], p[o + 1]);
+      const vx = SAMPLE[0], vy = SAMPLE[1];
+      const speed = Math.sqrt(vx * vx + vy * vy);
+      let wet = -1;
       if (dt > 0) {
         const nx = p[o] + vx * SUSPENSION_GAIN * dt, ny = p[o + 1] + vy * SUSPENSION_GAIN * dt;
-        if (this.water(nx, ny) <= 0) { this.spawn(n); continue; }
+        wet = this.water(nx, ny);
+        if (wet <= 0) { this.spawn(n); continue; }
         p[o] = nx; p[o + 1] = ny;
       }
       // Песок держится, пока течение его несёт, и гаснет там, где грунт ложится.
@@ -130,9 +133,11 @@ export class SuspensionLayer {
       if (x < x0 - 10 || x > x1 + 10 || y < y0 - 10 || y > y1 + 10) continue;
       const f = p[o + 2] / p[o + 3];
       const life = Math.min(1, f / SUSPENSION_FADE, (1 - f) / SUSPENSION_FADE);
-      const strength = sample(stream, x, y, 2);
+      if (dt > 0) sample3(stream, x, y);
+      const strength = SAMPLE[2];
       const sand = p[o + 7];
-      const alpha = life * this.water(x, y) * (sand >= 0 ? Math.min(1, 0.3 + sand) : view === 'water' ? 0.4 + 0.6 * strength : strength) * 0.8;
+      if (wet < 0) wet = this.water(x, y);
+      const alpha = life * wet * (sand >= 0 ? Math.min(1, 0.3 + sand) : view === 'water' ? 0.4 + 0.6 * strength : strength) * 0.8;
       if (alpha <= 0.01) continue;
       // Длина — по экранной скорости частицы.
       const screenSpeed = speed * SUSPENSION_GAIN * pxPerUnit;
@@ -145,6 +150,19 @@ export class SuspensionLayer {
     }
     return out.subarray(0, shown * SPRITE_FLOATS);
   }
+}
+
+/** Скорость x, y и сила поля течений в точке за один билинейный разбор (в `SAMPLE`). */
+const SAMPLE = new Float32Array(3);
+function sample3(s: StreamField, x: number, y: number): void {
+  const fx = Math.min(s.cols - 1, Math.max(0, x / s.step - 0.5)), fy = Math.min(s.rows - 1, Math.max(0, y / s.step - 0.5));
+  const i0 = Math.floor(fx), j0 = Math.floor(fy), i1 = Math.min(s.cols - 1, i0 + 1), j1 = Math.min(s.rows - 1, j0 + 1);
+  const u = fx - i0, v = fy - j0, d = s.data;
+  const a = (j0 * s.cols + i0) * 4, b = (j0 * s.cols + i1) * 4, c = (j1 * s.cols + i0) * 4, e = (j1 * s.cols + i1) * 4;
+  const w00 = (1 - u) * (1 - v), w10 = u * (1 - v), w01 = (1 - u) * v, w11 = u * v;
+  SAMPLE[0] = d[a] * w00 + d[b] * w10 + d[c] * w01 + d[e] * w11;
+  SAMPLE[1] = d[a + 1] * w00 + d[b + 1] * w10 + d[c + 1] * w01 + d[e + 1] * w11;
+  SAMPLE[2] = d[a + 2] * w00 + d[b + 2] * w10 + d[c + 2] * w01 + d[e + 2] * w11;
 }
 
 /** Значение `c` (0 — скорость x, 1 — y, 2 — сила) поля течений в точке, билинейно по центрам клеток. */

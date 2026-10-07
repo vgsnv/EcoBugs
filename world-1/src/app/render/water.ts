@@ -33,6 +33,11 @@ const RIPPLE_MAX_RATE = 3;
 /** Пересчёт маски пены не чаще, мс (её вид — фактура 60 единиц, ровная часть 0,35, сила 0,4 — в шейдере полей). */
 const FOAM_REBUILD_MS = 300;
 
+/** Сила течения 0…1 как min(1, ln(1 + 4x/ref) / ln 9), табличная: x/ref от 0 до STRENGTH_TABLE_MAX (там уже 1). */
+const STRENGTH_TABLE_MAX = 2;
+const STRENGTH_TABLE_SIZE = 2049;
+const STRENGTH_TABLE = Float32Array.from({ length: STRENGTH_TABLE_SIZE }, (_, i) => Math.min(1, Math.log(1 + 4 * (i * STRENGTH_TABLE_MAX / (STRENGTH_TABLE_SIZE - 1))) / Math.log(9)));
+
 /** Бесшовная текстура ряби: тонкая светлая сетка там, где шум близок к нулю. */
 let rippleTexture: HTMLCanvasElement | null = null;
 function ripple(): HTMLCanvasElement {
@@ -172,21 +177,26 @@ export class WaterLayer {
     const perMean = m.cell * m.cell * w.params.mineralStock;
     const layer = MINERAL_LAYER * MINERAL_MOBILITY * MINERAL_PERIOD * m.cell * m.cell;
     const level = w.terrain.applied;
-    const strength = (x: number) => Math.min(1, Math.log(1 + 4 * x / ref) / Math.log(9));
     const now = this.now;
+    const mineralView = view === 'mineral';
+    const field = m.field, blocked = m.blocked, vxA = a.vx, vyA = a.vy, vxB = b.vx, vyB = b.vy;
+    const pvx = push ? push.vx : null, pvy = push ? push.vy : null;
     for (let k = 0; k < n; k++) {
       const o = k * 4;
-      if (!same || m.blocked[k]) { now[o] = now[o + 1] = now[o + 2] = now[o + 3] = 0; continue; }
+      if (!same || blocked[k]) { now[o] = now[o + 1] = now[o + 2] = now[o + 3] = 0; continue; }
       // Снос за шаг → единиц мира в секунду модели.
-      const vx = a.vx[k] + (b.vx[k] - a.vx[k]) * u + (push ? push.vx[k] : 0);
-      const vy = a.vy[k] + (b.vy[k] - a.vy[k]) * u + (push ? push.vy[k] : 0);
+      const vx = vxA[k] + (vxB[k] - vxA[k]) * u + (pvx ? pvx[k] : 0);
+      const vy = vyA[k] + (vyB[k] - vyA[k]) * u + (pvy ? pvy[k] : 0);
       const step = Math.sqrt(vx * vx + vy * vy);
-      const amount = m.field[k];
-      const mob = multiplierForLevel(level[k]);
-      const share = amount > 0 ? Math.min(1, (layer * step) / (mob * mob) / amount) : 0;
       now[o] = vx * 10; now[o + 1] = vy * 10;
       now[o + 2] = step * 10;
-      now[o + 3] = (amount / perMean) * share * step * 10;
+      // Доля уносимого минерала нужна только виду «минерал»: в виде «вода» её не считаем.
+      if (mineralView) {
+        const amount = field[k];
+        const mob = multiplierForLevel(level[k]);
+        const share = amount > 0 ? Math.min(1, (layer * step) / (mob * mob) / amount) : 0;
+        now[o + 3] = (amount / perMean) * share * step * 10;
+      } else now[o + 3] = 0;
     }
     // Скользящее среднее по реальному времени (на паузе стоит); первый раз — сразу текущее.
     const dt = this.streamTime === null ? Infinity : Math.max(0, frame.animTime - this.streamTime);
@@ -204,7 +214,14 @@ export class WaterLayer {
       this.mineralRef = this.mineralRef > 0 ? this.mineralRef + (high - this.mineralRef) * k : high;
     }
     const mineralRef = Math.max(this.mineralRef, ref * 1e-4);
-    const strengthMineral = (x: number) => Math.min(1, Math.log(1 + 4 * x / mineralRef) / Math.log(9));
+    // Сила — по логарифму от мерила: таблица вместо логарифма на каждую клетку (30 тысяч за кадр).
+    const perUnit = (STRENGTH_TABLE_SIZE - 1) / STRENGTH_TABLE_MAX / (view === 'water' ? ref : mineralRef);
+    const strengthAt = (x: number) => {
+      const t = x * perUnit;
+      if (t >= STRENGTH_TABLE_SIZE - 1) return 1;
+      const i = Math.floor(t), f = t - i;
+      return STRENGTH_TABLE[i] + (STRENGTH_TABLE[i + 1] - STRENGTH_TABLE[i]) * f;
+    };
     // Поле для взвеси: мгновенное или среднее; у минерала направление — по его потоку.
     const avg = this.averageMix();
     const out = this.stream;
@@ -215,7 +232,7 @@ export class WaterLayer {
       out[o + 1] = ny + (my - ny) * avg;
       const sn = view === 'water' ? now[o + 2] : now[o + 3];
       const sm = view === 'water' ? mean[o + 2] : mean[o + 3];
-      out[o + 2] = (view === 'water' ? strength : strengthMineral)(sn + (sm - sn) * avg);
+      out[o + 2] = strengthAt(sn + (sm - sn) * avg);
       out[o + 3] = 0;
     }
     this.streamVersion++;

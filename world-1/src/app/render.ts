@@ -277,9 +277,12 @@ export class WorldRenderer {
     // Мерило силы — сильное течение при текущем солнце, единиц мира в секунду модели.
     const ref = DRIFT_REFERENCE * 10 * Math.max(0.05, sunAt(w.light, w.step));
     const stream = this.water.streamField(frame, this.streamView, ref);
+    this.mark('течения: поле потока (CPU)');
+    const particles = this.suspension.update(frame, dt, stream, this.streamView, (x, y) => this.ground.liftAt(x, y));
+    this.mark('течения: частицы взвеси (CPU)');
     return {
       trailMix: this.water.trailMix(),
-      particles: this.suspension.update(frame, dt, stream, this.streamView, (x, y) => this.ground.liftAt(x, y)),
+      particles,
       stream,
       averageMix: this.water.averageMix(),
       view: this.streamView,
