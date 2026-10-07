@@ -160,11 +160,25 @@ export class WorldRenderer {
   // ── Кадр ──────────────────────────────────────────────────────────────
 
   /** Кадр; `animTime` — секунды анимации бликов (стоит на паузе). */
+  /** Замер кадра (для диагностики): время участков, мс на кадр; `syncEach` — ждать видеокарту после каждого участка. */
+  profile: { parts: Record<string, number>; frames: number; syncEach: boolean } | null = null;
+  private profileAt = 0;
+  private mark(name: string): void {
+    const p = this.profile;
+    if (!p) return;
+    if (p.syncEach) { this.field.sync(); this.ctx.getImageData(0, 0, 1, 1); }
+    const now = performance.now();
+    p.parts[name] = (p.parts[name] ?? 0) + now - this.profileAt;
+    this.profileAt = performance.now();
+  }
+
   draw(animTime = 0, flowStep = this.world.step): void {
     const camera = this.camera;
     const key = `${animTime}:${flowStep}:${this.world.step}:${this.world.mineral.version}:${this.world.viscosity.version}:${camera.zoom}:${camera.cx}:${camera.cy}:${this.canvas.width}:${this.canvas.height}:${this.showProcesses}:${this.streamView}`;
     if (key === this.frameKey) return;
     this.frameKey = key;
+    this.profileAt = performance.now();
+    if (this.profile) this.profile.frames++;
     const w = this.world;
     const frame: Frame = {
       ctx: this.ctx, canvas: this.canvas, camera, world: w, animTime, flowStep,
@@ -181,12 +195,16 @@ export class WorldRenderer {
     }
     const fresh = this.terrain.refresh();
     if (fresh) this.water.buildSparkles(w, fresh.level, fresh.deposits);
+    this.mark('местность и блёстки');
 
     // Нижний холст: поля.
     const light = this.light.update(frame);
+    this.mark('свет');
     const flows = this.flows(frame);
+    this.mark('течения: взвесь и следы (CPU)');
     this.field.begin(frame, w.partitions.thickness);
     const mineral = this.mineral.field(w);
+    this.mark('поле минерала (подготовка)');
     this.field.fields({
       light: light.field,
       mineral,
@@ -200,21 +218,28 @@ export class WorldRenderer {
       rippleMode: this.showProcesses ? 1 : 0,
       ...flows,
     });
+    this.mark('поля: общий проход видеокарты');
     this.water.drawSparkles(frame, this.field);
+    this.mark('блёстки');
 
     // Верхний холст: объекты; свечения и отверстия воронок копятся для нижнего.
     ctx.setTransform(...camera.view());
     this.mineral.draw(frame);
+    this.mark('минерал: объекты (2D)');
     this.sources.drawEruptions(frame, this.field);
+    this.mark('извержения');
     // Жерла — отверстия в недра: поверх течений, ничто не проходит сквозь них.
     this.sources.drawVents(frame, this.field);
+    this.mark('жерла');
     if (this.showProcesses) {
       this.processLayer.draw(frame, this.processes, {
         rates: this.ground.rates, lift: (x, y) => this.ground.liftAt(x, y), movements: this.ground.movements(),
       });
     }
     this.walls.draw(frame);
+    this.mark('перегородки');
     this.glassLight.draw(frame, this.field);
+    this.mark('свет сквозь стекло');
     if (this.probePoint) {
       const { x, y } = this.probePoint;
       ctx.save();
@@ -225,7 +250,13 @@ export class WorldRenderer {
       ctx.restore();
     }
     this.rulers.draw(ctx, w.dish, camera.zoom, camera.cx, camera.cy, camera.dpr);
+    this.mark('линейки');
     this.field.finish();
+    this.mark('сборка кадра (отправка)');
+    if (this.profile && !this.profile.syncEach) {
+      this.field.sync(); this.mark('ожидание видеокарты (GL)');
+      ctx.getImageData(0, 0, 1, 1); this.mark('ожидание холста 2D');
+    }
   }
 
   /**
